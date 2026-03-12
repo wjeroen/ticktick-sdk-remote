@@ -94,11 +94,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from typing import Any, AsyncIterator
 
 from mcp.server.fastmcp import FastMCP, Context
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from ticktick_sdk.client import TickTickClient
 from ticktick_sdk.settings import get_settings
@@ -273,7 +276,16 @@ async def lifespan(mcp: FastMCP) -> AsyncIterator[dict[str, Any]]:
 mcp = FastMCP(
     "ticktick_sdk",
     lifespan=lifespan,
+    host="0.0.0.0",
+    port=int(os.environ.get("PORT", "8000")),
+    streamable_http_path="/mcp",
 )
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request: Request) -> JSONResponse:
+    """Health check endpoint for Railway and other deployment platforms."""
+    return JSONResponse({"status": "ok"})
 
 
 def get_client(ctx: Context) -> TickTickClient:
@@ -2796,7 +2808,57 @@ def _apply_tool_filtering():
 def main():
     """Main entry point for the TickTick MCP server."""
     _apply_tool_filtering()
-    mcp.run()
+
+    bearer_token = os.environ.get("MCP_BEARER_TOKEN")
+
+    import uvicorn
+    from starlette.types import ASGIApp, Receive, Scope, Send
+
+    starlette_app: ASGIApp = mcp.streamable_http_app()
+
+    if bearer_token:
+        logger.info("Bearer token authentication enabled")
+
+        class BearerTokenMiddleware:
+            """Simple ASGI middleware that checks for a static bearer token."""
+
+            def __init__(self, app: ASGIApp, token: str):
+                self.app = app
+                self.token = token
+
+            async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+                if scope["type"] == "http":
+                    path = scope.get("path", "")
+                    # Allow health check without auth
+                    if path == "/health":
+                        await self.app(scope, receive, send)
+                        return
+                    headers = dict(scope.get("headers", []))
+                    auth = headers.get(b"authorization", b"").decode()
+                    if auth != f"Bearer {self.token}":
+                        response = JSONResponse(
+                            {"error": "unauthorized"}, status_code=401
+                        )
+                        await response(scope, receive, send)
+                        return
+                await self.app(scope, receive, send)
+
+        starlette_app = BearerTokenMiddleware(starlette_app, bearer_token)
+
+    port = int(os.environ.get("PORT", "8000"))
+    logger.info("Starting TickTick MCP server on 0.0.0.0:%d/mcp", port)
+
+    config = uvicorn.Config(
+        starlette_app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+    )
+    server = uvicorn.Server(config)
+
+    import anyio
+
+    anyio.run(server.serve)
 
 
 if __name__ == "__main__":

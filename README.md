@@ -37,6 +37,7 @@ Includes full support for [Dida365 (滴答清单)](https://dida365.com) as well.
 - [API Reference](#api-reference)
 - [TickTick API Quirks](#important-ticktick-api-quirks)
 - [Environment Variables](#environment-variables)
+- [Remote Deployment (Railway)](#remote-deployment-railway)
 - [Running Tests](#running-tests)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
@@ -933,6 +934,65 @@ The inbox is a special project that cannot be deleted. Get its ID via `await cli
 | `TICKTICK_HOST` | No | API host: `ticktick.com` (default) or `dida365.com` (Chinese) |
 | `TICKTICK_TIMEOUT` | No | Request timeout in seconds (default: `30`) |
 | `TICKTICK_DEVICE_ID` | No | Device ID for V2 API (auto-generated) |
+| `MCP_BEARER_TOKEN` | No | Bearer token for remote server authentication |
+| `PORT` | No | Server port (default: `8000`, Railway sets this automatically) |
+
+---
+
+## Remote Deployment (Railway)
+
+This fork is configured for remote deployment as an HTTP MCP server, so you can use it from Claude.ai and Claude Mobile (iOS/Android) without running anything locally.
+
+### How It Works
+
+Instead of stdio (local only), the server uses **streamable-http** transport. It listens on a URL like `https://your-app.up.railway.app/mcp` that Claude can connect to as a custom connector.
+
+A bearer token protects the server so only you can access it.
+
+### Deploy to Railway
+
+1. **Create a Railway account** at [railway.app](https://railway.app)
+2. **Connect your GitHub repo** (this fork) to a new Railway project
+3. **Add environment variables** in Railway's dashboard:
+
+   | Variable | Value |
+   |----------|-------|
+   | `TICKTICK_CLIENT_ID` | Your OAuth2 client ID |
+   | `TICKTICK_CLIENT_SECRET` | Your OAuth2 client secret |
+   | `TICKTICK_ACCESS_TOKEN` | Your OAuth2 access token |
+   | `TICKTICK_USERNAME` | Your TickTick email |
+   | `TICKTICK_PASSWORD` | Your TickTick password |
+   | `MCP_BEARER_TOKEN` | A long random secret string (you make this up) |
+
+4. **Deploy** — Railway auto-detects Python and uses the `Procfile`
+5. **Note your URL** — something like `https://your-app.up.railway.app`
+
+### Add to Claude.ai
+
+1. Go to **claude.ai** > **Settings** > **Connectors**
+2. Click **"Add custom connector"**
+3. Enter URL: `https://your-app.up.railway.app/mcp`
+4. If using bearer token: add your `MCP_BEARER_TOKEN` value in the auth settings
+5. Click **"Add"**
+
+### Use on Android/iOS
+
+Once added via claude.ai, the connector automatically appears in the Claude mobile app. You cannot add new connectors from mobile — only use ones already configured on the web.
+
+### Health Check
+
+The server exposes a `/health` endpoint for monitoring:
+
+```bash
+curl https://your-app.up.railway.app/health
+# {"status": "ok"}
+```
+
+### Test with MCP Inspector
+
+```bash
+npx @anthropic-ai/inspector https://your-app.up.railway.app/mcp
+```
 
 ---
 
