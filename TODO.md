@@ -12,6 +12,10 @@
 
 ## Completed Recently ✅
 
+- [x] Fix timezone: all dates now convert via TICKTICK_TIMEZONE env var (Europe/Brussels etc.) — all-day tasks no longer off by one day (2026-03-13)
+- [x] Fix priority display: markdown list view now shows [HIGH]/[MEDIUM]/[LOW]/[NONE] labels instead of blank (2026-03-13)
+- [x] Add pinned indicator: markdown list view shows [PINNED] prefix; detail view shows "Pinned: Yes" line (2026-03-13)
+- [x] Add due_before filter to ticktick_list_tasks: filter active tasks due on or before a given date, e.g. "show tasks due in next 3 days" (2026-03-13)
 - [x] Convert MCP server from stdio to streamable-http for remote deployment (2026-03-12)
 - [x] Add bearer token authentication for remote server security (2026-03-12)
 - [x] Add health check endpoint at /health (2026-03-12)

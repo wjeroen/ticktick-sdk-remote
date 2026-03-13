@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from ticktick_sdk.models import Column, Task, Project, ProjectGroup, Tag, User, UserStatus, UserStatistics
 from ticktick_sdk.tools.inputs import ResponseFormat
@@ -18,18 +19,28 @@ from ticktick_sdk.tools.inputs import ResponseFormat
 CHARACTER_LIMIT = 25000
 
 
-def format_datetime(dt: datetime | None) -> str:
+def convert_tz(dt: datetime | None, tz_name: str) -> datetime | None:
+    """Convert a UTC datetime to the given timezone."""
+    if dt is None:
+        return None
+    try:
+        return dt.astimezone(ZoneInfo(tz_name))
+    except Exception:
+        return dt
+
+
+def format_datetime(dt: datetime | None, tz_name: str = "UTC") -> str:
     """Format a datetime for human-readable display."""
     if dt is None:
         return "Not set"
-    return dt.strftime("%Y-%m-%d %H:%M %Z").strip()
+    return convert_tz(dt, tz_name).strftime("%Y-%m-%d %H:%M %Z").strip()
 
 
-def format_date(dt: datetime | None) -> str:
+def format_date(dt: datetime | None, tz_name: str = "UTC") -> str:
     """Format a date for human-readable display."""
     if dt is None:
         return "Not set"
-    return dt.strftime("%Y-%m-%d")
+    return convert_tz(dt, tz_name).strftime("%Y-%m-%d")
 
 
 def priority_label(priority: int) -> str:
@@ -38,10 +49,10 @@ def priority_label(priority: int) -> str:
     return labels.get(priority, "None")
 
 
-def priority_emoji(priority: int) -> str:
-    """Get emoji for priority level."""
-    emojis = {0: "", 1: "", 3: "", 5: ""}
-    return emojis.get(priority, "")
+def priority_indicator(priority: int) -> str:
+    """Get text indicator for priority level."""
+    indicators = {0: "[NONE]", 1: "[LOW]", 3: "[MEDIUM]", 5: "[HIGH]"}
+    return indicators.get(priority, "")
 
 
 def status_label(status: int) -> str:
@@ -55,14 +66,14 @@ def status_label(status: int) -> str:
 # =============================================================================
 
 
-def format_task_markdown(task: Task) -> str:
+def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
     """Format a single task as Markdown."""
     lines = []
 
     # Title with priority indicator
-    priority_indicator = priority_emoji(task.priority)
+    priority_str = priority_indicator(task.priority)
     title = task.title or "(No title)"
-    lines.append(f"## {priority_indicator} {title}")
+    lines.append(f"## {priority_str} {title}")
     lines.append("")
 
     # Key details
@@ -71,14 +82,17 @@ def format_task_markdown(task: Task) -> str:
     lines.append(f"- **Status**: {status_label(task.status)}")
     lines.append(f"- **Priority**: {priority_label(task.priority)}")
 
+    if task.is_pinned:
+        lines.append("- **Pinned**: Yes")
+
     # Display task kind only if non-default (not TEXT)
     if task.kind and task.kind != "TEXT":
         lines.append(f"- **Type**: {task.kind}")
 
     if task.due_date:
-        lines.append(f"- **Due**: {format_datetime(task.due_date)}")
+        lines.append(f"- **Due**: {format_datetime(task.due_date, tz_name)}")
     if task.start_date:
-        lines.append(f"- **Start**: {format_datetime(task.start_date)}")
+        lines.append(f"- **Start**: {format_datetime(task.start_date, tz_name)}")
 
     if task.tags:
         tags_str = ", ".join(f"`{t}`" for t in task.tags)
@@ -99,8 +113,11 @@ def format_task_markdown(task: Task) -> str:
     return "\n".join(lines)
 
 
-def format_task_json(task: Task) -> dict[str, Any]:
+def format_task_json(task: Task, tz_name: str = "UTC") -> dict[str, Any]:
     """Format a single task as JSON-serializable dict."""
+    start_date = convert_tz(task.start_date, tz_name)
+    due_date = convert_tz(task.due_date, tz_name)
+    completed_time = convert_tz(task.completed_time, tz_name)
     return {
         "id": task.id,
         "project_id": task.project_id,
@@ -111,9 +128,9 @@ def format_task_json(task: Task) -> dict[str, Any]:
         "status_label": status_label(task.status),
         "priority": task.priority,
         "priority_label": priority_label(task.priority),
-        "start_date": task.start_date.isoformat() if task.start_date else None,
-        "due_date": task.due_date.isoformat() if task.due_date else None,
-        "completed_time": task.completed_time.isoformat() if task.completed_time else None,
+        "start_date": start_date.isoformat() if start_date else None,
+        "due_date": due_date.isoformat() if due_date else None,
+        "completed_time": completed_time.isoformat() if completed_time else None,
         "tags": task.tags,
         "is_all_day": task.is_all_day,
         "time_zone": task.time_zone,
@@ -132,7 +149,7 @@ def format_task_json(task: Task) -> dict[str, Any]:
     }
 
 
-def format_tasks_markdown(tasks: list[Task], title: str = "Tasks") -> str:
+def format_tasks_markdown(tasks: list[Task], title: str = "Tasks", tz_name: str = "UTC") -> str:
     """Format multiple tasks as Markdown."""
     if not tasks:
         return f"# {title}\n\nNo tasks found."
@@ -140,21 +157,22 @@ def format_tasks_markdown(tasks: list[Task], title: str = "Tasks") -> str:
     lines = [f"# {title}", "", f"Found {len(tasks)} task(s):", ""]
 
     for task in tasks:
-        priority_indicator = priority_emoji(task.priority)
+        priority_str = priority_indicator(task.priority)
+        pinned_str = "[PINNED] " if task.is_pinned else ""
         task_title = task.title or "(No title)"
-        due_str = f" | Due: {format_date(task.due_date)}" if task.due_date else ""
+        due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
         tags_str = f" | Tags: {', '.join(task.tags)}" if task.tags else ""
 
-        lines.append(f"- {priority_indicator} **{task_title}** (`{task.id}`){due_str}{tags_str}")
+        lines.append(f"- {priority_str} {pinned_str}**{task_title}** (`{task.id}`){due_str}{tags_str}")
 
     return "\n".join(lines)
 
 
-def format_tasks_json(tasks: list[Task]) -> dict[str, Any]:
+def format_tasks_json(tasks: list[Task], tz_name: str = "UTC") -> dict[str, Any]:
     """Format multiple tasks as JSON."""
     return {
         "count": len(tasks),
-        "tasks": [format_task_json(t) for t in tasks],
+        "tasks": [format_task_json(t, tz_name) for t in tasks],
     }
 
 
@@ -324,15 +342,17 @@ def format_column_markdown(column: Column) -> str:
     return f"- **{column.name}** (`{column.id}`) - Sort: {column.sort_order or 0}"
 
 
-def format_column_json(column: Column) -> dict[str, Any]:
+def format_column_json(column: Column, tz_name: str = "UTC") -> dict[str, Any]:
     """Format a single column as JSON."""
+    created_time = convert_tz(column.created_time, tz_name)
+    modified_time = convert_tz(column.modified_time, tz_name)
     return {
         "id": column.id,
         "project_id": column.project_id,
         "name": column.name,
         "sort_order": column.sort_order,
-        "created_time": column.created_time.isoformat() if column.created_time else None,
-        "modified_time": column.modified_time.isoformat() if column.modified_time else None,
+        "created_time": created_time.isoformat() if created_time else None,
+        "modified_time": modified_time.isoformat() if modified_time else None,
         "etag": column.etag,
     }
 
@@ -352,11 +372,11 @@ def format_columns_markdown(columns: list[Column], title: str = "Kanban Columns"
     return "\n".join(lines)
 
 
-def format_columns_json(columns: list[Column]) -> dict[str, Any]:
+def format_columns_json(columns: list[Column], tz_name: str = "UTC") -> dict[str, Any]:
     """Format multiple columns as JSON."""
     return {
         "count": len(columns),
-        "columns": [format_column_json(c) for c in columns],
+        "columns": [format_column_json(c, tz_name) for c in columns],
     }
 
 
@@ -487,7 +507,7 @@ def error_message(error: str, suggestion: str | None = None) -> str:
 # =============================================================================
 
 
-def format_batch_create_tasks_markdown(tasks: list[Task]) -> str:
+def format_batch_create_tasks_markdown(tasks: list[Task], tz_name: str = "UTC") -> str:
     """Format batch task creation results as Markdown."""
     if not tasks:
         return "# Tasks Created\n\nNo tasks were created."
@@ -495,20 +515,20 @@ def format_batch_create_tasks_markdown(tasks: list[Task]) -> str:
     lines = [f"# {len(tasks)} Task(s) Created", ""]
 
     for task in tasks:
-        priority_indicator = priority_emoji(task.priority)
+        priority_str = priority_indicator(task.priority)
         task_title = task.title or "(No title)"
-        due_str = f" | Due: {format_date(task.due_date)}" if task.due_date else ""
-        lines.append(f"- {priority_indicator} **{task_title}** (`{task.id}`){due_str}")
+        due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
+        lines.append(f"- {priority_str} **{task_title}** (`{task.id}`){due_str}")
 
     return "\n".join(lines)
 
 
-def format_batch_create_tasks_json(tasks: list[Task]) -> dict[str, Any]:
+def format_batch_create_tasks_json(tasks: list[Task], tz_name: str = "UTC") -> dict[str, Any]:
     """Format batch task creation results as JSON."""
     return {
         "success": True,
         "count": len(tasks),
-        "tasks": [format_task_json(t) for t in tasks],
+        "tasks": [format_task_json(t, tz_name) for t in tasks],
     }
 
 

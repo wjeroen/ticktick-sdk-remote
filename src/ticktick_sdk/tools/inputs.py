@@ -492,6 +492,11 @@ class TaskListInput(BaseMCPInput):
         default=None,
         description="Filter to only overdue tasks (for active status)",
     )
+    due_before: Optional[str] = Field(
+        default=None,
+        description="Show active tasks due on or before this date (YYYY-MM-DD). Example: '2026-03-16' shows everything due up to and including March 16.",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    )
     # Date range (for completed/abandoned status)
     from_date: Optional[str] = Field(
         default=None,

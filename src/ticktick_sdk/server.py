@@ -98,6 +98,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from typing import Any, AsyncIterator
+from zoneinfo import ZoneInfo
 
 from mcp.server.fastmcp import FastMCP, Context
 from starlette.requests import Request
@@ -183,6 +184,9 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Load user timezone from settings (set TICKTICK_TIMEZONE env var, e.g. "Europe/Brussels")
+USER_TIMEZONE = get_settings().timezone
 
 # =============================================================================
 # Constants
@@ -521,14 +525,14 @@ async def ticktick_create_tasks(params: CreateTasksInput, ctx: Context) -> str:
 
         if params.response_format == ResponseFormat.MARKDOWN:
             if len(created_tasks) == 1:
-                return f"# Task Created\n\n{format_task_markdown(created_tasks[0])}"
+                return f"# Task Created\n\n{format_task_markdown(created_tasks[0], USER_TIMEZONE)}"
             else:
-                return f"# {len(created_tasks)} Tasks Created\n\n{format_tasks_markdown(created_tasks, 'Created Tasks')}"
+                return f"# {len(created_tasks)} Tasks Created\n\n{format_tasks_markdown(created_tasks, 'Created Tasks', USER_TIMEZONE)}"
         else:
             return json.dumps({
                 "success": True,
                 "count": len(created_tasks),
-                "tasks": [format_task_json(t) for t in created_tasks]
+                "tasks": [format_task_json(t, USER_TIMEZONE) for t in created_tasks]
             }, indent=2)
 
     except Exception as e:
@@ -567,9 +571,9 @@ async def ticktick_get_task(params: TaskGetInput, ctx: Context) -> str:
         task = await client.get_task(params.task_id, params.project_id)
 
         if params.response_format == ResponseFormat.MARKDOWN:
-            return format_task_markdown(task)
+            return format_task_markdown(task, USER_TIMEZONE)
         else:
-            return json.dumps(format_task_json(task), indent=2)
+            return json.dumps(format_task_json(task, USER_TIMEZONE), indent=2)
 
     except Exception as e:
         return handle_error(e, "get_task")
@@ -602,8 +606,9 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
             - column_id (str): Filter by kanban column (active only, use with project_id)
             - tag (str): Filter by tag name
             - priority (str): Filter by priority level
-            - due_today (bool): Only tasks due today (active only)
-            - overdue (bool): Only overdue tasks (active only)
+            - due_today (bool): Only tasks due today (active only, uses TICKTICK_TIMEZONE)
+            - overdue (bool): Only overdue tasks (active only, uses TICKTICK_TIMEZONE)
+            - due_before (str): Active tasks due on or before this date, e.g. '2026-03-16' (uses TICKTICK_TIMEZONE)
             - from_date (str): Start date for completed/abandoned (YYYY-MM-DD)
             - to_date (str): End date for completed/abandoned (YYYY-MM-DD)
             - days (int): Days to look back for completed/abandoned (default 7)
@@ -620,6 +625,7 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         - Deleted tasks: status="deleted"
         - Active + project: status="active", project_id="..."
         - Tasks in column: project_id="...", column_id="..." (kanban workflow)
+        - Due in next 3 days: status="active", due_before="2026-03-16"
     """
     try:
         client = get_client(ctx)
@@ -645,12 +651,16 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
                 tasks = [t for t in tasks if t.priority == target_priority]
 
             if params.due_today:
-                today = date.today()
-                tasks = [t for t in tasks if t.due_date and t.due_date.date() == today]
+                today = datetime.now(ZoneInfo(USER_TIMEZONE)).date()
+                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() == today]
 
             if params.overdue:
-                today = date.today()
-                tasks = [t for t in tasks if t.due_date and t.due_date.date() < today and not t.is_completed]
+                today = datetime.now(ZoneInfo(USER_TIMEZONE)).date()
+                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() < today and not t.is_completed]
+
+            if params.due_before:
+                due_before_date = date.fromisoformat(params.due_before)
+                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() <= due_before_date]
 
         elif params.status == "completed":
             # Completed tasks require date range
@@ -679,9 +689,9 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
 
         if params.response_format == ResponseFormat.MARKDOWN:
             title = f"{params.status.capitalize()} Tasks" if params.status else "Tasks"
-            result = format_tasks_markdown(tasks, title)
+            result = format_tasks_markdown(tasks, title, USER_TIMEZONE)
         else:
-            result = json.dumps(format_tasks_json(tasks), indent=2)
+            result = json.dumps(format_tasks_json(tasks, USER_TIMEZONE), indent=2)
 
         # Apply truncation if response is too large
         return truncate_response(result, total_count, len(tasks))
@@ -1103,9 +1113,9 @@ async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
         title = f"Search Results: '{params.query}'"
 
         if params.response_format == ResponseFormat.MARKDOWN:
-            return format_tasks_markdown(tasks, title)
+            return format_tasks_markdown(tasks, title, USER_TIMEZONE)
         else:
-            return json.dumps(format_tasks_json(tasks), indent=2)
+            return json.dumps(format_tasks_json(tasks, USER_TIMEZONE), indent=2)
 
     except Exception as e:
         return handle_error(e, "search_tasks")
@@ -1173,19 +1183,19 @@ async def ticktick_pin_tasks(params: PinTasksInput, ctx: Context) -> str:
             task = updated_tasks[0]
             action = "pinned" if params.tasks[0].pin else "unpinned"
             if params.response_format == ResponseFormat.MARKDOWN:
-                return f"**Success**: Task '{task.title}' has been {action}.\n\n" + format_task_markdown(task)
+                return f"**Success**: Task '{task.title}' has been {action}.\n\n" + format_task_markdown(task, USER_TIMEZONE)
             else:
-                result = format_task_json(task)
+                result = format_task_json(task, USER_TIMEZONE)
                 result["action"] = action
                 return json.dumps(result, indent=2, default=str)
         else:
             if params.response_format == ResponseFormat.MARKDOWN:
-                return f"**Success**: {count} tasks updated.\n\n{format_tasks_markdown(updated_tasks)}"
+                return f"**Success**: {count} tasks updated.\n\n{format_tasks_markdown(updated_tasks, tz_name=USER_TIMEZONE)}"
             else:
                 return json.dumps({
                     "success": True,
                     "count": count,
-                    "tasks": [format_task_json(t) for t in updated_tasks]
+                    "tasks": [format_task_json(t, USER_TIMEZONE) for t in updated_tasks]
                 }, indent=2, default=str)
 
     except Exception as e:
@@ -1230,7 +1240,7 @@ async def ticktick_list_columns(params: ColumnListInput, ctx: Context) -> str:
         if params.response_format == ResponseFormat.MARKDOWN:
             return format_columns_markdown(columns)
         else:
-            return json.dumps(format_columns_json(columns), indent=2, default=str)
+            return json.dumps(format_columns_json(columns, USER_TIMEZONE), indent=2, default=str)
 
     except Exception as e:
         return handle_error(e, "list_columns")
@@ -1270,7 +1280,7 @@ async def ticktick_create_column(params: ColumnCreateInput, ctx: Context) -> str
         if params.response_format == ResponseFormat.MARKDOWN:
             return f"**Success**: Created column '{column.name}'\n\n" + format_column_markdown(column)
         else:
-            result = format_column_json(column)
+            result = format_column_json(column, USER_TIMEZONE)
             result["action"] = "created"
             return json.dumps(result, indent=2, default=str)
 
@@ -1310,7 +1320,7 @@ async def ticktick_update_column(params: ColumnUpdateInput, ctx: Context) -> str
         if params.response_format == ResponseFormat.MARKDOWN:
             return f"**Success**: Updated column '{column.name}'\n\n" + format_column_markdown(column)
         else:
-            result = format_column_json(column)
+            result = format_column_json(column, USER_TIMEZONE)
             result["action"] = "updated"
             return json.dumps(result, indent=2, default=str)
 
@@ -1423,12 +1433,12 @@ async def ticktick_get_project(params: ProjectGetInput, ctx: Context) -> str:
             if params.response_format == ResponseFormat.MARKDOWN:
                 lines = [format_project_markdown(project_data.project)]
                 lines.append("")
-                lines.append(format_tasks_markdown(project_data.tasks, "Tasks"))
+                lines.append(format_tasks_markdown(project_data.tasks, "Tasks", USER_TIMEZONE))
                 return "\n".join(lines)
             else:
                 return json.dumps({
                     "project": format_project_json(project_data.project),
-                    "tasks": format_tasks_json(project_data.tasks),
+                    "tasks": format_tasks_json(project_data.tasks, USER_TIMEZONE),
                 }, indent=2)
         else:
             project = await client.get_project(params.project_id)

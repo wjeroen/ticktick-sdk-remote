@@ -96,7 +96,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 |------|-------------|
 | `ticktick_create_tasks` | Create 1-50 tasks with titles, dates, tags, etc. |
 | `ticktick_get_task` | Get task details by ID |
-| `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter) |
+| `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter; supports `due_before` for date-range filtering) |
 | `ticktick_update_tasks` | Update 1-100 tasks (includes column assignment) |
 | `ticktick_complete_tasks` | Complete 1-100 tasks |
 | `ticktick_delete_tasks` | Delete 1-100 tasks (moves to trash) |
@@ -520,8 +520,10 @@ async with TickTickClient.from_settings() as client:
 Once connected, you can ask Claude things like:
 
 - "What tasks do I have due today?"
+- "Show me everything due in the next 3 days"
 - "Create a task to call John tomorrow at 2pm"
 - "Show me my high priority tasks"
+- "Which tasks are pinned?"
 - "Mark the grocery shopping task as complete"
 - "What's my current streak for the Exercise habit?"
 - "Check in my meditation habit for today"
@@ -570,6 +572,7 @@ This opens your browser, you log into TickTick and authorize the app, and it pri
 | `TICKTICK_PASSWORD` | Yes | Your TickTick password |
 | `TICKTICK_HOST` | No | API host: `ticktick.com` (default) or `dida365.com` (Chinese) |
 | `TICKTICK_TIMEOUT` | No | Request timeout in seconds (default: `30`) |
+| `TICKTICK_TIMEZONE` | No | Your local timezone for correct date display (default: `UTC`). Set to your timezone, e.g. `Europe/Brussels`, `America/New_York`, `Asia/Tokyo`. Without this, all-day tasks may show the wrong date. |
 | `TICKTICK_DEVICE_ID` | No | Device ID for V2 API (auto-generated) |
 | `MCP_BEARER_TOKEN` | No | Bearer token for server authentication (see note) |
 | `PORT` | No | Server port (default: `8000`, Railway sets this automatically) |
@@ -653,6 +656,9 @@ The API does not preserve tag order — tags may be returned in any order.
 
 ### 6. Inbox is Special
 The inbox is a special project that cannot be deleted.
+
+### 7. Timezone: All-Day Tasks
+TickTick stores all-day task dates as midnight in the user's timezone, expressed as UTC. For example, a task due March 14 in Brussels (CET, UTC+1) is stored as `2026-03-13T23:00:00+00:00`. Without the `TICKTICK_TIMEZONE` setting, these dates display one day early. Set `TICKTICK_TIMEZONE=Europe/Brussels` (or your timezone) to fix this.
 
 ---
 
