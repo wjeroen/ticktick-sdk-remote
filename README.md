@@ -285,8 +285,6 @@ The inbox is a special project that cannot be deleted.
 
 ## Python Library Reference
 
-This repo also includes a full async Python SDK. For library usage examples (tasks, projects, tags, habits, focus, etc.), see the [original repo's documentation](https://github.com/dev-mirzabicer/ticktick-sdk#python-library-setup--usage).
-
 ### Tasks
 
 #### Creating Tasks
@@ -416,6 +414,42 @@ async with TickTickClient.from_settings() as client:
     # Deleted tasks (in trash)
     deleted = await client.get_deleted_tasks(limit=50)
 ```
+
+#### Filtering Active Tasks with `ticktick_list_tasks`
+
+The `ticktick_list_tasks` MCP tool supports filters that the Python SDK doesn't expose as standalone methods. The most useful one for date-range queries is `due_before`:
+
+| Parameter | Type | Example | Effect |
+|-----------|------|---------|--------|
+| `due_before` | `string` (YYYY-MM-DD) | `"2026-03-16"` | Active tasks due **on or before** this date |
+| `due_today` | `boolean` | `true` | Only tasks due today |
+| `overdue` | `boolean` | `true` | Only tasks past their due date |
+| `priority` | `string` | `"high"` | Filter by priority: `none` / `low` / `medium` / `high` |
+| `tag` | `string` | `"work"` | Filter by tag name |
+| `project_id` | `string` | `"abc123"` | Filter to a specific project |
+| `status` | `string` | `"active"` | `active` (default), `completed`, `abandoned`, `deleted` |
+| `limit` | `integer` | `25` | Max results to return (default 50) |
+
+Example parameter combinations:
+
+```
+# Tasks due in the next 3 days (assuming today is 2026-03-13):
+status="active", due_before="2026-03-16"
+
+# High-priority tasks due this week:
+status="active", due_before="2026-03-20", priority="high"
+
+# Work tasks due before end of month:
+status="active", due_before="2026-03-31", tag="work"
+
+# Completed tasks from the last 14 days:
+status="completed", days=14
+
+# All active tasks in a specific project:
+status="active", project_id="63563f0c24f4f791814f9308"
+```
+
+> **Note:** `due_before` uses your configured `TICKTICK_TIMEZONE` for the date comparison, so "due before March 16" means before the end of March 16 in your local timezone.
 
 ### Projects & Folders
 
