@@ -84,8 +84,12 @@ class TickTickModel(BaseModel):
 
         if for_api == "v1":
             return value.strftime(DATETIME_FORMAT_V1)
-        else:
-            return value.strftime(DATETIME_FORMAT_V2)
+        # DATETIME_FORMAT_V2 hardcodes "+0000" but strftime does not convert
+        # the timezone — it just appends the literal suffix. Convert to UTC
+        # first so the wall-clock time in the string actually matches +0000.
+        # Without this, a datetime like 18:00+02:00 would serialize as
+        # "18:00.000+0000" and TickTick would read it as 20:00 Brussels.
+        return value.astimezone(timezone.utc).strftime(DATETIME_FORMAT_V2)
 
     def to_v1_dict(self) -> dict[str, Any]:
         """Convert to V1 API format dictionary."""

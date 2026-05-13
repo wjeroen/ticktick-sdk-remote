@@ -281,6 +281,12 @@ The API does not preserve tag order — tags may be returned in any order.
 ### 6. Inbox is Special
 The inbox is a special project that cannot be deleted.
 
+### 7. V2 Batch Updates Replace, Not Patch
+TickTick's V2 `/batch/task` endpoint treats each update payload as the **new task representation** — fields you don't send are reset to defaults (`repeatFlag` → null, `isAllDay` → false, `timeZone` → wiped). The unified `batch_update_tasks` handles this transparently by pre-fetching each task and merging the delta before sending, so callers can safely send sparse updates (e.g. just `start_date`) and the rest of the task is preserved.
+
+### 8. V2 Wire Format Hardcodes +0000
+The V2 datetime wire format is `YYYY-MM-DDTHH:MM:SS.000+0000` with a literal UTC suffix. `Task.format_datetime` converts any input datetime to UTC before serializing so wall-clock times match the offset. If you bypass `format_datetime` and pass a raw ISO string with a non-UTC offset (e.g. `+02:00`) directly through to V2, TickTick will still parse it correctly — but anything routed through the model layer is normalized to UTC first.
+
 ---
 
 ## Python Library Reference

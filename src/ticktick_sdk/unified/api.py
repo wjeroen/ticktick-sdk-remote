@@ -1040,6 +1040,13 @@ class UnifiedTickTickAPI:
 
         V2-only operation.
 
+        Each update preserves unspecified fields: the existing task is fetched,
+        the user-supplied delta is merged into it, and the full task is sent
+        back. This is required because TickTick's V2 /batch/task endpoint
+        treats the update payload as the new task representation — any field
+        not present in the body is reset to its default (e.g. repeatFlag
+        becomes null, isAllDay flips to false, timeZone is wiped).
+
         Args:
             updates: List of update specifications. Each dict must contain:
                 - task_id (required): Task ID to update
@@ -1048,13 +1055,14 @@ class UnifiedTickTickAPI:
                 - title: New title
                 - content: New content
                 - priority: New priority (0, 1, 3, 5 or 'none', 'low', 'medium', 'high')
-                - start_date: New start date
-                - due_date: New due date
+                - start_date: New start date (datetime or ISO string)
+                - due_date: New due date (datetime or ISO string)
                 - time_zone: New timezone
                 - all_day: All-day flag
                 - tags: New tags (replaces existing)
                 - recurrence: New recurrence rule
                 - column_id: Kanban column ID (empty string to remove from column)
+                - kind: TEXT / NOTE / CHECKLIST
 
         Returns:
             Batch response with id2etag and id2error
@@ -1071,6 +1079,7 @@ class UnifiedTickTickAPI:
                 operation="batch_update_tasks",
             )
 
+        priority_map = {"none": 0, "low": 1, "medium": 3, "high": 5}
         v2_updates: list[dict[str, Any]] = []
 
         for update in updates:
@@ -1083,45 +1092,47 @@ class UnifiedTickTickAPI:
                     details={"update": update},
                 )
 
-            v2_update: dict[str, Any] = {
-                "id": task_id,
-                "projectId": project_id,
-            }
+            # Pre-fetch so we can send the full task representation. Without
+            # this, fields not in the delta would be wiped server-side.
+            existing = await self.get_task(task_id, project_id)
 
-            # Map fields to V2 format
             if "title" in update and update["title"] is not None:
-                v2_update["title"] = update["title"]
+                existing.title = update["title"]
             if "content" in update and update["content"] is not None:
-                v2_update["content"] = update["content"]
+                existing.content = update["content"]
+            if "kind" in update and update["kind"] is not None:
+                existing.kind = update["kind"]
             if "priority" in update and update["priority"] is not None:
                 priority = update["priority"]
                 if isinstance(priority, str):
-                    priority_map = {"none": 0, "low": 1, "medium": 3, "high": 5}
-                    priority = priority_map.get(priority.lower(), int(priority))
-                v2_update["priority"] = priority
+                    key = priority.lower()
+                    priority = priority_map[key] if key in priority_map else int(priority)
+                existing.priority = priority
             if "start_date" in update and update["start_date"] is not None:
                 start_date = update["start_date"]
-                if isinstance(start_date, datetime):
-                    start_date = Task.format_datetime(start_date, "v2")
-                v2_update["startDate"] = start_date
+                if isinstance(start_date, str):
+                    start_date = Task.parse_datetime(start_date)
+                existing.start_date = start_date
             if "due_date" in update and update["due_date"] is not None:
                 due_date = update["due_date"]
-                if isinstance(due_date, datetime):
-                    due_date = Task.format_datetime(due_date, "v2")
-                v2_update["dueDate"] = due_date
+                if isinstance(due_date, str):
+                    due_date = Task.parse_datetime(due_date)
+                existing.due_date = due_date
             if "time_zone" in update and update["time_zone"] is not None:
-                v2_update["timeZone"] = update["time_zone"]
+                existing.time_zone = update["time_zone"]
             if "all_day" in update and update["all_day"] is not None:
-                v2_update["isAllDay"] = update["all_day"]
+                existing.is_all_day = update["all_day"]
             if "tags" in update and update["tags"] is not None:
-                v2_update["tags"] = update["tags"]
+                existing.tags = update["tags"]
             if "recurrence" in update and update["recurrence"] is not None:
-                v2_update["repeatFlag"] = update["recurrence"]
+                existing.repeat_flag = update["recurrence"]
+
+            v2_update = existing.to_v2_dict(for_update=True)
+
+            # column_id is not serialized by to_v2_dict; pass through if the
+            # caller explicitly set it (empty string removes from column).
             if "column_id" in update:
-                # column_id can be empty string to remove from column
                 v2_update["columnId"] = update["column_id"] if update["column_id"] else ""
-            if "kind" in update and update["kind"] is not None:
-                v2_update["kind"] = update["kind"]
 
             v2_updates.append(v2_update)
 

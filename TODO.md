@@ -12,6 +12,8 @@
 
 ## Completed Recently ✅
 
+- [x] Fix `batch_update_tasks` wiping `repeat_flag` / `is_all_day` / `time_zone` on sparse updates: now pre-fetches each task and merges the delta before sending to V2 `/batch/task` (2026-05-13)
+- [x] Fix `Task.format_datetime` for V2: convert datetime to UTC before applying the hardcoded `+0000` suffix — prevents +N hour offset when input had a non-UTC tzinfo (2026-05-13)
 - [x] Fix timezone: all dates now convert via TICKTICK_TIMEZONE env var (Europe/Brussels etc.) — all-day tasks no longer off by one day (2026-03-13)
 - [x] Fix priority display: markdown list view now shows [HIGH]/[MEDIUM]/[LOW]/[NONE] labels instead of blank (2026-03-13)
 - [x] Add pinned indicator: markdown list view shows [PINNED] prefix; detail view shows "Pinned: Yes" line (2026-03-13)
