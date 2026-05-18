@@ -167,11 +167,17 @@ def format_tasks_markdown(tasks: list[Task], title: str = "Tasks", tz_name: str 
     for task in tasks:
         priority_str = priority_indicator(task.priority)
         pinned_str = "[PINNED] " if task.is_pinned else ""
+        sub_str = "[SUB] " if task.parent_id else ""
         task_title = task.title or "(No title)"
         due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
         tags_str = f" | Tags: {', '.join(task.tags)}" if task.tags else ""
+        child_count = len(task.child_ids) if task.child_ids else 0
+        children_str = f" | {child_count} subtask(s)" if child_count else ""
 
-        lines.append(f"- {priority_str} {pinned_str}**{task_title}** (`{task.id}`){due_str}{tags_str}")
+        lines.append(
+            f"- {priority_str} {pinned_str}{sub_str}**{task_title}** "
+            f"(`{task.id}`){due_str}{tags_str}{children_str}"
+        )
 
     return "\n".join(lines)
 
