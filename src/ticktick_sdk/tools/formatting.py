@@ -66,8 +66,17 @@ def status_label(status: int) -> str:
 # =============================================================================
 
 
-def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
-    """Format a single task as Markdown."""
+def format_task_markdown(
+    task: Task,
+    tz_name: str = "UTC",
+    project_names: dict[str, str] | None = None,
+) -> str:
+    """Format a single task as Markdown.
+
+    When `project_names` is provided and contains an entry for this task's
+    `project_id`, the **Project** line shows `Name (\`id\`)` instead of just
+    the ID.
+    """
     lines = []
 
     # Title with priority indicator
@@ -78,7 +87,12 @@ def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
 
     # Key details
     lines.append(f"- **ID**: `{task.id}`")
-    lines.append(f"- **Project**: `{task.project_id}`")
+    if project_names and task.project_id in project_names:
+        lines.append(
+            f"- **Project**: {project_names[task.project_id]} (`{task.project_id}`)"
+        )
+    else:
+        lines.append(f"- **Project**: `{task.project_id}`")
     if task.parent_id:
         lines.append(f"- **Parent**: `{task.parent_id}`")
     if task.child_ids:
@@ -145,6 +159,7 @@ def format_task_json(task: Task, tz_name: str = "UTC") -> dict[str, Any]:
         "status_label": status_label(task.status),
         "priority": task.priority,
         "priority_label": priority_label(task.priority),
+        "is_pinned": task.is_pinned,
         "start_date": start_date.isoformat() if start_date else None,
         "due_date": due_date.isoformat() if due_date else None,
         "completed_time": completed_time.isoformat() if completed_time else None,
@@ -186,6 +201,14 @@ def format_tasks_markdown(
     for task in tasks:
         priority_str = priority_indicator(task.priority)
         pinned_str = "[PINNED] " if task.is_pinned else ""
+        # Only flag non-active statuses — [ACTIVE] on every row is noise.
+        if task.status == -1:
+            status_flag = "[ABANDONED] "
+        elif task.status in (1, 2):
+            status_flag = "[DONE] "
+        else:
+            status_flag = ""
+        repeat_flag_str = "[REPEATS] " if task.repeat_flag else ""
         task_title = task.title or "(No title)"
         due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
         tags_str = f" | Tags: {', '.join(task.tags)}" if task.tags else ""
@@ -197,7 +220,7 @@ def format_tasks_markdown(
             project_str = f" | Project: {project_names[task.project_id]}"
 
         lines.append(
-            f"- {priority_str} {pinned_str}**{task_title}** "
+            f"- {priority_str} {pinned_str}{status_flag}{repeat_flag_str}**{task_title}** "
             f"(`{task.id}`){project_str}{due_str}{tags_str}{parent_str}{children_str}"
         )
 

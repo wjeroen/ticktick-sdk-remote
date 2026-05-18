@@ -12,6 +12,9 @@
 
 ## Completed Recently ✅
 
+- [x] Markdown list view now flags non-default task states: `[DONE]` for completed, `[ABANDONED]` for won't-do, `[REPEATS]` for recurring tasks (placed between `[PINNED]` and the title) (2026-05-18)
+- [x] Add `is_pinned` (bool) to JSON output for both single-task detail and list views — was previously surfaced only in markdown (2026-05-18)
+- [x] Detail-view markdown shows project as `Name (\`id\`)` instead of just the ID. `format_task_markdown` now accepts an optional `project_names` map; `ticktick_get_task`, single-task `ticktick_create_tasks`, and single-task `ticktick_pin_tasks` fetch via new `build_project_name_for_task` helper (1 extra API call per detail-view render, fails benignly) (2026-05-18)
 - [x] Add conditional `| Project: <name>` suffix to list-view task rows when the rendered list spans more than one project (search, cross-project list_tasks, multi-task pin results) — single-project lists omit the badge to avoid noise. Server fetches `project_id → name` map via `get_all_projects()` only when needed (2026-05-18)
 - [x] Detail-view markdown now lists each child ID under `**Children**:` (nested bullets), matching what JSON exposes via `child_ids` and the parent's `**Parent**: <id>` line. Replaces the previous count-only line (2026-05-18)
 - [x] Show parent/child relationships in task views with consistent "parent" / "children" vocabulary: list view shows `| Child of: <parent_id>` suffix and `| N children` suffix; detail view shows `Parent` / `Children` count in key details; mis-labelled `### Subtasks` section (which was actually checklist items) renamed to `### Checklist`; child IDs no longer listed individually (count is enough) (2026-05-13)

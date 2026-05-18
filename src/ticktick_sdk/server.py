@@ -313,6 +313,24 @@ async def build_project_name_map(
     return {p.id: p.name for p in projects}
 
 
+async def build_project_name_for_task(
+    client: TickTickClient, task
+) -> dict[str, str] | None:
+    """Single-project lookup for detail-view rendering.
+
+    Returns {project_id: name} for the one project the task belongs to, or
+    None if lookup fails / no project_id. `format_task_markdown` falls back
+    to ID-only display when the map is None, so failures here are benign.
+    """
+    if not task.project_id:
+        return None
+    try:
+        project = await client.get_project(task.project_id)
+        return {project.id: project.name}
+    except Exception:
+        return None
+
+
 # =============================================================================
 # Error Handling
 # =============================================================================
@@ -541,9 +559,17 @@ async def ticktick_create_tasks(params: CreateTasksInput, ctx: Context) -> str:
 
         if params.response_format == ResponseFormat.MARKDOWN:
             if len(created_tasks) == 1:
-                return f"# Task Created\n\n{format_task_markdown(created_tasks[0], USER_TIMEZONE)}"
+                project_names = await build_project_name_for_task(client, created_tasks[0])
+                return (
+                    f"# Task Created\n\n"
+                    f"{format_task_markdown(created_tasks[0], USER_TIMEZONE, project_names=project_names)}"
+                )
             else:
-                return f"# {len(created_tasks)} Tasks Created\n\n{format_tasks_markdown(created_tasks, 'Created Tasks', USER_TIMEZONE)}"
+                project_names = await build_project_name_map(client, created_tasks)
+                return (
+                    f"# {len(created_tasks)} Tasks Created\n\n"
+                    f"{format_tasks_markdown(created_tasks, 'Created Tasks', USER_TIMEZONE, project_names=project_names)}"
+                )
         else:
             return json.dumps({
                 "success": True,
@@ -587,7 +613,8 @@ async def ticktick_get_task(params: TaskGetInput, ctx: Context) -> str:
         task = await client.get_task(params.task_id, params.project_id)
 
         if params.response_format == ResponseFormat.MARKDOWN:
-            return format_task_markdown(task, USER_TIMEZONE)
+            project_names = await build_project_name_for_task(client, task)
+            return format_task_markdown(task, USER_TIMEZONE, project_names=project_names)
         else:
             return json.dumps(format_task_json(task, USER_TIMEZONE), indent=2)
 
@@ -1232,7 +1259,11 @@ async def ticktick_pin_tasks(params: PinTasksInput, ctx: Context) -> str:
             task = updated_tasks[0]
             action = "pinned" if params.tasks[0].pin else "unpinned"
             if params.response_format == ResponseFormat.MARKDOWN:
-                return f"**Success**: Task '{task.title}' has been {action}.\n\n" + format_task_markdown(task, USER_TIMEZONE)
+                project_names = await build_project_name_for_task(client, task)
+                return (
+                    f"**Success**: Task '{task.title}' has been {action}.\n\n"
+                    + format_task_markdown(task, USER_TIMEZONE, project_names=project_names)
+                )
             else:
                 result = format_task_json(task, USER_TIMEZONE)
                 result["action"] = action
