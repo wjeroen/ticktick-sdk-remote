@@ -121,7 +121,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 |------|-------------|
 | `ticktick_create_tasks` | Create 1-50 tasks with titles, dates, tags, etc. |
 | `ticktick_get_task` | Get task details by ID |
-| `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter; supports `due_before` for date-range filtering) |
+| `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter; supports `due_before` / `due_after` for date-range filtering — combine both for a range) |
 | `ticktick_update_tasks` | Update 1-100 tasks (includes column assignment) |
 | `ticktick_complete_tasks` | Complete 1-100 tasks |
 | `ticktick_delete_tasks` | Delete 1-100 tasks (moves to trash) |
@@ -423,11 +423,12 @@ async with TickTickClient.from_settings() as client:
 
 #### Filtering Active Tasks with `ticktick_list_tasks`
 
-The `ticktick_list_tasks` MCP tool supports filters that the Python SDK doesn't expose as standalone methods. The most useful one for date-range queries is `due_before`:
+The `ticktick_list_tasks` MCP tool supports filters that the Python SDK doesn't expose as standalone methods. For date-range queries, use `due_before` and `due_after` — combine both to get tasks due in a range:
 
 | Parameter | Type | Example | Effect |
 |-----------|------|---------|--------|
 | `due_before` | `string` (YYYY-MM-DD) | `"2026-03-16"` | Active tasks due **on or before** this date |
+| `due_after` | `string` (YYYY-MM-DD) | `"2026-03-16"` | Active tasks due **on or after** this date (combine with `due_before` for a range) |
 | `due_today` | `boolean` | `true` | Only tasks due today |
 | `overdue` | `boolean` | `true` | Only tasks past their due date |
 | `priority` | `string` | `"high"` | Filter by priority: `none` / `low` / `medium` / `high` |
@@ -442,6 +443,12 @@ Example parameter combinations:
 # Tasks due in the next 3 days (assuming today is 2026-03-13):
 status="active", due_before="2026-03-16"
 
+# Tasks due from a specific date onwards:
+status="active", due_after="2026-03-16"
+
+# Tasks due in a date range (March 16-20 inclusive):
+status="active", due_after="2026-03-16", due_before="2026-03-20"
+
 # High-priority tasks due this week:
 status="active", due_before="2026-03-20", priority="high"
 
@@ -455,7 +462,7 @@ status="completed", days=14
 status="active", project_id="63563f0c24f4f791814f9308"
 ```
 
-> **Note:** `due_before` uses your configured `TICKTICK_TIMEZONE` for the date comparison, so "due before March 16" means before the end of March 16 in your local timezone.
+> **Note:** `due_before` and `due_after` use your configured `TICKTICK_TIMEZONE` for the date comparison, so "due before March 16" means before the end of March 16 in your local timezone, and "due after March 16" means starting at the beginning of March 16.
 
 ### Projects & Folders
 

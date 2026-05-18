@@ -609,6 +609,9 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
             - due_today (bool): Only tasks due today (active only, uses TICKTICK_TIMEZONE)
             - overdue (bool): Only overdue tasks (active only, uses TICKTICK_TIMEZONE)
             - due_before (str): Active tasks due on or before this date, e.g. '2026-03-16' (uses TICKTICK_TIMEZONE)
+            - due_after (str): Active tasks due on or after this date, e.g. '2026-03-16' (uses TICKTICK_TIMEZONE).
+              Combine with due_before for a date range (e.g. due_after='2026-03-16' + due_before='2026-03-20'
+              returns tasks due March 16-20 inclusive).
             - from_date (str): Start date for completed/abandoned (YYYY-MM-DD)
             - to_date (str): End date for completed/abandoned (YYYY-MM-DD)
             - days (int): Days to look back for completed/abandoned (default 7)
@@ -626,6 +629,8 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         - Active + project: status="active", project_id="..."
         - Tasks in column: project_id="...", column_id="..." (kanban workflow)
         - Due in next 3 days: status="active", due_before="2026-03-16"
+        - Due from a specific date: status="active", due_after="2026-03-16"
+        - Due in a date range: status="active", due_after="2026-03-16", due_before="2026-03-20"
     """
     try:
         client = get_client(ctx)
@@ -661,6 +666,10 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
             if params.due_before:
                 due_before_date = date.fromisoformat(params.due_before)
                 tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() <= due_before_date]
+
+            if params.due_after:
+                due_after_date = date.fromisoformat(params.due_after)
+                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() >= due_after_date]
 
         elif params.status == "completed":
             # Completed tasks require date range
