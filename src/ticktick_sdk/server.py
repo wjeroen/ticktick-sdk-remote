@@ -681,19 +681,32 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
                 tasks = [t for t in tasks if t.due_date is None]
 
         elif params.status == "completed":
-            # Completed tasks require date range
             if params.from_date and params.to_date:
-                from_dt = datetime.fromisoformat(params.from_date)
-                to_dt = datetime.fromisoformat(params.to_date)
+                # Interpret naive YYYY-MM-DD strings as full local-TZ days:
+                # from_date starts at 00:00, to_date ends at 23:59:59.
+                tz = ZoneInfo(USER_TIMEZONE)
+                from_dt = datetime.fromisoformat(params.from_date).replace(tzinfo=tz)
+                to_dt = datetime.fromisoformat(params.to_date).replace(
+                    hour=23, minute=59, second=59, tzinfo=tz,
+                )
+                tasks = await client.get_completed_tasks(
+                    limit=params.limit, from_date=from_dt, to_date=to_dt,
+                )
             else:
-                to_dt = datetime.now()
-                from_dt = to_dt - timedelta(days=params.days)
-
-            tasks = await client.get_completed_tasks(days=params.days, limit=params.limit)
+                tasks = await client.get_completed_tasks(days=params.days, limit=params.limit)
 
         elif params.status == "abandoned":
-            # Abandoned tasks require date range
-            tasks = await client.get_abandoned_tasks(days=params.days, limit=params.limit)
+            if params.from_date and params.to_date:
+                tz = ZoneInfo(USER_TIMEZONE)
+                from_dt = datetime.fromisoformat(params.from_date).replace(tzinfo=tz)
+                to_dt = datetime.fromisoformat(params.to_date).replace(
+                    hour=23, minute=59, second=59, tzinfo=tz,
+                )
+                tasks = await client.get_abandoned_tasks(
+                    limit=params.limit, from_date=from_dt, to_date=to_dt,
+                )
+            else:
+                tasks = await client.get_abandoned_tasks(days=params.days, limit=params.limit)
 
         elif params.status == "deleted":
             tasks = await client.get_deleted_tasks(limit=params.limit)

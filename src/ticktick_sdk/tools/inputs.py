@@ -509,12 +509,12 @@ class TaskListInput(BaseMCPInput):
     # Date range (for completed/abandoned status)
     from_date: Optional[str] = Field(
         default=None,
-        description="Start date for completed/abandoned queries (YYYY-MM-DD format)",
+        description="Start date for completed/abandoned queries (YYYY-MM-DD), inclusive, treated as 00:00 in TICKTICK_TIMEZONE. Must be paired with to_date — providing only one is ignored. Overrides 'days' when both are set.",
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     to_date: Optional[str] = Field(
         default=None,
-        description="End date for completed/abandoned queries (YYYY-MM-DD format)",
+        description="End date for completed/abandoned queries (YYYY-MM-DD), inclusive, treated as 23:59:59 in TICKTICK_TIMEZONE. Must be paired with from_date.",
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     days: int = Field(

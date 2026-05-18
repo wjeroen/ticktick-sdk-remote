@@ -12,6 +12,7 @@
 
 ## Completed Recently ✅
 
+- [x] Fix `from_date`/`to_date` being silently ignored on `ticktick_list_tasks` with `status="completed"` or `"abandoned"`: dates are now passed through to `client.get_completed_tasks` / `get_abandoned_tasks` and interpreted as full days in `TICKTICK_TIMEZONE` (2026-05-13)
 - [x] Enrich single-task markdown detail view: show recurrence rule, all-day flag, and time zone (when it differs from user's TZ) (2026-05-13)
 - [x] Add `has_due_date` filter to `ticktick_list_tasks` (true = only scheduled, false = only unscheduled) (2026-05-13)
 - [x] Add `due_after` filter to `ticktick_list_tasks` (mirrors `due_before`; combine both for date-range queries) (2026-05-13)

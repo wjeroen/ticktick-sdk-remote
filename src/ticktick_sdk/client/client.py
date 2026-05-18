@@ -298,20 +298,27 @@ class TickTickClient:
         self,
         days: int = 7,
         limit: int = 100,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
     ) -> list[Task]:
         """
         Get recently completed tasks.
 
         Args:
-            days: Number of days to look back
+            days: Number of days to look back (ignored if from_date/to_date provided)
             limit: Maximum number of tasks
+            from_date: Explicit start of the range (overrides days when both
+                from_date and to_date are provided)
+            to_date: Explicit end of the range
 
         Returns:
             List of completed tasks
         """
-        to_date = datetime.now()
-        from_date = to_date - timedelta(days=days)
-        return await self._api.list_completed_tasks(from_date, to_date, limit)
+        if from_date is not None and to_date is not None:
+            return await self._api.list_completed_tasks(from_date, to_date, limit)
+        to_dt = datetime.now()
+        from_dt = to_dt - timedelta(days=days)
+        return await self._api.list_completed_tasks(from_dt, to_dt, limit)
 
     async def move_task(
         self,
@@ -367,20 +374,27 @@ class TickTickClient:
         self,
         days: int = 7,
         limit: int = 100,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
     ) -> list[Task]:
         """
         Get recently abandoned ("won't do") tasks.
 
         Args:
-            days: Number of days to look back
+            days: Number of days to look back (ignored if from_date/to_date provided)
             limit: Maximum number of tasks
+            from_date: Explicit start of the range (overrides days when both
+                from_date and to_date are provided)
+            to_date: Explicit end of the range
 
         Returns:
             List of abandoned tasks
         """
-        to_date = datetime.now()
-        from_date = to_date - timedelta(days=days)
-        return await self._api.list_abandoned_tasks(from_date, to_date, limit)
+        if from_date is not None and to_date is not None:
+            return await self._api.list_abandoned_tasks(from_date, to_date, limit)
+        to_dt = datetime.now()
+        from_dt = to_dt - timedelta(days=days)
+        return await self._api.list_abandoned_tasks(from_dt, to_dt, limit)
 
     async def get_deleted_tasks(
         self,
