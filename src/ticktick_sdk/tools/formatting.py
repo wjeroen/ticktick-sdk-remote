@@ -82,7 +82,9 @@ def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
     if task.parent_id:
         lines.append(f"- **Parent**: `{task.parent_id}`")
     if task.child_ids:
-        lines.append(f"- **Children**: {len(task.child_ids)}")
+        lines.append("- **Children**:")
+        for child_id in task.child_ids:
+            lines.append(f"  - `{child_id}`")
     lines.append(f"- **Status**: {status_label(task.status)}")
     lines.append(f"- **Priority**: {priority_label(task.priority)}")
 
@@ -118,7 +120,7 @@ def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
     if task.items:
         # task.items are checklist items (a TODO list *inside* the task),
         # not child tasks. Child tasks are tracked separately via child_ids
-        # and surfaced as the **Children** count line in key details above.
+        # and listed under **Children** in the key-details block above.
         lines.append("")
         lines.append("### Checklist")
         for item in task.items:
@@ -164,8 +166,18 @@ def format_task_json(task: Task, tz_name: str = "UTC") -> dict[str, Any]:
     }
 
 
-def format_tasks_markdown(tasks: list[Task], title: str = "Tasks", tz_name: str = "UTC") -> str:
-    """Format multiple tasks as Markdown."""
+def format_tasks_markdown(
+    tasks: list[Task],
+    title: str = "Tasks",
+    tz_name: str = "UTC",
+    project_names: dict[str, str] | None = None,
+) -> str:
+    """Format multiple tasks as Markdown.
+
+    When `project_names` is provided, each row gets a `| Project: <name>`
+    suffix. Callers should only pass the map when tasks span multiple
+    projects — otherwise the badge is redundant noise.
+    """
     if not tasks:
         return f"# {title}\n\nNo tasks found."
 
@@ -180,10 +192,13 @@ def format_tasks_markdown(tasks: list[Task], title: str = "Tasks", tz_name: str 
         parent_str = f" | Child of: `{task.parent_id}`" if task.parent_id else ""
         child_count = len(task.child_ids) if task.child_ids else 0
         children_str = f" | {child_count} children" if child_count else ""
+        project_str = ""
+        if project_names and task.project_id in project_names:
+            project_str = f" | Project: {project_names[task.project_id]}"
 
         lines.append(
             f"- {priority_str} {pinned_str}**{task_title}** "
-            f"(`{task.id}`){due_str}{tags_str}{parent_str}{children_str}"
+            f"(`{task.id}`){project_str}{due_str}{tags_str}{parent_str}{children_str}"
         )
 
     return "\n".join(lines)

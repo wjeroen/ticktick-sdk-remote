@@ -297,6 +297,22 @@ def get_client(ctx: Context) -> TickTickClient:
     return ctx.request_context.lifespan_context["client"]
 
 
+async def build_project_name_map(
+    client: TickTickClient, tasks: list
+) -> dict[str, str] | None:
+    """Return {project_id: name} for the formatter when tasks span >1 project.
+
+    Returns None when all tasks share a project (the per-row Project badge would
+    be redundant noise) or the list is empty. One extra API call per render —
+    `format_tasks_markdown` will use this to add a `| Project: <name>` suffix.
+    """
+    distinct = {t.project_id for t in tasks if t.project_id}
+    if len(distinct) <= 1:
+        return None
+    projects = await client.get_all_projects()
+    return {p.id: p.name for p in projects}
+
+
 # =============================================================================
 # Error Handling
 # =============================================================================
@@ -720,7 +736,8 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
 
         if params.response_format == ResponseFormat.MARKDOWN:
             title = f"{params.status.capitalize()} Tasks" if params.status else "Tasks"
-            result = format_tasks_markdown(tasks, title, USER_TIMEZONE)
+            project_names = await build_project_name_map(client, tasks)
+            result = format_tasks_markdown(tasks, title, USER_TIMEZONE, project_names=project_names)
         else:
             result = json.dumps(format_tasks_json(tasks, USER_TIMEZONE), indent=2)
 
@@ -1144,7 +1161,8 @@ async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
         title = f"Search Results: '{params.query}'"
 
         if params.response_format == ResponseFormat.MARKDOWN:
-            return format_tasks_markdown(tasks, title, USER_TIMEZONE)
+            project_names = await build_project_name_map(client, tasks)
+            return format_tasks_markdown(tasks, title, USER_TIMEZONE, project_names=project_names)
         else:
             return json.dumps(format_tasks_json(tasks, USER_TIMEZONE), indent=2)
 
@@ -1221,7 +1239,11 @@ async def ticktick_pin_tasks(params: PinTasksInput, ctx: Context) -> str:
                 return json.dumps(result, indent=2, default=str)
         else:
             if params.response_format == ResponseFormat.MARKDOWN:
-                return f"**Success**: {count} tasks updated.\n\n{format_tasks_markdown(updated_tasks, tz_name=USER_TIMEZONE)}"
+                project_names = await build_project_name_map(client, updated_tasks)
+                return (
+                    f"**Success**: {count} tasks updated.\n\n"
+                    f"{format_tasks_markdown(updated_tasks, tz_name=USER_TIMEZONE, project_names=project_names)}"
+                )
             else:
                 return json.dumps({
                     "success": True,
