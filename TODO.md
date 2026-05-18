@@ -12,7 +12,7 @@
 
 ## Completed Recently ✅
 
-- [x] Show parent/child relationships in task views: list view gets `[SUB]` prefix and `| N subtask(s)` suffix; detail view renames mis-labelled `### Subtasks` (which was actually checklist items) to `### Checklist`, adds a real `### Subtasks` section listing `child_ids`, and shows `Parent task` in key details (2026-05-13)
+- [x] Show parent/child relationships in task views with consistent "parent" / "children" vocabulary: list view shows `| Child of: <parent_id>` suffix and `| N children` suffix; detail view shows `Parent` / `Children` count in key details; mis-labelled `### Subtasks` section (which was actually checklist items) renamed to `### Checklist`; child IDs no longer listed individually (count is enough) (2026-05-13)
 - [x] Fix `from_date`/`to_date` being silently ignored on `ticktick_list_tasks` with `status="completed"` or `"abandoned"`: dates are now passed through to `client.get_completed_tasks` / `get_abandoned_tasks` and interpreted as full days in `TICKTICK_TIMEZONE` (2026-05-13)
 - [x] Enrich single-task markdown detail view: show recurrence rule, all-day flag, and time zone (when it differs from user's TZ) (2026-05-13)
 - [x] Add `has_due_date` filter to `ticktick_list_tasks` (true = only scheduled, false = only unscheduled) (2026-05-13)

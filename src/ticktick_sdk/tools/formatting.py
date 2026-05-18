@@ -80,7 +80,9 @@ def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
     lines.append(f"- **ID**: `{task.id}`")
     lines.append(f"- **Project**: `{task.project_id}`")
     if task.parent_id:
-        lines.append(f"- **Parent task**: `{task.parent_id}`")
+        lines.append(f"- **Parent**: `{task.parent_id}`")
+    if task.child_ids:
+        lines.append(f"- **Children**: {len(task.child_ids)}")
     lines.append(f"- **Status**: {status_label(task.status)}")
     lines.append(f"- **Priority**: {priority_label(task.priority)}")
 
@@ -115,18 +117,13 @@ def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
 
     if task.items:
         # task.items are checklist items (a TODO list *inside* the task),
-        # not child tasks. Child tasks are tracked separately via child_ids.
+        # not child tasks. Child tasks are tracked separately via child_ids
+        # and surfaced as the **Children** count line in key details above.
         lines.append("")
         lines.append("### Checklist")
         for item in task.items:
             checkbox = "[x]" if item.is_completed else "[ ]"
             lines.append(f"- {checkbox} {item.title or '(No title)'}")
-
-    if task.child_ids:
-        lines.append("")
-        lines.append(f"### Subtasks ({len(task.child_ids)})")
-        for child_id in task.child_ids:
-            lines.append(f"- `{child_id}`")
 
     return "\n".join(lines)
 
@@ -177,16 +174,16 @@ def format_tasks_markdown(tasks: list[Task], title: str = "Tasks", tz_name: str 
     for task in tasks:
         priority_str = priority_indicator(task.priority)
         pinned_str = "[PINNED] " if task.is_pinned else ""
-        sub_str = "[SUB] " if task.parent_id else ""
         task_title = task.title or "(No title)"
         due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
         tags_str = f" | Tags: {', '.join(task.tags)}" if task.tags else ""
+        parent_str = f" | Child of: `{task.parent_id}`" if task.parent_id else ""
         child_count = len(task.child_ids) if task.child_ids else 0
-        children_str = f" | {child_count} subtask(s)" if child_count else ""
+        children_str = f" | {child_count} children" if child_count else ""
 
         lines.append(
-            f"- {priority_str} {pinned_str}{sub_str}**{task_title}** "
-            f"(`{task.id}`){due_str}{tags_str}{children_str}"
+            f"- {priority_str} {pinned_str}**{task_title}** "
+            f"(`{task.id}`){due_str}{tags_str}{parent_str}{children_str}"
         )
 
     return "\n".join(lines)
