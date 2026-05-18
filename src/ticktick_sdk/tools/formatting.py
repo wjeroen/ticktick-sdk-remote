@@ -93,6 +93,14 @@ def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
         lines.append(f"- **Due**: {format_datetime(task.due_date, tz_name)}")
     if task.start_date:
         lines.append(f"- **Start**: {format_datetime(task.start_date, tz_name)}")
+    if task.is_all_day:
+        lines.append("- **All-day**: Yes")
+    if task.repeat_flag:
+        lines.append(f"- **Repeats**: `{task.repeat_flag}`")
+    # Only surface time_zone when it differs from the user's configured TZ —
+    # otherwise it's noise on every task.
+    if task.time_zone and task.time_zone != tz_name:
+        lines.append(f"- **Time zone**: {task.time_zone}")
 
     if task.tags:
         tags_str = ", ".join(f"`{t}`" for t in task.tags)

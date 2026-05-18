@@ -429,6 +429,7 @@ The `ticktick_list_tasks` MCP tool supports filters that the Python SDK doesn't 
 |-----------|------|---------|--------|
 | `due_before` | `string` (YYYY-MM-DD) | `"2026-03-16"` | Active tasks due **on or before** this date |
 | `due_after` | `string` (YYYY-MM-DD) | `"2026-03-16"` | Active tasks due **on or after** this date (combine with `due_before` for a range) |
+| `has_due_date` | `boolean` | `false` | `true` = only tasks with a due date, `false` = only tasks **without** one (unscheduled) |
 | `due_today` | `boolean` | `true` | Only tasks due today |
 | `overdue` | `boolean` | `true` | Only tasks past their due date |
 | `priority` | `string` | `"high"` | Filter by priority: `none` / `low` / `medium` / `high` |
@@ -448,6 +449,12 @@ status="active", due_after="2026-03-16"
 
 # Tasks due in a date range (March 16-20 inclusive):
 status="active", due_after="2026-03-16", due_before="2026-03-20"
+
+# Unscheduled tasks (no due date set):
+status="active", has_due_date=false
+
+# Only tasks that have a due date (any date):
+status="active", has_due_date=true
 
 # High-priority tasks due this week:
 status="active", due_before="2026-03-20", priority="high"

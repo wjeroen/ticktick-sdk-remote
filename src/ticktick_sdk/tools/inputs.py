@@ -502,6 +502,10 @@ class TaskListInput(BaseMCPInput):
         description="Show active tasks due on or after this date (YYYY-MM-DD). Example: '2026-03-16' shows everything due from March 16 onwards. Combine with due_before for a range (e.g. due_after='2026-03-16' + due_before='2026-03-20' = tasks due March 16-20 inclusive).",
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
+    has_due_date: Optional[bool] = Field(
+        default=None,
+        description="If true, only return active tasks that have a due date set. If false, only return active tasks WITHOUT a due date (useful for finding ad-hoc tasks that need scheduling). Omit for no filtering.",
+    )
     # Date range (for completed/abandoned status)
     from_date: Optional[str] = Field(
         default=None,
