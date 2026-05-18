@@ -79,6 +79,8 @@ def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
     # Key details
     lines.append(f"- **ID**: `{task.id}`")
     lines.append(f"- **Project**: `{task.project_id}`")
+    if task.parent_id:
+        lines.append(f"- **Parent task**: `{task.parent_id}`")
     lines.append(f"- **Status**: {status_label(task.status)}")
     lines.append(f"- **Priority**: {priority_label(task.priority)}")
 
@@ -112,11 +114,19 @@ def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
         lines.append(task.content)
 
     if task.items:
+        # task.items are checklist items (a TODO list *inside* the task),
+        # not child tasks. Child tasks are tracked separately via child_ids.
         lines.append("")
-        lines.append("### Subtasks")
+        lines.append("### Checklist")
         for item in task.items:
             checkbox = "[x]" if item.is_completed else "[ ]"
             lines.append(f"- {checkbox} {item.title or '(No title)'}")
+
+    if task.child_ids:
+        lines.append("")
+        lines.append(f"### Subtasks ({len(task.child_ids)})")
+        for child_id in task.child_ids:
+            lines.append(f"- `{child_id}`")
 
     return "\n".join(lines)
 
