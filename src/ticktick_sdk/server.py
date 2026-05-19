@@ -240,9 +240,8 @@ def truncate_response(
         f"\n\n---\n"
         f"⚠️ **Response truncated** (exceeded {CHARACTER_LIMIT:,} characters)\n\n"
         f"Showing partial results. To see more:\n"
-        f"- Use filters (project_id, tag, priority) to narrow results\n"
-        f"- Use the 'limit' parameter to reduce the number of items\n"
-        f"- Request response_format='json' for more compact output"
+        f"- Use filters (project_id, tag, priority, due_before/after) to narrow results\n"
+        f"- Use the 'limit' parameter to reduce the number of items"
     )
 
     return truncated + message
