@@ -121,20 +121,20 @@ All mutation tools accept lists for batch operations (1-100 items).
 |------|-------------|
 | `ticktick_create_tasks` | Create 1-50 tasks with titles, dates, tags, etc. |
 | `ticktick_get_task` | Get task details by ID |
-| `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter; supports `due_before` / `due_after` for date-range filtering — combine both for a range) |
+| `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter; supports `due_before` / `due_after` for date-range filtering — combine both for a range). **Paginated** — pass `offset` to continue. |
 | `ticktick_update_tasks` | Update 1-100 tasks (includes column assignment) |
 | `ticktick_complete_tasks` | Complete 1-100 tasks |
 | `ticktick_delete_tasks` | Delete 1-100 tasks (moves to trash) |
 | `ticktick_move_tasks` | Move 1-50 tasks between projects |
 | `ticktick_set_task_parents` | Set parent-child relationships for 1-50 tasks |
 | `ticktick_unparent_tasks` | Remove parent relationships from 1-50 tasks |
-| `ticktick_search_tasks` | Search tasks by text |
+| `ticktick_search_tasks` | Search tasks by text. **Paginated** — pass `offset` to continue. |
 | `ticktick_pin_tasks` | Pin or unpin 1-100 tasks |
 
 ### Project Tools
 | Tool | Description |
 |------|-------------|
-| `ticktick_list_projects` | List all projects |
+| `ticktick_list_projects` | List all projects. **Paginated** — pass `offset` to continue. |
 | `ticktick_get_project` | Get project details with tasks |
 | `ticktick_create_project` | Create a new project |
 | `ticktick_update_project` | Update project properties |
@@ -143,7 +143,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 ### Folder Tools
 | Tool | Description |
 |------|-------------|
-| `ticktick_list_folders` | List all folders |
+| `ticktick_list_folders` | List all folders. **Paginated** — pass `offset` to continue. |
 | `ticktick_create_folder` | Create a folder |
 | `ticktick_rename_folder` | Rename a folder |
 | `ticktick_delete_folder` | Delete a folder |
@@ -151,7 +151,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 ### Kanban Column Tools
 | Tool | Description |
 |------|-------------|
-| `ticktick_list_columns` | List columns for a kanban project |
+| `ticktick_list_columns` | List columns for a kanban project. **Paginated** — pass `offset` to continue. |
 | `ticktick_create_column` | Create a kanban column |
 | `ticktick_update_column` | Update column name or order |
 | `ticktick_delete_column` | Delete a kanban column |
@@ -159,7 +159,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 ### Tag Tools
 | Tool | Description |
 |------|-------------|
-| `ticktick_list_tags` | List all tags |
+| `ticktick_list_tags` | List all tags. **Paginated** — pass `offset` to continue. |
 | `ticktick_create_tag` | Create a tag with color |
 | `ticktick_update_tag` | Update tag properties (includes rename via label) |
 | `ticktick_delete_tag` | Delete a tag |
@@ -168,7 +168,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 ### Habit Tools (Batch-Capable)
 | Tool | Description |
 |------|-------------|
-| `ticktick_habits` | List all habits |
+| `ticktick_habits` | List all habits. **Paginated** — pass `offset` to continue. |
 | `ticktick_habit` | Get habit details |
 | `ticktick_habit_sections` | List sections (morning/afternoon/night) |
 | `ticktick_create_habit` | Create a new habit |
@@ -186,6 +186,66 @@ All mutation tools accept lists for batch operations (1-100 items).
 | `ticktick_get_preferences` | Get user preferences |
 | `ticktick_focus_heatmap` | Get focus heatmap data |
 | `ticktick_focus_by_tag` | Get focus time by tag |
+
+---
+
+## Response Format & Pagination
+
+Every list-returning tool uses **budget-aware pagination** to stay under the ~25,000 character MCP response limit. The model never has to guess how many items will fit — the server tells it.
+
+### How pagination works
+
+- All list tools accept an `offset` parameter (default `0`).
+- Markdown responses include a footer when more items remain:
+  ```
+  ---
+  More tasks available. Call again with `offset=50` to fetch the next page.
+  ```
+- JSON responses include explicit metadata:
+  ```json
+  {
+    "count": 50,           // items on this page
+    "total": 234,          // total matching
+    "offset": 0,           // where this page starts
+    "next_offset": 50,     // pass back to fetch next page, or null when done
+    "tasks": [...]
+  }
+  ```
+- When everything fits on one page, `next_offset` is `null` and the markdown footer is omitted. Pagination is invisible to the consumer.
+
+### Per-task content cap in JSON list views
+
+Task notes (`content`) can be arbitrarily long. To keep JSON list pages from being dominated by a single multi-kilobyte note, list-view responses truncate `content` to **500 characters** per task. When truncation happens:
+- Each affected task gets a `"content_truncated": true` flag.
+- The top-level response gets a `"_content_hint"` pointing at `ticktick_get_task` for the full text.
+
+`ticktick_get_task` (the detail view) never truncates content.
+
+### Task list row format (markdown)
+
+Each task row in `ticktick_list_tasks` / `ticktick_search_tasks` / project-tasks views shows:
+
+```
+- [PRIORITY] [PINNED] [DONE|ABANDONED] [REPEATS] **Title** (`id`) | Project: Name | Due: YYYY-MM-DD | Tags: a, b | Child of: `parent_id` | N children
+```
+
+- `[PRIORITY]` — `[HIGH]` / `[MEDIUM]` / `[LOW]` / `[NONE]`
+- `[PINNED]` — only when pinned
+- `[DONE]` / `[ABANDONED]` — only on non-active tasks (active is the implicit default and gets no flag)
+- `[REPEATS]` — only when a recurrence rule is set
+- `Project: Name` — shown only when the rendered list spans more than one project (single-project lists omit it as redundant)
+- `Child of: <parent_id>` — only when the task is a subtask
+- `N children` — count of subtasks beneath this task
+
+### Task detail view (markdown)
+
+`ticktick_get_task` and create/update single-task results show full details: project name + ID, parent ID, child IDs (listed), checklist items with check states, full content/notes, recurrence rule, time zone (when different from yours), tags, due/start dates in your local timezone.
+
+### Format choice: markdown vs JSON
+
+- **Markdown** is typically more compact per task (~400 chars/task) — it omits null/empty fields and renders compact one-line rows.
+- **JSON** is more verbose (~700 chars/task) but includes every field explicitly, both numeric and label variants of priority/status, raw ISO timestamps, and is structured for programmatic consumption.
+- Both go through the same per-task formatter, so the **fields shown are identical between `list_tasks` and `search_tasks`** and between markdown and JSON modulo the format-specific render.
 
 ---
 

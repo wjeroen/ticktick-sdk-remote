@@ -62,6 +62,136 @@ def status_label(status: int) -> str:
 
 
 # =============================================================================
+# Generic Pagination Helpers
+# =============================================================================
+
+# Reserves for header/footer (markdown) and envelope (JSON) so we don't blow
+# the budget when adding the surrounding scaffolding.
+_MD_HEADER_RESERVE = 150
+_MD_FOOTER_RESERVE = 250
+_JSON_ENVELOPE_RESERVE = 300
+
+
+def paginate_markdown(
+    items: list,
+    title: str,
+    offset: int,
+    format_item: Callable[[Any], str],
+    item_label: str = "items",
+    budget: int = CHARACTER_LIMIT,
+) -> str:
+    """Budget-aware paginated markdown rendering.
+
+    Adds one item at a time until the next would exceed `budget`, then stops
+    and appends a footer telling the caller how to fetch the next page. If
+    every item fits, the footer is omitted entirely so pagination is
+    invisible to the consumer.
+    """
+    total = len(items)
+    if total == 0:
+        return f"# {title}\n\nNo {item_label} found."
+    if offset >= total:
+        return (
+            f"# {title}\n\n"
+            f"No {item_label} at offset {offset} (total: {total}). "
+            f"Use offset=0 to start from the beginning."
+        )
+
+    page = items[offset:]
+    available = budget - _MD_HEADER_RESERVE - _MD_FOOTER_RESERVE
+
+    rows = []
+    used = 0
+    for item in page:
+        row = format_item(item)
+        if used + len(row) + 1 > available:
+            break
+        rows.append(row)
+        used += len(row) + 1
+
+    shown = len(rows)
+    next_offset = offset + shown if offset + shown < total else None
+
+    if shown == total:
+        summary = f"Found {total} {item_label}:"
+    else:
+        summary = (
+            f"Showing {item_label} {offset + 1}–{offset + shown} of {total} total:"
+        )
+
+    out = [f"# {title}", "", summary, ""]
+    out.extend(rows)
+
+    if next_offset is not None:
+        out.append("")
+        out.append("---")
+        out.append(
+            f"More {item_label} available. Call again with `offset={next_offset}` "
+            f"to fetch the next page."
+        )
+
+    return "\n".join(out)
+
+
+def paginate_json(
+    items: list,
+    offset: int,
+    format_item: Callable[[Any], dict],
+    budget: int = CHARACTER_LIMIT,
+    item_key: str = "items",
+) -> dict[str, Any]:
+    """Budget-aware paginated JSON rendering.
+
+    Returns `{count, total, offset, next_offset, <item_key>}`. Caller
+    serializes with `json.dumps`. When `next_offset` is None there are no
+    more pages; otherwise pass it back as `offset` to continue.
+
+    Sizing is exact: after each item we serialize the whole envelope and
+    back off if we've gone over budget. O(n²) in page size but n is small.
+    """
+    total = len(items)
+    if total == 0:
+        return {
+            "count": 0,
+            "total": 0,
+            "offset": 0,
+            "next_offset": None,
+            item_key: [],
+        }
+    if offset >= total:
+        return {
+            "count": 0,
+            "total": total,
+            "offset": offset,
+            "next_offset": None,
+            item_key: [],
+            "_hint": f"offset {offset} is past the end (total: {total}).",
+        }
+
+    def envelope(items_list: list[dict], next_off: int | None) -> dict[str, Any]:
+        return {
+            "count": len(items_list),
+            "total": total,
+            "offset": offset,
+            "next_offset": next_off,
+            item_key: items_list,
+        }
+
+    formatted: list[dict] = []
+    for idx, item in enumerate(items[offset:]):
+        formatted.append(format_item(item))
+        # Worst-case envelope: next_offset present (longer than null)
+        provisional_next = offset + len(formatted) + 1
+        if len(json.dumps(envelope(formatted, provisional_next), indent=2, default=str)) > budget:
+            formatted.pop()
+            break
+
+    shown = len(formatted)
+    next_offset = offset + shown if offset + shown < total else None
+    return envelope(formatted, next_offset)
+
+
+# =============================================================================
 # Task Formatting
 # =============================================================================
 
@@ -144,16 +274,38 @@ def format_task_markdown(
     return "\n".join(lines)
 
 
-def format_task_json(task: Task, tz_name: str = "UTC") -> dict[str, Any]:
-    """Format a single task as JSON-serializable dict."""
+def format_task_json(
+    task: Task,
+    tz_name: str = "UTC",
+    content_max_chars: int | None = None,
+) -> dict[str, Any]:
+    """Format a single task as JSON-serializable dict.
+
+    `content_max_chars` is the per-task content cap used in list views to
+    keep page sizes manageable. When set and the content is longer, it's
+    truncated with an ellipsis and an extra `content_truncated: true` field
+    is added — the model should call `ticktick_get_task` for the full text.
+    Detail-view callers leave this at None to get the full content.
+    """
     start_date = convert_tz(task.start_date, tz_name)
     due_date = convert_tz(task.due_date, tz_name)
     completed_time = convert_tz(task.completed_time, tz_name)
-    return {
+
+    content = task.content
+    content_truncated = False
+    if (
+        content_max_chars is not None
+        and content is not None
+        and len(content) > content_max_chars
+    ):
+        content = content[:content_max_chars] + "…"
+        content_truncated = True
+
+    payload: dict[str, Any] = {
         "id": task.id,
         "project_id": task.project_id,
         "title": task.title,
-        "content": task.content,
+        "content": content,
         "kind": task.kind,
         "status": task.status,
         "status_label": status_label(task.status),
@@ -179,6 +331,41 @@ def format_task_json(task: Task, tz_name: str = "UTC") -> dict[str, Any]:
             for item in task.items
         ],
     }
+    if content_truncated:
+        payload["content_truncated"] = True
+    return payload
+
+
+def format_task_row_markdown(
+    task: Task,
+    tz_name: str = "UTC",
+    project_names: dict[str, str] | None = None,
+) -> str:
+    """Format a single task as one markdown list row (no leading bullet header)."""
+    priority_str = priority_indicator(task.priority)
+    pinned_str = "[PINNED] " if task.is_pinned else ""
+    # Only flag non-active statuses — [ACTIVE] on every row is noise.
+    if task.status == -1:
+        status_flag = "[ABANDONED] "
+    elif task.status in (1, 2):
+        status_flag = "[DONE] "
+    else:
+        status_flag = ""
+    repeat_flag_str = "[REPEATS] " if task.repeat_flag else ""
+    task_title = task.title or "(No title)"
+    due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
+    tags_str = f" | Tags: {', '.join(task.tags)}" if task.tags else ""
+    parent_str = f" | Child of: `{task.parent_id}`" if task.parent_id else ""
+    child_count = len(task.child_ids) if task.child_ids else 0
+    children_str = f" | {child_count} children" if child_count else ""
+    project_str = ""
+    if project_names and task.project_id in project_names:
+        project_str = f" | Project: {project_names[task.project_id]}"
+
+    return (
+        f"- {priority_str} {pinned_str}{status_flag}{repeat_flag_str}**{task_title}** "
+        f"(`{task.id}`){project_str}{due_str}{tags_str}{parent_str}{children_str}"
+    )
 
 
 def format_tasks_markdown(
@@ -187,52 +374,94 @@ def format_tasks_markdown(
     tz_name: str = "UTC",
     project_names: dict[str, str] | None = None,
 ) -> str:
-    """Format multiple tasks as Markdown.
+    """Format multiple tasks as Markdown (non-paginated convenience wrapper).
 
-    When `project_names` is provided, each row gets a `| Project: <name>`
-    suffix. Callers should only pass the map when tasks span multiple
-    projects — otherwise the badge is redundant noise.
+    For budget-aware paginated output, use `paginate_tasks_markdown`.
     """
     if not tasks:
         return f"# {title}\n\nNo tasks found."
 
     lines = [f"# {title}", "", f"Found {len(tasks)} task(s):", ""]
-
     for task in tasks:
-        priority_str = priority_indicator(task.priority)
-        pinned_str = "[PINNED] " if task.is_pinned else ""
-        # Only flag non-active statuses — [ACTIVE] on every row is noise.
-        if task.status == -1:
-            status_flag = "[ABANDONED] "
-        elif task.status in (1, 2):
-            status_flag = "[DONE] "
-        else:
-            status_flag = ""
-        repeat_flag_str = "[REPEATS] " if task.repeat_flag else ""
-        task_title = task.title or "(No title)"
-        due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
-        tags_str = f" | Tags: {', '.join(task.tags)}" if task.tags else ""
-        parent_str = f" | Child of: `{task.parent_id}`" if task.parent_id else ""
-        child_count = len(task.child_ids) if task.child_ids else 0
-        children_str = f" | {child_count} children" if child_count else ""
-        project_str = ""
-        if project_names and task.project_id in project_names:
-            project_str = f" | Project: {project_names[task.project_id]}"
-
-        lines.append(
-            f"- {priority_str} {pinned_str}{status_flag}{repeat_flag_str}**{task_title}** "
-            f"(`{task.id}`){project_str}{due_str}{tags_str}{parent_str}{children_str}"
-        )
-
+        lines.append(format_task_row_markdown(task, tz_name, project_names))
     return "\n".join(lines)
 
 
-def format_tasks_json(tasks: list[Task], tz_name: str = "UTC") -> dict[str, Any]:
-    """Format multiple tasks as JSON."""
-    return {
+def format_tasks_json(
+    tasks: list[Task],
+    tz_name: str = "UTC",
+    content_max_chars: int | None = None,
+) -> dict[str, Any]:
+    """Format multiple tasks as JSON (non-paginated convenience wrapper).
+
+    `content_max_chars` defaults to None for backward compatibility, but
+    list-view callers should pass `LIST_CONTENT_MAX_CHARS` so the per-task
+    notes don't blow up batch responses with multi-kilobyte content fields.
+    For budget-aware paginated output use `paginate_tasks_json` instead.
+    """
+    formatted = [format_task_json(t, tz_name, content_max_chars=content_max_chars) for t in tasks]
+    result: dict[str, Any] = {
         "count": len(tasks),
-        "tasks": [format_task_json(t, tz_name) for t in tasks],
+        "tasks": formatted,
     }
+    if content_max_chars is not None and any(t.get("content_truncated") for t in formatted):
+        result["_content_hint"] = (
+            f"Some content fields are truncated to {content_max_chars} chars. "
+            "Use ticktick_get_task(task_id) for the full note."
+        )
+    return result
+
+
+# Per-task content cap for list views (~one or two tweets); the model can
+# call ticktick_get_task to retrieve the full notes when needed.
+LIST_CONTENT_MAX_CHARS = 500
+
+
+def paginate_tasks_markdown(
+    tasks: list[Task],
+    title: str,
+    offset: int,
+    tz_name: str = "UTC",
+    project_names: dict[str, str] | None = None,
+    budget: int = CHARACTER_LIMIT,
+) -> str:
+    """Paginated, budget-aware markdown rendering of a task list."""
+    return paginate_markdown(
+        tasks,
+        title=title,
+        offset=offset,
+        format_item=lambda t: format_task_row_markdown(t, tz_name, project_names),
+        item_label="tasks",
+        budget=budget,
+    )
+
+
+def paginate_tasks_json(
+    tasks: list[Task],
+    offset: int,
+    tz_name: str = "UTC",
+    content_max_chars: int = LIST_CONTENT_MAX_CHARS,
+    budget: int = CHARACTER_LIMIT,
+) -> dict[str, Any]:
+    """Paginated, budget-aware JSON rendering of a task list.
+
+    Each task's `content` is capped at `content_max_chars` (default 500).
+    When any task hits the cap, a `_content_hint` is added at the top level
+    pointing the caller at `ticktick_get_task` for the full text.
+    """
+    result = paginate_json(
+        tasks,
+        offset=offset,
+        format_item=lambda t: format_task_json(t, tz_name, content_max_chars=content_max_chars),
+        budget=budget,
+        item_key="tasks",
+    )
+    if any(t.get("content_truncated") for t in result["tasks"]):
+        result["_content_hint"] = (
+            f"Some content fields are truncated to {content_max_chars} chars. "
+            "Use ticktick_get_task(task_id) for the full note."
+        )
+    return result
 
 
 # =============================================================================
@@ -274,17 +503,20 @@ def format_project_json(project: Project) -> dict[str, Any]:
     }
 
 
+def format_project_row_markdown(project: Project) -> str:
+    """Format a single project as one markdown list row."""
+    color_indicator = f"({project.color})" if project.color else ""
+    return f"- **{project.name}** (`{project.id}`) {color_indicator}".rstrip()
+
+
 def format_projects_markdown(projects: list[Project], title: str = "Projects") -> str:
-    """Format multiple projects as Markdown."""
+    """Format multiple projects as Markdown (non-paginated convenience wrapper)."""
     if not projects:
         return f"# {title}\n\nNo projects found."
 
     lines = [f"# {title}", "", f"Found {len(projects)} project(s):", ""]
-
     for project in projects:
-        color_indicator = f"({project.color})" if project.color else ""
-        lines.append(f"- **{project.name}** (`{project.id}`) {color_indicator}")
-
+        lines.append(format_project_row_markdown(project))
     return "\n".join(lines)
 
 
@@ -294,6 +526,36 @@ def format_projects_json(projects: list[Project]) -> dict[str, Any]:
         "count": len(projects),
         "projects": [format_project_json(p) for p in projects],
     }
+
+
+def paginate_projects_markdown(
+    projects: list[Project],
+    offset: int,
+    title: str = "Projects",
+    budget: int = CHARACTER_LIMIT,
+) -> str:
+    return paginate_markdown(
+        projects,
+        title=title,
+        offset=offset,
+        format_item=format_project_row_markdown,
+        item_label="projects",
+        budget=budget,
+    )
+
+
+def paginate_projects_json(
+    projects: list[Project],
+    offset: int,
+    budget: int = CHARACTER_LIMIT,
+) -> dict[str, Any]:
+    return paginate_json(
+        projects,
+        offset=offset,
+        format_item=format_project_json,
+        budget=budget,
+        item_key="projects",
+    )
 
 
 # =============================================================================
@@ -328,18 +590,21 @@ def format_tag_json(tag: Tag) -> dict[str, Any]:
     }
 
 
+def format_tag_row_markdown(tag: Tag) -> str:
+    """Format a single tag as one markdown list row."""
+    color_indicator = f"({tag.color})" if tag.color else ""
+    parent_indicator = f" (in {tag.parent})" if tag.parent else ""
+    return f"- **{tag.label}** (`{tag.name}`) {color_indicator}{parent_indicator}".rstrip()
+
+
 def format_tags_markdown(tags: list[Tag], title: str = "Tags") -> str:
-    """Format multiple tags as Markdown."""
+    """Format multiple tags as Markdown (non-paginated convenience wrapper)."""
     if not tags:
         return f"# {title}\n\nNo tags found."
 
     lines = [f"# {title}", "", f"Found {len(tags)} tag(s):", ""]
-
     for tag in tags:
-        color_indicator = f"({tag.color})" if tag.color else ""
-        parent_indicator = f" (in {tag.parent})" if tag.parent else ""
-        lines.append(f"- **{tag.label}** (`{tag.name}`) {color_indicator}{parent_indicator}")
-
+        lines.append(format_tag_row_markdown(tag))
     return "\n".join(lines)
 
 
@@ -349,6 +614,36 @@ def format_tags_json(tags: list[Tag]) -> dict[str, Any]:
         "count": len(tags),
         "tags": [format_tag_json(t) for t in tags],
     }
+
+
+def paginate_tags_markdown(
+    tags: list[Tag],
+    offset: int,
+    title: str = "Tags",
+    budget: int = CHARACTER_LIMIT,
+) -> str:
+    return paginate_markdown(
+        tags,
+        title=title,
+        offset=offset,
+        format_item=format_tag_row_markdown,
+        item_label="tags",
+        budget=budget,
+    )
+
+
+def paginate_tags_json(
+    tags: list[Tag],
+    offset: int,
+    budget: int = CHARACTER_LIMIT,
+) -> dict[str, Any]:
+    return paginate_json(
+        tags,
+        offset=offset,
+        format_item=format_tag_json,
+        budget=budget,
+        item_key="tags",
+    )
 
 
 # =============================================================================
@@ -371,15 +666,13 @@ def format_folder_json(folder: ProjectGroup) -> dict[str, Any]:
 
 
 def format_folders_markdown(folders: list[ProjectGroup], title: str = "Folders") -> str:
-    """Format multiple folders as Markdown."""
+    """Format multiple folders as Markdown (non-paginated convenience wrapper)."""
     if not folders:
         return f"# {title}\n\nNo folders found."
 
     lines = [f"# {title}", "", f"Found {len(folders)} folder(s):", ""]
-
     for folder in folders:
         lines.append(format_folder_markdown(folder))
-
     return "\n".join(lines)
 
 
@@ -389,6 +682,36 @@ def format_folders_json(folders: list[ProjectGroup]) -> dict[str, Any]:
         "count": len(folders),
         "folders": [format_folder_json(f) for f in folders],
     }
+
+
+def paginate_folders_markdown(
+    folders: list[ProjectGroup],
+    offset: int,
+    title: str = "Folders",
+    budget: int = CHARACTER_LIMIT,
+) -> str:
+    return paginate_markdown(
+        folders,
+        title=title,
+        offset=offset,
+        format_item=format_folder_markdown,
+        item_label="folders",
+        budget=budget,
+    )
+
+
+def paginate_folders_json(
+    folders: list[ProjectGroup],
+    offset: int,
+    budget: int = CHARACTER_LIMIT,
+) -> dict[str, Any]:
+    return paginate_json(
+        folders,
+        offset=offset,
+        format_item=format_folder_json,
+        budget=budget,
+        item_key="folders",
+    )
 
 
 # =============================================================================
@@ -417,17 +740,14 @@ def format_column_json(column: Column, tz_name: str = "UTC") -> dict[str, Any]:
 
 
 def format_columns_markdown(columns: list[Column], title: str = "Kanban Columns") -> str:
-    """Format multiple columns as Markdown."""
+    """Format multiple columns as Markdown (non-paginated convenience wrapper)."""
     if not columns:
         return f"# {title}\n\nNo columns found."
 
     lines = [f"# {title}", "", f"Found {len(columns)} column(s):", ""]
-
-    # Sort by sort_order for display
     sorted_columns = sorted(columns, key=lambda c: c.sort_order or 0)
     for column in sorted_columns:
         lines.append(format_column_markdown(column))
-
     return "\n".join(lines)
 
 
@@ -437,6 +757,39 @@ def format_columns_json(columns: list[Column], tz_name: str = "UTC") -> dict[str
         "count": len(columns),
         "columns": [format_column_json(c, tz_name) for c in columns],
     }
+
+
+def paginate_columns_markdown(
+    columns: list[Column],
+    offset: int,
+    title: str = "Kanban Columns",
+    budget: int = CHARACTER_LIMIT,
+) -> str:
+    sorted_columns = sorted(columns, key=lambda c: c.sort_order or 0)
+    return paginate_markdown(
+        sorted_columns,
+        title=title,
+        offset=offset,
+        format_item=format_column_markdown,
+        item_label="columns",
+        budget=budget,
+    )
+
+
+def paginate_columns_json(
+    columns: list[Column],
+    offset: int,
+    tz_name: str = "UTC",
+    budget: int = CHARACTER_LIMIT,
+) -> dict[str, Any]:
+    sorted_columns = sorted(columns, key=lambda c: c.sort_order or 0)
+    return paginate_json(
+        sorted_columns,
+        offset=offset,
+        format_item=lambda c: format_column_json(c, tz_name),
+        budget=budget,
+        item_key="columns",
+    )
 
 
 # =============================================================================

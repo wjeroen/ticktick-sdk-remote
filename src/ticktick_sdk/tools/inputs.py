@@ -526,9 +526,14 @@ class TaskListInput(BaseMCPInput):
     # Pagination
     limit: int = Field(
         default=50,
-        description="Maximum number of tasks to return",
+        description="Maximum number of tasks to consider after filtering. Combine with offset for paging through large result sets.",
         ge=1,
         le=500,
+    )
+    offset: int = Field(
+        default=0,
+        description="Zero-based offset into the filtered task list. The response includes 'next_offset' (or a footer in markdown) when more tasks remain — call again with that value to fetch the next page.",
+        ge=0,
     )
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN,
@@ -547,9 +552,14 @@ class SearchInput(BaseMCPInput):
     )
     limit: int = Field(
         default=20,
-        description="Maximum number of results to return",
+        description="Maximum number of results to consider after filtering. Combine with offset for paging.",
         ge=1,
         le=100,
+    )
+    offset: int = Field(
+        default=0,
+        description="Zero-based offset into the search result list. The response includes 'next_offset' (or a markdown footer) when more results remain.",
+        ge=0,
     )
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN,
@@ -723,6 +733,11 @@ class ColumnListInput(BaseMCPInput):
         ...,
         description="Project ID to get columns for (must be a kanban-view project)",
         pattern=r"^(inbox\d+|[a-f0-9]{24})$",
+    )
+    offset: int = Field(
+        default=0,
+        description="Zero-based offset for paging. Response includes 'next_offset' when more columns remain.",
+        ge=0,
     )
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN,
@@ -932,6 +947,11 @@ class HabitListInput(BaseMCPInput):
     include_archived: bool = Field(
         default=False,
         description="Include archived habits in the list",
+    )
+    offset: int = Field(
+        default=0,
+        description="Zero-based offset for paging. Response includes 'next_offset' when more habits remain.",
+        ge=0,
     )
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN,

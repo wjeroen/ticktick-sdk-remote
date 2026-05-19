@@ -156,6 +156,19 @@ from ticktick_sdk.tools.formatting import (
     format_task_json,
     format_tasks_markdown,
     format_tasks_json,
+    paginate_tasks_markdown,
+    paginate_tasks_json,
+    paginate_markdown,
+    paginate_json,
+    paginate_projects_markdown,
+    paginate_projects_json,
+    paginate_tags_markdown,
+    paginate_tags_json,
+    paginate_folders_markdown,
+    paginate_folders_json,
+    paginate_columns_markdown,
+    paginate_columns_json,
+    LIST_CONTENT_MAX_CHARS,
     format_project_markdown,
     format_project_json,
     format_projects_markdown,
@@ -573,7 +586,10 @@ async def ticktick_create_tasks(params: CreateTasksInput, ctx: Context) -> str:
             return json.dumps({
                 "success": True,
                 "count": len(created_tasks),
-                "tasks": [format_task_json(t, USER_TIMEZONE) for t in created_tasks]
+                "tasks": [
+                    format_task_json(t, USER_TIMEZONE, content_max_chars=LIST_CONTENT_MAX_CHARS)
+                    for t in created_tasks
+                ],
             }, indent=2)
 
     except Exception as e:
@@ -756,19 +772,24 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         else:
             tasks = await client.get_all_tasks()
 
-        # Apply limit
-        total_count = len(tasks)
+        # Apply limit after filtering — pagination then slices the limited set.
         tasks = tasks[: params.limit]
 
         if params.response_format == ResponseFormat.MARKDOWN:
             title = f"{params.status.capitalize()} Tasks" if params.status else "Tasks"
             project_names = await build_project_name_map(client, tasks)
-            result = format_tasks_markdown(tasks, title, USER_TIMEZONE, project_names=project_names)
+            return paginate_tasks_markdown(
+                tasks,
+                title=title,
+                offset=params.offset,
+                tz_name=USER_TIMEZONE,
+                project_names=project_names,
+            )
         else:
-            result = json.dumps(format_tasks_json(tasks, USER_TIMEZONE), indent=2)
-
-        # Apply truncation if response is too large
-        return truncate_response(result, total_count, len(tasks))
+            return json.dumps(
+                paginate_tasks_json(tasks, offset=params.offset, tz_name=USER_TIMEZONE),
+                indent=2,
+            )
 
     except Exception as e:
         return handle_error(e, "list_tasks")
@@ -1188,9 +1209,18 @@ async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
 
         if params.response_format == ResponseFormat.MARKDOWN:
             project_names = await build_project_name_map(client, tasks)
-            return format_tasks_markdown(tasks, title, USER_TIMEZONE, project_names=project_names)
+            return paginate_tasks_markdown(
+                tasks,
+                title=title,
+                offset=params.offset,
+                tz_name=USER_TIMEZONE,
+                project_names=project_names,
+            )
         else:
-            return json.dumps(format_tasks_json(tasks, USER_TIMEZONE), indent=2)
+            return json.dumps(
+                paginate_tasks_json(tasks, offset=params.offset, tz_name=USER_TIMEZONE),
+                indent=2,
+            )
 
     except Exception as e:
         return handle_error(e, "search_tasks")
@@ -1278,7 +1308,10 @@ async def ticktick_pin_tasks(params: PinTasksInput, ctx: Context) -> str:
                 return json.dumps({
                     "success": True,
                     "count": count,
-                    "tasks": [format_task_json(t, USER_TIMEZONE) for t in updated_tasks]
+                    "tasks": [
+                        format_task_json(t, USER_TIMEZONE, content_max_chars=LIST_CONTENT_MAX_CHARS)
+                        for t in updated_tasks
+                    ],
                 }, indent=2, default=str)
 
     except Exception as e:
@@ -1321,9 +1354,13 @@ async def ticktick_list_columns(params: ColumnListInput, ctx: Context) -> str:
         columns = await client.get_columns(params.project_id)
 
         if params.response_format == ResponseFormat.MARKDOWN:
-            return format_columns_markdown(columns)
+            return paginate_columns_markdown(columns, offset=params.offset)
         else:
-            return json.dumps(format_columns_json(columns, USER_TIMEZONE), indent=2, default=str)
+            return json.dumps(
+                paginate_columns_json(columns, offset=params.offset, tz_name=USER_TIMEZONE),
+                indent=2,
+                default=str,
+            )
 
     except Exception as e:
         return handle_error(e, "list_columns")
@@ -1458,11 +1495,21 @@ async def ticktick_delete_column(params: ColumnDeleteInput, ctx: Context) -> str
         "openWorldHint": True,
     },
 )
-async def ticktick_list_projects(ctx: Context, response_format: ResponseFormat = ResponseFormat.MARKDOWN) -> str:
+async def ticktick_list_projects(
+    ctx: Context,
+    offset: int = 0,
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN,
+) -> str:
     """
     List all projects.
 
-    Retrieves all user projects with their details.
+    Retrieves all user projects with their details. Paginated: response
+    includes `next_offset` (JSON) or a footer (markdown) when more
+    projects remain.
+
+    Args:
+        offset: Zero-based offset for paging (default 0). Pass the
+            `next_offset` value from the previous call to continue.
 
     Returns:
         List of projects with: id, name, kind (TASK/NOTE), view_mode (list/kanban/timeline),
@@ -1473,9 +1520,9 @@ async def ticktick_list_projects(ctx: Context, response_format: ResponseFormat =
         projects = await client.get_all_projects()
 
         if response_format == ResponseFormat.MARKDOWN:
-            return format_projects_markdown(projects)
+            return paginate_projects_markdown(projects, offset=offset)
         else:
-            return json.dumps(format_projects_json(projects), indent=2)
+            return json.dumps(paginate_projects_json(projects, offset=offset), indent=2)
 
     except Exception as e:
         return handle_error(e, "list_projects")
@@ -1521,7 +1568,11 @@ async def ticktick_get_project(params: ProjectGetInput, ctx: Context) -> str:
             else:
                 return json.dumps({
                     "project": format_project_json(project_data.project),
-                    "tasks": format_tasks_json(project_data.tasks, USER_TIMEZONE),
+                    "tasks": format_tasks_json(
+                        project_data.tasks,
+                        USER_TIMEZONE,
+                        content_max_chars=LIST_CONTENT_MAX_CHARS,
+                    ),
                 }, indent=2)
         else:
             project = await client.get_project(params.project_id)
@@ -1703,11 +1754,16 @@ async def ticktick_delete_project(params: ProjectDeleteInput, ctx: Context) -> s
         "openWorldHint": True,
     },
 )
-async def ticktick_list_folders(ctx: Context, response_format: ResponseFormat = ResponseFormat.MARKDOWN) -> str:
+async def ticktick_list_folders(
+    ctx: Context,
+    offset: int = 0,
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN,
+) -> str:
     """
-    List all folders (project groups).
+    List all folders (project groups). Paginated.
 
-    Retrieves all folders used to organize projects.
+    Args:
+        offset: Zero-based offset for paging (default 0).
 
     Returns:
         Formatted list of folders or error message.
@@ -1717,9 +1773,9 @@ async def ticktick_list_folders(ctx: Context, response_format: ResponseFormat = 
         folders = await client.get_all_folders()
 
         if response_format == ResponseFormat.MARKDOWN:
-            return format_folders_markdown(folders)
+            return paginate_folders_markdown(folders, offset=offset)
         else:
-            return json.dumps(format_folders_json(folders), indent=2)
+            return json.dumps(paginate_folders_json(folders, offset=offset), indent=2)
 
     except Exception as e:
         return handle_error(e, "list_folders")
@@ -1842,11 +1898,16 @@ async def ticktick_delete_folder(params: FolderDeleteInput, ctx: Context) -> str
         "openWorldHint": True,
     },
 )
-async def ticktick_list_tags(ctx: Context, response_format: ResponseFormat = ResponseFormat.MARKDOWN) -> str:
+async def ticktick_list_tags(
+    ctx: Context,
+    offset: int = 0,
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN,
+) -> str:
     """
-    List all tags.
+    List all tags. Paginated.
 
-    Retrieves all tags with their colors and hierarchy.
+    Args:
+        offset: Zero-based offset for paging (default 0).
 
     Returns:
         Formatted list of tags or error message.
@@ -1856,9 +1917,9 @@ async def ticktick_list_tags(ctx: Context, response_format: ResponseFormat = Res
         tags = await client.get_all_tags()
 
         if response_format == ResponseFormat.MARKDOWN:
-            return format_tags_markdown(tags)
+            return paginate_tags_markdown(tags, offset=offset)
         else:
-            return json.dumps(format_tags_json(tags), indent=2)
+            return json.dumps(paginate_tags_json(tags, offset=offset), indent=2)
 
     except Exception as e:
         return handle_error(e, "list_tags")
@@ -2373,28 +2434,34 @@ def format_habit_json(habit: Habit) -> dict[str, Any]:
     }
 
 
+def format_habit_row_markdown(habit: Habit) -> str:
+    """Format a single habit as a multi-line list block."""
+    status = "📦" if habit.is_archived else "✅" if habit.current_streak > 0 else "⏳"
+    parts = [
+        f"### {status} {habit.name}",
+        f"- **ID**: `{habit.id}`",
+        f"- **Type**: {habit.habit_type}",
+        f"- **Streak**: {habit.current_streak} | Total: {habit.total_checkins}",
+    ]
+    if habit.target_days > 0:
+        parts.append(f"- **Target**: {habit.target_days} days")
+    parts.append("")  # trailing blank line so consecutive habits read as separate blocks
+    return "\n".join(parts)
+
+
 def format_habits_markdown(habits: list[Habit], title: str = "Habits") -> str:
-    """Format multiple habits for markdown display."""
+    """Format multiple habits for markdown (non-paginated convenience wrapper)."""
     if not habits:
         return f"# {title}\n\nNo habits found."
 
     lines = [f"# {title}", f"*{len(habits)} habits*", ""]
-
     for habit in habits:
-        status = "📦" if habit.is_archived else "✅" if habit.current_streak > 0 else "⏳"
-        lines.append(f"### {status} {habit.name}")
-        lines.append(f"- **ID**: `{habit.id}`")
-        lines.append(f"- **Type**: {habit.habit_type}")
-        lines.append(f"- **Streak**: {habit.current_streak} | Total: {habit.total_checkins}")
-        if habit.target_days > 0:
-            lines.append(f"- **Target**: {habit.target_days} days")
-        lines.append("")
-
+        lines.append(format_habit_row_markdown(habit))
     return "\n".join(lines)
 
 
 def format_habits_json(habits: list[Habit]) -> list[dict[str, Any]]:
-    """Format multiple habits for JSON output."""
+    """Format multiple habits for JSON output (legacy bare-list shape)."""
     return [format_habit_json(h) for h in habits]
 
 
@@ -2443,9 +2510,23 @@ async def ticktick_habits(params: HabitListInput, ctx: Context) -> str:
             habits = [h for h in habits if h.is_active]
 
         if params.response_format == ResponseFormat.MARKDOWN:
-            return format_habits_markdown(habits)
+            return paginate_markdown(
+                habits,
+                title="Habits",
+                offset=params.offset,
+                format_item=format_habit_row_markdown,
+                item_label="habits",
+            )
         else:
-            return json.dumps(format_habits_json(habits), indent=2)
+            return json.dumps(
+                paginate_json(
+                    habits,
+                    offset=params.offset,
+                    format_item=format_habit_json,
+                    item_key="habits",
+                ),
+                indent=2,
+            )
 
     except Exception as e:
         return handle_error(e, "list_habits")
