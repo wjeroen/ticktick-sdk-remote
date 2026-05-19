@@ -135,7 +135,7 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 
 **Task list & detail rendering**
 - [x] `[HIGH]` / `[MEDIUM]` / `[LOW]` / `[NONE]` priority labels visible in markdown list rows
-- [x] `[PINNED]` / `[DONE]` / `[ABANDONED]` / `[REPEATS]` status flags in list rows
+- [x] `[PINNED]` / `[DONE]` / `[ABANDONED]` / `[DAILY|WEEKLY|MONTHLY|YEARLY|REPEATS]` status flags in list rows
 - [x] Parent/children relationships shown inline (`Child of: <id>`, `N children`)
 - [x] Project name (not just ID) shown in multi-project list views and in detail view
 - [x] Recurrence rule, all-day flag, and non-default time zone surfaced in detail view
@@ -274,7 +274,7 @@ Each task row in `ticktick_list_tasks` / `ticktick_search_tasks` / project-tasks
 - `[PRIORITY]` — `[HIGH]` / `[MEDIUM]` / `[LOW]` / `[NONE]`
 - `[PINNED]` — only when pinned
 - `[DONE]` / `[ABANDONED]` — only on non-active tasks (active is the implicit default and gets no flag)
-- `[REPEATS]` — only when a recurrence rule is set
+- `[DAILY]` / `[WEEKLY]` / `[MONTHLY]` / `[YEARLY]` — when the task has a recurrence rule (parsed from `FREQ=` in the iCalendar RRULE). Falls back to `[REPEATS]` for unrecognized rules.
 - `Project: Name` — shown only when the rendered list spans more than one project (single-project lists omit it as redundant)
 - `Child of: <parent_id>` — only when the task is a subtask
 - `N children` — count of subtasks beneath this task

@@ -8,6 +8,7 @@ in both Markdown and JSON formats.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -59,6 +60,27 @@ def status_label(status: int) -> str:
     """Convert status int to label."""
     labels = {-1: "Abandoned", 0: "Active", 1: "Completed", 2: "Completed"}
     return labels.get(status, "Unknown")
+
+
+_KNOWN_RRULE_FREQS = {"DAILY", "WEEKLY", "MONTHLY", "YEARLY", "HOURLY", "MINUTELY"}
+
+
+def repeat_flag_indicator(repeat_flag: str | None) -> str:
+    """Compact list-row label for a task's recurrence rule.
+
+    Parses FREQ= out of an iCalendar RRULE (e.g. ``RRULE:FREQ=WEEKLY;BYDAY=MO``)
+    and returns ``[WEEKLY] `` so the cadence is visible at a glance. Falls back
+    to ``[REPEATS] `` when the rule is set but FREQ is missing or unknown.
+    """
+    if not repeat_flag:
+        return ""
+    match = re.search(r"FREQ=(\w+)", repeat_flag, re.IGNORECASE)
+    if not match:
+        return "[REPEATS] "
+    freq = match.group(1).upper()
+    if freq in _KNOWN_RRULE_FREQS:
+        return f"[{freq}] "
+    return "[REPEATS] "
 
 
 # =============================================================================
@@ -351,7 +373,7 @@ def format_task_row_markdown(
         status_flag = "[DONE] "
     else:
         status_flag = ""
-    repeat_flag_str = "[REPEATS] " if task.repeat_flag else ""
+    repeat_flag_str = repeat_flag_indicator(task.repeat_flag)
     task_title = task.title or "(No title)"
     due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
     tags_str = f" | Tags: {', '.join(task.tags)}" if task.tags else ""
