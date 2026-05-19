@@ -112,6 +112,48 @@ Note that it also misses some other features, like correct timezones and display
 
 ---
 
+## What this fork adds
+
+Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mirzabicer/ticktick-sdk). Most items are explained in more detail in the sections below.
+
+**Deployment & hosting**
+- [x] Remote HTTP server (streamable-http) for Railway deployment, replacing upstream's stdio-only local MCP
+- [x] Bearer token authentication for the HTTP transport
+- [x] `/health` endpoint for platform monitoring
+- [x] Railway deployment files (Procfile, Dockerfile)
+
+**Task filtering** (all on `ticktick_list_tasks`)
+- [x] `due_before` filter — active tasks due on or before a date
+- [x] `due_after` filter — active tasks due on or after a date (combine with `due_before` for ranges)
+- [x] `has_due_date` filter — find scheduled or unscheduled tasks
+- [x] `from_date`/`to_date` now honored for completed/abandoned status (previously silently ignored)
+
+**Pagination & response sizing**
+- [x] Budget-aware pagination across **all** list-returning tools (`list_tasks`, `search_tasks`, `list_projects`, `list_folders`, `list_tags`, `list_columns`, `habits`) — pass `offset`, response surfaces `next_offset`
+- [x] Per-task `content` capped at 500 chars in JSON list views (with `content_truncated` flag + `_content_hint` pointing at `ticktick_get_task` for the full text)
+- [x] Exact size-checking — no more zero-task truncated responses
+
+**Task list & detail rendering**
+- [x] `[HIGH]` / `[MEDIUM]` / `[LOW]` / `[NONE]` priority labels visible in markdown list rows
+- [x] `[PINNED]` / `[DONE]` / `[ABANDONED]` / `[REPEATS]` status flags in list rows
+- [x] Parent/children relationships shown inline (`Child of: <id>`, `N children`)
+- [x] Project name (not just ID) shown in multi-project list views and in detail view
+- [x] Recurrence rule, all-day flag, and non-default time zone surfaced in detail view
+- [x] `is_pinned` exposed in JSON output
+- [x] Child IDs listed in detail view (matching JSON's `child_ids`)
+
+**Bug fixes**
+- [x] Timezone handling: all-day tasks no longer off by one day (uses `TICKTICK_TIMEZONE`)
+- [x] `batch_update_tasks` no longer wipes `repeat_flag` / `is_all_day` / `time_zone` on sparse partial updates
+- [x] V2 wire-format datetime conversion no longer drifts by +N hours when input has a non-UTC tzinfo
+- [x] Empty `repeatFrom` from V2 no longer fails Pydantic validation
+
+**Project conventions**
+- [x] `CLAUDE.md` with project instructions for Claude Code sessions
+- [x] `TODO.md` for cross-session task tracking
+
+---
+
 ## Available MCP Tools (43 Total)
 
 All mutation tools accept lists for batch operations (1-100 items).
