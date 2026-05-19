@@ -332,6 +332,19 @@ class Task(TickTickModel):
             ]
         if self.repeat_flag is not None:
             data["repeatFlag"] = self.repeat_flag
+        # Recurrence anchors. The V2 batch/task endpoint resets any field
+        # absent from the body, so we must round-trip these from the
+        # pre-fetched task or TickTick can't compute the next occurrence
+        # (the RRULE survives but its anchor in the chain is lost — symptom:
+        # moving a recurring task to a new due date silently kills the series).
+        if self.repeat_from is not None:
+            data["repeatFrom"] = self.repeat_from
+        if self.repeat_first_date is not None:
+            data["repeatFirstDate"] = self.format_datetime(self.repeat_first_date, "v2")
+        if self.repeat_task_id is not None:
+            data["repeatTaskId"] = self.repeat_task_id
+        if self.ex_date:
+            data["exDate"] = self.ex_date
 
         # Tags: for updates, always include (empty list clears); for creates, omit if empty
         if self.tags:

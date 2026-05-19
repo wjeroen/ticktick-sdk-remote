@@ -76,6 +76,41 @@ class TestBatchUpdatePreservesUnspecifiedFields:
         assert payload["timeZone"] == "Europe/Brussels"
         assert payload["title"] == "Take out trash"
 
+    async def test_recurrence_anchors_preserved_when_due_date_moves(self):
+        """The follow-up bug: moving a recurring task to an off-cycle date
+        wiped repeat_first_date, repeat_task_id, repeat_from, and ex_date —
+        TickTick keeps repeatFlag but loses the chain anchor, so the series
+        silently dies after the moved instance."""
+        existing = Task(
+            id="aaaaaaaaaaaaaaaaaaaaaaaa",
+            project_id="bbbbbbbbbbbbbbbbbbbbbbbb",
+            title="Weekly review",
+            repeat_flag="RRULE:FREQ=WEEKLY;BYDAY=MO",
+            repeat_from=2,
+            repeat_first_date=datetime(2026, 1, 5, 0, 0, tzinfo=timezone.utc),
+            repeat_task_id="cccccccccccccccccccccccc",
+            ex_date=["20260202T000000Z"],
+            is_all_day=True,
+            time_zone="Europe/Brussels",
+            due_date=datetime(2026, 5, 11, 0, 0, tzinfo=timezone.utc),
+        )
+        api, batch_mock = _make_api(existing)
+
+        # Move from Monday to Tuesday — RRULE should survive AND TickTick
+        # should still know the chain anchor.
+        await api.batch_update_tasks([{
+            "task_id": existing.id,
+            "project_id": existing.project_id,
+            "due_date": "2026-05-12T00:00:00+02:00",
+        }])
+
+        payload = _sent_payload(batch_mock)
+        assert payload["repeatFlag"] == "RRULE:FREQ=WEEKLY;BYDAY=MO"
+        assert payload["repeatFrom"] == 2
+        assert "repeatFirstDate" in payload
+        assert payload["repeatTaskId"] == "cccccccccccccccccccccccc"
+        assert payload["exDate"] == ["20260202T000000Z"]
+
     async def test_is_all_day_preserved_when_only_title_changes(self):
         existing = Task(
             id="aaaaaaaaaaaaaaaaaaaaaaaa",

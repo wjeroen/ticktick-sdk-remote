@@ -145,6 +145,7 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 **Bug fixes**
 - [x] Timezone handling: all-day tasks no longer off by one day (uses `TICKTICK_TIMEZONE`)
 - [x] `batch_update_tasks` no longer wipes `repeat_flag` / `is_all_day` / `time_zone` on sparse partial updates
+- [x] `batch_update_tasks` also preserves recurrence-anchor fields (`repeatFrom`, `repeatFirstDate`, `repeatTaskId`, `exDate`) — without these, TickTick keeps the RRULE but silently kills the chain (no next occurrence) when a recurring task's due date is moved
 - [x] V2 wire-format datetime conversion no longer drifts by +N hours when input has a non-UTC tzinfo
 - [x] Empty `repeatFrom` from V2 no longer fails Pydantic validation
 
