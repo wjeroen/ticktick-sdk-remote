@@ -143,7 +143,7 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 - [x] Child IDs listed in detail view (matching JSON's `child_ids`)
 
 **Bug fixes**
-- [x] All-day task dates correctly resolve the half-open interval convention (TickTick stores due_date as midnight UTC of the *next* day): `all_day_date()` helper stays in UTC and subtracts 1 day for end-boundary fields; JSON emits clean `YYYY-MM-DD` for all-day tasks; server-side filters (`due_today`, `overdue`, `due_before`, `due_after`) use `logical_due_date()` so all-day tasks match the correct calendar day
+- [x] Timezone handling: all-day tasks no longer off by one day (uses `TICKTICK_TIMEZONE`)
 - [x] `batch_update_tasks` no longer wipes `repeat_flag` / `is_all_day` / `time_zone` on sparse partial updates
 - [x] `batch_update_tasks` also preserves recurrence-anchor fields (`repeatFrom`, `repeatFirstDate`, `repeatTaskId`, `exDate`) — without these, TickTick keeps the RRULE but silently kills the chain (no next occurrence) when a recurring task's due date is moved
 - [x] V2 wire-format datetime conversion no longer drifts by +N hours when input has a non-UTC tzinfo

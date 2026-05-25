@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -42,24 +42,6 @@ def format_date(dt: datetime | None, tz_name: str = "UTC") -> str:
     if dt is None:
         return "Not set"
     return convert_tz(dt, tz_name).strftime("%Y-%m-%d")
-
-
-def all_day_date(dt: datetime | None, is_end_boundary: bool = False) -> str | None:
-    """Extract the logical calendar date from an all-day task datetime.
-
-    TickTick stores all-day dates as UTC midnight boundaries:
-      start_date → midnight UTC of the actual day (May 25 00:00Z = May 25)
-      due_date   → midnight UTC of the NEXT day   (May 26 00:00Z = May 25)
-
-    For end boundaries (due_date), subtract 1 day. Timezone conversion is
-    skipped entirely — the UTC date is canonical for all-day events.
-    """
-    if dt is None:
-        return None
-    utc_date = dt.astimezone(dt_timezone.utc).date()
-    if is_end_boundary:
-        utc_date -= timedelta(days=1)
-    return utc_date.isoformat()
 
 
 def priority_label(priority: int) -> str:
@@ -280,15 +262,9 @@ def format_task_markdown(
         lines.append(f"- **Type**: {task.kind}")
 
     if task.due_date:
-        if task.is_all_day:
-            lines.append(f"- **Due**: {all_day_date(task.due_date, is_end_boundary=True)}")
-        else:
-            lines.append(f"- **Due**: {format_datetime(task.due_date, tz_name)}")
+        lines.append(f"- **Due**: {format_datetime(task.due_date, tz_name)}")
     if task.start_date:
-        if task.is_all_day:
-            lines.append(f"- **Start**: {all_day_date(task.start_date, is_end_boundary=False)}")
-        else:
-            lines.append(f"- **Start**: {format_datetime(task.start_date, tz_name)}")
+        lines.append(f"- **Start**: {format_datetime(task.start_date, tz_name)}")
     if task.is_all_day:
         lines.append("- **All-day**: Yes")
     if task.repeat_flag:
@@ -333,14 +309,8 @@ def format_task_json(
     is added — the model should call `ticktick_get_task` for the full text.
     Detail-view callers leave this at None to get the full content.
     """
-    # For all-day tasks, output corrected date-only strings (YYYY-MM-DD)
-    # instead of full ISO datetimes that carry a misleading time+offset.
-    if task.is_all_day:
-        start_date_str = all_day_date(task.start_date, is_end_boundary=False)
-        due_date_str = all_day_date(task.due_date, is_end_boundary=True)
-    else:
-        start_date_str = convert_tz(task.start_date, tz_name).isoformat() if task.start_date else None
-        due_date_str = convert_tz(task.due_date, tz_name).isoformat() if task.due_date else None
+    start_date = convert_tz(task.start_date, tz_name)
+    due_date = convert_tz(task.due_date, tz_name)
     completed_time = convert_tz(task.completed_time, tz_name)
 
     content = task.content
@@ -364,8 +334,8 @@ def format_task_json(
         "priority": task.priority,
         "priority_label": priority_label(task.priority),
         "is_pinned": task.is_pinned,
-        "start_date": start_date_str,
-        "due_date": due_date_str,
+        "start_date": start_date.isoformat() if start_date else None,
+        "due_date": due_date.isoformat() if due_date else None,
         "completed_time": completed_time.isoformat() if completed_time else None,
         "tags": task.tags,
         "is_all_day": task.is_all_day,
@@ -405,13 +375,7 @@ def format_task_row_markdown(
         status_flag = ""
     repeat_flag_str = repeat_flag_indicator(task.repeat_flag)
     task_title = task.title or "(No title)"
-    if task.due_date:
-        if task.is_all_day:
-            due_str = f" | Due: {all_day_date(task.due_date, is_end_boundary=True)}"
-        else:
-            due_str = f" | Due: {format_date(task.due_date, tz_name)}"
-    else:
-        due_str = ""
+    due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
     tags_str = f" | Tags: {', '.join(task.tags)}" if task.tags else ""
     parent_str = f" | Child of: `{task.parent_id}`" if task.parent_id else ""
     child_count = len(task.child_ids) if task.child_ids else 0
@@ -987,13 +951,7 @@ def format_batch_create_tasks_markdown(tasks: list[Task], tz_name: str = "UTC") 
     for task in tasks:
         priority_str = priority_indicator(task.priority)
         task_title = task.title or "(No title)"
-        if task.due_date:
-            if task.is_all_day:
-                due_str = f" | Due: {all_day_date(task.due_date, is_end_boundary=True)}"
-            else:
-                due_str = f" | Due: {format_date(task.due_date, tz_name)}"
-        else:
-            due_str = ""
+        due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
         lines.append(f"- {priority_str} **{task_title}** (`{task.id}`){due_str}")
 
     return "\n".join(lines)
