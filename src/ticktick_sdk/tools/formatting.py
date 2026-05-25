@@ -601,27 +601,15 @@ def format_tag_markdown(tag: Tag) -> str:
     return "\n".join(lines)
 
 
-def format_tag_json(tag: Tag, children: list[Tag] | None = None) -> dict[str, Any]:
+def format_tag_json(tag: Tag) -> dict[str, Any]:
     """Format a single tag as JSON."""
-    result: dict[str, Any] = {
+    return {
         "name": tag.name,
         "label": tag.label,
         "color": tag.color,
         "parent": tag.parent,
         "sort_order": tag.sort_order,
     }
-    if children:
-        result["children"] = [{"name": c.name, "label": c.label} for c in children]
-    return result
-
-
-def _build_children_map(tags: list[Tag]) -> dict[str, list[Tag]]:
-    """Build a map from parent tag name → list of child tags."""
-    result: dict[str, list[Tag]] = {}
-    for tag in tags:
-        if tag.parent:
-            result.setdefault(tag.parent, []).append(tag)
-    return result
 
 
 def format_tag_row_markdown(tag: Tag) -> str:
@@ -644,10 +632,9 @@ def format_tags_markdown(tags: list[Tag], title: str = "Tags") -> str:
 
 def format_tags_json(tags: list[Tag]) -> dict[str, Any]:
     """Format multiple tags as JSON."""
-    children_map = _build_children_map(tags)
     return {
         "count": len(tags),
-        "tags": [format_tag_json(t, children=children_map.get(t.name)) for t in tags],
+        "tags": [format_tag_json(t) for t in tags],
     }
 
 
@@ -672,11 +659,10 @@ def paginate_tags_json(
     offset: int,
     budget: int = CHARACTER_LIMIT,
 ) -> dict[str, Any]:
-    children_map = _build_children_map(tags)
     return paginate_json(
         tags,
         offset=offset,
-        format_item=lambda t: format_tag_json(t, children=children_map.get(t.name)),
+        format_item=format_tag_json,
         budget=budget,
         item_key="tags",
     )
