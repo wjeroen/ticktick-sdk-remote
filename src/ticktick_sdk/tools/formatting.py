@@ -300,6 +300,7 @@ def format_task_json(
     task: Task,
     tz_name: str = "UTC",
     content_max_chars: int | None = None,
+    task_titles: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Format a single task as JSON-serializable dict.
 
@@ -342,7 +343,10 @@ def format_task_json(
         "time_zone": task.time_zone,
         "repeat_flag": task.repeat_flag,
         "parent_id": task.parent_id,
-        "child_ids": task.child_ids,
+        "children": [
+            {"id": cid, "title": task_titles.get(cid)} if task_titles else {"id": cid}
+            for cid in (task.child_ids or [])
+        ] if task.child_ids else [],
         "items": [
             {
                 "id": item.id,
@@ -421,7 +425,8 @@ def format_tasks_json(
     notes don't blow up batch responses with multi-kilobyte content fields.
     For budget-aware paginated output use `paginate_tasks_json` instead.
     """
-    formatted = [format_task_json(t, tz_name, content_max_chars=content_max_chars) for t in tasks]
+    task_titles = {t.id: t.title for t in tasks if t.id}
+    formatted = [format_task_json(t, tz_name, content_max_chars=content_max_chars, task_titles=task_titles) for t in tasks]
     result: dict[str, Any] = {
         "count": len(tasks),
         "tasks": formatted,
@@ -471,10 +476,11 @@ def paginate_tasks_json(
     When any task hits the cap, a `_content_hint` is added at the top level
     pointing the caller at `ticktick_get_task` for the full text.
     """
+    task_titles = {t.id: t.title for t in tasks if t.id}
     result = paginate_json(
         tasks,
         offset=offset,
-        format_item=lambda t: format_task_json(t, tz_name, content_max_chars=content_max_chars),
+        format_item=lambda t: format_task_json(t, tz_name, content_max_chars=content_max_chars, task_titles=task_titles),
         budget=budget,
         item_key="tasks",
     )
