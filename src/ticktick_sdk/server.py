@@ -343,6 +343,21 @@ async def build_project_name_for_task(
         return None
 
 
+def logical_due_date(task) -> date | None:
+    """Extract the logical calendar due date from a task.
+
+    For all-day tasks, TickTick stores due_date as midnight UTC of the
+    NEXT day (half-open interval end boundary). Subtract one day to get
+    the actual due date. For regular tasks, convert to the user's timezone.
+    """
+    if task.due_date is None:
+        return None
+    if task.is_all_day:
+        from datetime import timezone as dt_tz
+        return task.due_date.astimezone(dt_tz.utc).date() - timedelta(days=1)
+    return task.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date()
+
+
 # =============================================================================
 # Error Handling
 # =============================================================================
@@ -719,19 +734,19 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
 
             if params.due_today:
                 today = datetime.now(ZoneInfo(USER_TIMEZONE)).date()
-                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() == today]
+                tasks = [t for t in tasks if logical_due_date(t) == today]
 
             if params.overdue:
                 today = datetime.now(ZoneInfo(USER_TIMEZONE)).date()
-                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() < today and not t.is_completed]
+                tasks = [t for t in tasks if (d := logical_due_date(t)) is not None and d < today and not t.is_completed]
 
             if params.due_before:
                 due_before_date = date.fromisoformat(params.due_before)
-                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() <= due_before_date]
+                tasks = [t for t in tasks if (d := logical_due_date(t)) is not None and d <= due_before_date]
 
             if params.due_after:
                 due_after_date = date.fromisoformat(params.due_after)
-                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() >= due_after_date]
+                tasks = [t for t in tasks if (d := logical_due_date(t)) is not None and d >= due_after_date]
 
             if params.has_due_date is True:
                 tasks = [t for t in tasks if t.due_date is not None]
