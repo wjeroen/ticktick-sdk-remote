@@ -698,8 +698,14 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         client = get_client(ctx)
 
         # Handle different status types
+        all_task_titles: dict[str, str] | None = None
         if params.status == "active":
             tasks = await client.get_all_tasks()
+            # Capture titles from the FULL list before filtering so child
+            # tasks resolve even when filtered out (e.g. children with no
+            # due date won't appear in a "due today" result, but their
+            # titles should still show on the parent's children field).
+            all_task_titles = {t.id: t.title for t in tasks if t.id}
 
             # Apply active-only filters
             if params.project_id:
@@ -787,7 +793,12 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
             )
         else:
             return json.dumps(
-                paginate_tasks_json(tasks, offset=params.offset, tz_name=USER_TIMEZONE),
+                paginate_tasks_json(
+                    tasks,
+                    offset=params.offset,
+                    tz_name=USER_TIMEZONE,
+                    task_titles=all_task_titles,
+                ),
                 indent=2,
             )
 

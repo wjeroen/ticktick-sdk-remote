@@ -417,6 +417,7 @@ def format_tasks_json(
     tasks: list[Task],
     tz_name: str = "UTC",
     content_max_chars: int | None = None,
+    task_titles: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Format multiple tasks as JSON (non-paginated convenience wrapper).
 
@@ -424,9 +425,13 @@ def format_tasks_json(
     list-view callers should pass `LIST_CONTENT_MAX_CHARS` so the per-task
     notes don't blow up batch responses with multi-kilobyte content fields.
     For budget-aware paginated output use `paginate_tasks_json` instead.
+
+    `task_titles` is an optional pre-built {id: title} map for enriching
+    child references. When omitted, it's built from `tasks` itself (which
+    only helps when children happen to be in the same batch).
     """
-    task_titles = {t.id: t.title for t in tasks if t.id}
-    formatted = [format_task_json(t, tz_name, content_max_chars=content_max_chars, task_titles=task_titles) for t in tasks]
+    titles = task_titles if task_titles is not None else {t.id: t.title for t in tasks if t.id}
+    formatted = [format_task_json(t, tz_name, content_max_chars=content_max_chars, task_titles=titles) for t in tasks]
     result: dict[str, Any] = {
         "count": len(tasks),
         "tasks": formatted,
@@ -469,18 +474,24 @@ def paginate_tasks_json(
     tz_name: str = "UTC",
     content_max_chars: int = LIST_CONTENT_MAX_CHARS,
     budget: int = CHARACTER_LIMIT,
+    task_titles: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Paginated, budget-aware JSON rendering of a task list.
 
     Each task's `content` is capped at `content_max_chars` (default 500).
     When any task hits the cap, a `_content_hint` is added at the top level
     pointing the caller at `ticktick_get_task` for the full text.
+
+    `task_titles` is an optional pre-built {id: title} map so child task
+    titles can be resolved even when the children aren't in `tasks` (e.g.
+    a filtered "due today" list whose parents' children have no due date).
+    When omitted, titles are resolved only from `tasks` itself.
     """
-    task_titles = {t.id: t.title for t in tasks if t.id}
+    titles = task_titles if task_titles is not None else {t.id: t.title for t in tasks if t.id}
     result = paginate_json(
         tasks,
         offset=offset,
-        format_item=lambda t: format_task_json(t, tz_name, content_max_chars=content_max_chars, task_titles=task_titles),
+        format_item=lambda t: format_task_json(t, tz_name, content_max_chars=content_max_chars, task_titles=titles),
         budget=budget,
         item_key="tasks",
     )
