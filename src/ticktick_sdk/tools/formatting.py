@@ -254,6 +254,9 @@ def format_task_markdown(
     lines.append(f"- **Status**: {status_label(task.status)}")
     lines.append(f"- **Priority**: {priority_label(task.priority)}")
 
+    if task.progress is not None and task.progress > 0:
+        lines.append(f"- **Progress**: {task.progress}%")
+
     if task.is_pinned:
         lines.append("- **Pinned**: Yes")
 
@@ -334,6 +337,7 @@ def format_task_json(
         "status_label": status_label(task.status),
         "priority": task.priority,
         "priority_label": priority_label(task.priority),
+        "progress": task.progress,
         "is_pinned": task.is_pinned,
         "start_date": start_date.isoformat() if start_date else None,
         "due_date": due_date.isoformat() if due_date else None,
@@ -384,13 +388,19 @@ def format_task_row_markdown(
     parent_str = f" | Child of: `{task.parent_id}`" if task.parent_id else ""
     child_count = len(task.child_ids) if task.child_ids else 0
     children_str = f" | {child_count} children" if child_count else ""
+    # Skip 0 (redundant noise) and 100 (already implied by [DONE]).
+    progress_str = (
+        f" | {task.progress}%"
+        if task.progress is not None and 0 < task.progress < 100
+        else ""
+    )
     project_str = ""
     if project_names and task.project_id in project_names:
         project_str = f" | Project: {project_names[task.project_id]}"
 
     return (
         f"- {priority_str} {pinned_str}{status_flag}{repeat_flag_str}**{task_title}** "
-        f"(`{task.id}`){project_str}{due_str}{tags_str}{parent_str}{children_str}"
+        f"(`{task.id}`){project_str}{due_str}{progress_str}{tags_str}{parent_str}{children_str}"
     )
 
 
