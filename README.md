@@ -251,10 +251,12 @@ Every list-returning tool uses **budget-aware pagination** to stay under the ~25
     "total": 234,          // total matching
     "offset": 0,           // where this page starts
     "next_offset": 50,     // pass back to fetch next page, or null when done
+    "_pagination_hint": "More tasks available — call this tool again with offset=50 to fetch the next page (showing 50 of 234).",
     "tasks": [...]
   }
   ```
-- When everything fits on one page, `next_offset` is `null` and the markdown footer is omitted. Pagination is invisible to the consumer.
+- When everything fits on one page, `next_offset` is `null`, the `_pagination_hint` is omitted, and the markdown footer is omitted. Pagination is invisible to the consumer.
+- Task lists are sorted deterministically before paging so calls with different offsets return a consistent ordering: active tasks by `due_date` ascending (undated last) then by `id`; completed/abandoned tasks by `completed_time` descending then by `id`.
 
 ### Per-task content cap in JSON list views
 
@@ -263,6 +265,18 @@ Task notes (`content`) can be arbitrarily long. To keep JSON list pages from bei
 - The top-level response gets a `"_content_hint"` pointing at `ticktick_get_task` for the full text.
 
 `ticktick_get_task` (the detail view) never truncates content.
+
+### Subtask titles in JSON list views
+
+When a task has children (subtasks), the JSON list view returns them as a `children` array with `{id, title}` pairs — no extra API calls, the titles come from a map built from the same fetch that produced the list.
+
+Because that map is filtered by the query's status (e.g. active queries see only active titles), children whose status doesn't match the parent query are dropped. When that happens, the response includes:
+
+- `total_children` — actual subtask count
+- `children_hidden` — how many were dropped
+- `_children_hint` — short explanation
+
+The detail view (`ticktick_get_task`, no map) keeps every child ID.
 
 ### Task list row format (markdown)
 
