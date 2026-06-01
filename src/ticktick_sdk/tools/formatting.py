@@ -191,13 +191,20 @@ def paginate_json(
         }
 
     def envelope(items_list: list[dict], next_off: int | None) -> dict[str, Any]:
-        return {
+        env: dict[str, Any] = {
             "count": len(items_list),
             "total": total,
             "offset": offset,
             "next_offset": next_off,
-            item_key: items_list,
         }
+        if next_off is not None:
+            env["_pagination_hint"] = (
+                f"More {item_key} available — call this tool again with "
+                f"offset={next_off} to fetch the next page "
+                f"(showing {len(items_list)} of {total})."
+            )
+        env[item_key] = items_list
+        return env
 
     formatted: list[dict] = []
     for idx, item in enumerate(items[offset:]):

@@ -96,7 +96,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 from zoneinfo import ZoneInfo
 
@@ -258,6 +258,33 @@ def truncate_response(
     )
 
     return truncated + message
+
+
+# =============================================================================
+# Stable Sort Helpers
+# =============================================================================
+
+# TickTick's task-list endpoints don't guarantee a stable order between calls,
+# so offset-based pagination would otherwise risk duplicates or gaps. We apply
+# an explicit sort before paginating.
+
+def _active_sort_key(task) -> tuple:
+    """Active tasks: by due_date ascending (None last), then by id."""
+    if task.due_date is not None:
+        return (0, task.due_date, task.id or "")
+    return (1, datetime.max.replace(tzinfo=timezone.utc), task.id or "")
+
+
+def _completed_sort_key(task) -> tuple:
+    """Completed/abandoned tasks: by completed_time descending (None last), then id."""
+    if task.completed_time is not None:
+        return (0, -task.completed_time.timestamp(), task.id or "")
+    return (1, 0.0, task.id or "")
+
+
+def _id_sort_key(task) -> tuple:
+    """Fallback: by id only."""
+    return (task.id or "",)
 
 
 # =============================================================================
@@ -778,6 +805,15 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         else:
             tasks = await client.get_all_tasks()
 
+        # Deterministic sort so paginated calls return a stable order
+        # (TickTick's list endpoints don't guarantee one).
+        if params.status == "active":
+            tasks.sort(key=_active_sort_key)
+        elif params.status in ("completed", "abandoned"):
+            tasks.sort(key=_completed_sort_key)
+        else:
+            tasks.sort(key=_id_sort_key)
+
         # Apply limit after filtering — pagination then slices the limited set.
         tasks = tasks[: params.limit]
 
@@ -1214,6 +1250,7 @@ async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
     try:
         client = get_client(ctx)
         tasks = await client.search_tasks(params.query)
+        tasks.sort(key=_active_sort_key)
         tasks = tasks[: params.limit]
 
         title = f"Search Results: '{params.query}'"
