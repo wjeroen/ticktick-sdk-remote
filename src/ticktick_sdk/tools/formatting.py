@@ -334,6 +334,22 @@ def format_task_json(
         content = content[:content_max_chars] + "…"
         content_truncated = True
 
+    # Children: when a title map is provided (list/search contexts), drop
+    # children whose title can't be resolved — those are tasks of a different
+    # status (completed/abandoned/deleted) and don't belong in this filter's
+    # answer. When no map is provided (single-task detail view), show all IDs.
+    total_children = len(task.child_ids or [])
+    if task.child_ids and task_titles is not None:
+        children = [
+            {"id": cid, "title": task_titles[cid]}
+            for cid in task.child_ids
+            if task_titles.get(cid) is not None
+        ]
+    elif task.child_ids:
+        children = [{"id": cid} for cid in task.child_ids]
+    else:
+        children = []
+
     payload: dict[str, Any] = {
         "id": task.id,
         "project_id": task.project_id,
@@ -354,10 +370,7 @@ def format_task_json(
         "time_zone": task.time_zone,
         "repeat_flag": task.repeat_flag,
         "parent_id": task.parent_id,
-        "children": [
-            {"id": cid, "title": task_titles.get(cid)} if task_titles else {"id": cid}
-            for cid in (task.child_ids or [])
-        ] if task.child_ids else [],
+        "children": children,
         "items": [
             {
                 "id": item.id,
@@ -368,6 +381,14 @@ def format_task_json(
             for item in task.items
         ],
     }
+    if total_children > len(children):
+        payload["total_children"] = total_children
+        payload["children_hidden"] = total_children - len(children)
+        payload["_children_hint"] = (
+            f"{payload['children_hidden']} of {total_children} subtasks aren't "
+            "shown here because they have a different status than the current "
+            "filter (e.g. completed/abandoned subtasks under an active parent)."
+        )
     if content_truncated:
         payload["content_truncated"] = True
     return payload

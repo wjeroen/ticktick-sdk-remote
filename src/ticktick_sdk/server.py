@@ -814,8 +814,11 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         else:
             tasks.sort(key=_id_sort_key)
 
-        # Apply limit after filtering — pagination then slices the limited set.
-        tasks = tasks[: params.limit]
+        # Cap consideration to offset + limit so the requested offset can
+        # always reach into the window. (Earlier `tasks[:limit]` was buggy:
+        # with limit=50 and offset=60, the slice threw away the very tasks
+        # the offset was asking for, yielding 0 results.)
+        tasks = tasks[: params.offset + params.limit]
 
         if params.response_format == ResponseFormat.MARKDOWN:
             title = f"{params.status.capitalize()} Tasks" if params.status else "Tasks"
@@ -1251,7 +1254,7 @@ async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
         client = get_client(ctx)
         tasks = await client.search_tasks(params.query)
         tasks.sort(key=_active_sort_key)
-        tasks = tasks[: params.limit]
+        tasks = tasks[: params.offset + params.limit]
 
         title = f"Search Results: '{params.query}'"
 
