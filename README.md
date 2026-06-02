@@ -266,17 +266,33 @@ Task notes (`content`) can be arbitrarily long. To keep JSON list pages from bei
 
 `ticktick_get_task` (the detail view) never truncates content.
 
-### Subtask titles in JSON list views
+### Subtask rendering — list view (`list_tasks`/`search_tasks`)
 
-When a task has children (subtasks), the JSON list view returns them as a `children` array with `{id, title}` pairs — no extra API calls, the titles come from a map built from the same fetch that produced the list.
+When a task has children, both formats enrich them with title + priority — no extra API calls, the data comes from a `{id: {title, priority}}` map built from the same fetch that produced the list.
 
-Because that map is filtered by the query's status (e.g. active queries see only active titles), children whose status doesn't match the parent query are dropped. When that happens, the response includes:
+**JSON** returns each child as `{id, title, priority_label}`:
+```json
+"children": [
+  {"id": "abc1", "title": "Pay landlord", "priority_label": "High"},
+  {"id": "abc2", "title": "Pay utilities", "priority_label": "None"}
+]
+```
 
-- `total_children` — actual subtask count
-- `children_hidden` — how many were dropped
-- `_children_hint` — short explanation
+**Markdown** renders children as indented sub-bullets under the parent row:
+```
+- [HIGH] **Pay rent** (`668e...`) | Due: 2026-06-06
+  - [HIGH] Pay landlord (`abc1`)
+  - [NONE] Pay utilities (`abc2`)
+```
 
-The detail view (`ticktick_get_task`, no map) keeps every child ID.
+Because the meta map is filtered by the query's status (e.g. active queries see only active titles), children whose status doesn't match are dropped. When that happens:
+
+- JSON adds `total_children`, `children_hidden`, and a `_children_hint`.
+- Markdown appends ` | N more subtasks hidden` (or ` | N subtasks (not in this filter)` when every child is filtered out).
+
+### Subtask rendering — detail view (`get_task`)
+
+`ticktick_get_task` fetches each child task concurrently (one parallel `get_task` per child) so the detail view can show the same enriched `[PRIORITY] title (\`id\`)` rows in markdown and `{id, title, priority_label}` in JSON. A failed child fetch falls back to a bare ID — never blocks the parent render.
 
 ### Task list row format (markdown)
 

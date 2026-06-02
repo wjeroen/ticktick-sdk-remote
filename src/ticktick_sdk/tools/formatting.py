@@ -229,12 +229,17 @@ def format_task_markdown(
     task: Task,
     tz_name: str = "UTC",
     project_names: dict[str, str] | None = None,
+    child_meta: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """Format a single task as Markdown.
 
     When `project_names` is provided and contains an entry for this task's
     `project_id`, the **Project** line shows `Name (\`id\`)` instead of just
     the ID.
+
+    When `child_meta` is provided (`{child_id: {"title": str, "priority":
+    int}}`), each child row shows `[PRIORITY] title (\`id\`)`. Without it,
+    children render as bare IDs.
     """
     lines = []
 
@@ -257,7 +262,13 @@ def format_task_markdown(
     if task.child_ids:
         lines.append("- **Children**:")
         for child_id in task.child_ids:
-            lines.append(f"  - `{child_id}`")
+            meta = (child_meta or {}).get(child_id)
+            if meta:
+                ind = priority_indicator(meta.get("priority", 0))
+                ctitle = meta.get("title") or "(No title)"
+                lines.append(f"  - {ind} {ctitle} (`{child_id}`)")
+            else:
+                lines.append(f"  - `{child_id}`")
     lines.append(f"- **Status**: {status_label(task.status)}")
     lines.append(f"- **Priority**: {priority_label(task.priority)}")
 
@@ -310,7 +321,7 @@ def format_task_json(
     task: Task,
     tz_name: str = "UTC",
     content_max_chars: int | None = None,
-    task_titles: dict[str, str] | None = None,
+    child_meta: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Format a single task as JSON-serializable dict.
 
@@ -319,6 +330,12 @@ def format_task_json(
     truncated with an ellipsis and an extra `content_truncated: true` field
     is added — the model should call `ticktick_get_task` for the full text.
     Detail-view callers leave this at None to get the full content.
+
+    `child_meta` is `{child_id: {"title": str, "priority": int}}`. When
+    provided, the `children` array becomes a list of `{id, title,
+    priority_label}` objects; children not present in the map are dropped
+    (with `total_children`/`children_hidden` reported). When None (detail
+    view fallback), children are listed as bare `{id}` entries.
     """
     start_date = convert_tz(task.start_date, tz_name)
     due_date = convert_tz(task.due_date, tz_name)
@@ -334,17 +351,23 @@ def format_task_json(
         content = content[:content_max_chars] + "…"
         content_truncated = True
 
-    # Children: when a title map is provided (list/search contexts), drop
-    # children whose title can't be resolved — those are tasks of a different
-    # status (completed/abandoned/deleted) and don't belong in this filter's
-    # answer. When no map is provided (single-task detail view), show all IDs.
+    # Children: when child_meta is provided (list/search/detail contexts),
+    # render `{id, title, priority_label}`. Entries not in the map are dropped
+    # (they're a different status than the current filter — e.g. completed
+    # subtasks under an active-filtered parent). When child_meta is None,
+    # children are listed as bare `{id}` entries.
     total_children = len(task.child_ids or [])
-    if task.child_ids and task_titles is not None:
-        children = [
-            {"id": cid, "title": task_titles[cid]}
-            for cid in task.child_ids
-            if task_titles.get(cid) is not None
-        ]
+    if task.child_ids and child_meta is not None:
+        children = []
+        for cid in task.child_ids:
+            meta = child_meta.get(cid)
+            if meta is None:
+                continue
+            children.append({
+                "id": cid,
+                "title": meta.get("title"),
+                "priority_label": priority_label(meta.get("priority", 0)),
+            })
     elif task.child_ids:
         children = [{"id": cid} for cid in task.child_ids]
     else:
@@ -398,8 +421,16 @@ def format_task_row_markdown(
     task: Task,
     tz_name: str = "UTC",
     project_names: dict[str, str] | None = None,
+    child_meta: dict[str, dict[str, Any]] | None = None,
 ) -> str:
-    """Format a single task as one markdown list row (no leading bullet header)."""
+    """Format a single task as one markdown list row.
+
+    When `child_meta` is provided and the task has children, the row is
+    followed by indented sub-bullets — one per resolvable child showing
+    `[PRIORITY] title (\`id\`)`. Children not in the map (different status
+    than the active filter) are counted as hidden in the row suffix.
+    Without `child_meta`, the row shows only the plain `| N children` count.
+    """
     priority_str = priority_indicator(task.priority)
     pinned_str = "[PINNED] " if task.is_pinned else ""
     # Only flag non-active statuses — [ACTIVE] on every row is noise.
@@ -414,8 +445,6 @@ def format_task_row_markdown(
     due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
     tags_str = f" | Tags: {', '.join(task.tags)}" if task.tags else ""
     parent_str = f" | Child of: `{task.parent_id}`" if task.parent_id else ""
-    child_count = len(task.child_ids) if task.child_ids else 0
-    children_str = f" | {child_count} children" if child_count else ""
     # Skip 0 (redundant noise) and 100 (already implied by [DONE]).
     progress_str = (
         f" | {task.progress}%"
@@ -426,10 +455,34 @@ def format_task_row_markdown(
     if project_names and task.project_id in project_names:
         project_str = f" | Project: {project_names[task.project_id]}"
 
-    return (
+    # Children: list inline when child_meta is provided; otherwise just count.
+    child_lines: list[str] = []
+    children_suffix = ""
+    total_children = len(task.child_ids or [])
+    if task.child_ids and child_meta is not None:
+        hidden = 0
+        for cid in task.child_ids:
+            meta = child_meta.get(cid)
+            if meta is None:
+                hidden += 1
+                continue
+            cind = priority_indicator(meta.get("priority", 0))
+            ctitle = meta.get("title") or "(No title)"
+            child_lines.append(f"  - {cind} {ctitle} (`{cid}`)")
+        if not child_lines and hidden > 0:
+            children_suffix = f" | {hidden} subtasks (not in this filter)"
+        elif hidden > 0:
+            children_suffix = f" | {hidden} more subtasks hidden"
+    elif task.child_ids:
+        children_suffix = f" | {total_children} children"
+
+    main_row = (
         f"- {priority_str} {pinned_str}{status_flag}{repeat_flag_str}**{task_title}** "
-        f"(`{task.id}`){project_str}{due_str}{progress_str}{tags_str}{parent_str}{children_str}"
+        f"(`{task.id}`){project_str}{due_str}{progress_str}{tags_str}{parent_str}{children_suffix}"
     )
+    if child_lines:
+        return main_row + "\n" + "\n".join(child_lines)
+    return main_row
 
 
 def format_tasks_markdown(
@@ -437,6 +490,7 @@ def format_tasks_markdown(
     title: str = "Tasks",
     tz_name: str = "UTC",
     project_names: dict[str, str] | None = None,
+    child_meta: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """Format multiple tasks as Markdown (non-paginated convenience wrapper).
 
@@ -445,17 +499,24 @@ def format_tasks_markdown(
     if not tasks:
         return f"# {title}\n\nNo tasks found."
 
+    meta = child_meta if child_meta is not None else _build_child_meta(tasks)
     lines = [f"# {title}", "", f"Found {len(tasks)} task(s):", ""]
     for task in tasks:
-        lines.append(format_task_row_markdown(task, tz_name, project_names))
+        lines.append(format_task_row_markdown(task, tz_name, project_names, child_meta=meta))
     return "\n".join(lines)
+
+
+def _build_child_meta(tasks: list[Task]) -> dict[str, dict[str, Any]]:
+    """Build a `{id: {title, priority}}` map from a task list — used to
+    enrich child references when no explicit map was passed."""
+    return {t.id: {"title": t.title, "priority": t.priority} for t in tasks if t.id}
 
 
 def format_tasks_json(
     tasks: list[Task],
     tz_name: str = "UTC",
     content_max_chars: int | None = None,
-    task_titles: dict[str, str] | None = None,
+    child_meta: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Format multiple tasks as JSON (non-paginated convenience wrapper).
 
@@ -464,12 +525,12 @@ def format_tasks_json(
     notes don't blow up batch responses with multi-kilobyte content fields.
     For budget-aware paginated output use `paginate_tasks_json` instead.
 
-    `task_titles` is an optional pre-built {id: title} map for enriching
-    child references. When omitted, it's built from `tasks` itself (which
-    only helps when children happen to be in the same batch).
+    `child_meta` is `{id: {title, priority}}` for enriching child references
+    with title + priority_label. When omitted, it's built from `tasks` itself
+    (which only helps when children happen to be in the same batch).
     """
-    titles = task_titles if task_titles is not None else {t.id: t.title for t in tasks if t.id}
-    formatted = [format_task_json(t, tz_name, content_max_chars=content_max_chars, task_titles=titles) for t in tasks]
+    meta = child_meta if child_meta is not None else _build_child_meta(tasks)
+    formatted = [format_task_json(t, tz_name, content_max_chars=content_max_chars, child_meta=meta) for t in tasks]
     result: dict[str, Any] = {
         "count": len(tasks),
         "tasks": formatted,
@@ -494,13 +555,19 @@ def paginate_tasks_markdown(
     tz_name: str = "UTC",
     project_names: dict[str, str] | None = None,
     budget: int = CHARACTER_LIMIT,
+    child_meta: dict[str, dict[str, Any]] | None = None,
 ) -> str:
-    """Paginated, budget-aware markdown rendering of a task list."""
+    """Paginated, budget-aware markdown rendering of a task list.
+
+    `child_meta` enables nested-children rendering (see
+    `format_task_row_markdown`). Falls back to building one from `tasks`.
+    """
+    meta = child_meta if child_meta is not None else _build_child_meta(tasks)
     return paginate_markdown(
         tasks,
         title=title,
         offset=offset,
-        format_item=lambda t: format_task_row_markdown(t, tz_name, project_names),
+        format_item=lambda t: format_task_row_markdown(t, tz_name, project_names, child_meta=meta),
         item_label="tasks",
         budget=budget,
     )
@@ -512,7 +579,7 @@ def paginate_tasks_json(
     tz_name: str = "UTC",
     content_max_chars: int = LIST_CONTENT_MAX_CHARS,
     budget: int = CHARACTER_LIMIT,
-    task_titles: dict[str, str] | None = None,
+    child_meta: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Paginated, budget-aware JSON rendering of a task list.
 
@@ -520,16 +587,16 @@ def paginate_tasks_json(
     When any task hits the cap, a `_content_hint` is added at the top level
     pointing the caller at `ticktick_get_task` for the full text.
 
-    `task_titles` is an optional pre-built {id: title} map so child task
-    titles can be resolved even when the children aren't in `tasks` (e.g.
-    a filtered "due today" list whose parents' children have no due date).
-    When omitted, titles are resolved only from `tasks` itself.
+    `child_meta` is `{id: {title, priority}}` for enriching child references
+    even when the children aren't in `tasks` (e.g. a filtered "due today"
+    list whose parents' subtasks have no due date). When omitted, the map
+    is built from `tasks` itself.
     """
-    titles = task_titles if task_titles is not None else {t.id: t.title for t in tasks if t.id}
+    meta = child_meta if child_meta is not None else _build_child_meta(tasks)
     result = paginate_json(
         tasks,
         offset=offset,
-        format_item=lambda t: format_task_json(t, tz_name, content_max_chars=content_max_chars, task_titles=titles),
+        format_item=lambda t: format_task_json(t, tz_name, content_max_chars=content_max_chars, child_meta=meta),
         budget=budget,
         item_key="tasks",
     )

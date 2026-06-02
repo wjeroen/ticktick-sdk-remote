@@ -92,6 +92,7 @@ Tools return clear, actionable error messages:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -350,6 +351,30 @@ async def build_project_name_map(
         return None
     projects = await client.get_all_projects()
     return {p.id: p.name for p in projects}
+
+
+async def build_child_meta_for_task(
+    client: TickTickClient, task
+) -> dict[str, dict[str, Any]] | None:
+    """Detail-view helper: fetch each child task in parallel so the
+    formatter can show title + priority for every subtask.
+
+    Returns None when the task has no children. Failed fetches are skipped
+    silently — the formatter will fall back to bare IDs for those.
+    """
+    if not task.child_ids:
+        return None
+    pid = task.project_id
+    results = await asyncio.gather(
+        *[client.get_task(cid, pid) for cid in task.child_ids],
+        return_exceptions=True,
+    )
+    meta: dict[str, dict[str, Any]] = {}
+    for cid, child in zip(task.child_ids, results):
+        if isinstance(child, Exception):
+            continue
+        meta[cid] = {"title": child.title, "priority": child.priority}
+    return meta
 
 
 async def build_project_name_for_task(
@@ -654,11 +679,25 @@ async def ticktick_get_task(params: TaskGetInput, ctx: Context) -> str:
         client = get_client(ctx)
         task = await client.get_task(params.task_id, params.project_id)
 
+        # Fetch child meta and project name concurrently — the children
+        # call is N parallel get_tasks; both are independent of each other.
+        child_meta, project_names = await asyncio.gather(
+            build_child_meta_for_task(client, task),
+            build_project_name_for_task(client, task),
+        )
+
         if params.response_format == ResponseFormat.MARKDOWN:
-            project_names = await build_project_name_for_task(client, task)
-            return format_task_markdown(task, USER_TIMEZONE, project_names=project_names)
+            return format_task_markdown(
+                task,
+                USER_TIMEZONE,
+                project_names=project_names,
+                child_meta=child_meta,
+            )
         else:
-            return json.dumps(format_task_json(task, USER_TIMEZONE), indent=2)
+            return json.dumps(
+                format_task_json(task, USER_TIMEZONE, child_meta=child_meta),
+                indent=2,
+            )
 
     except Exception as e:
         return handle_error(e, "get_task")
@@ -725,14 +764,18 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         client = get_client(ctx)
 
         # Handle different status types
-        all_task_titles: dict[str, str] | None = None
+        all_child_meta: dict[str, dict[str, Any]] | None = None
         if params.status == "active":
             tasks = await client.get_all_tasks()
-            # Capture titles from the FULL list before filtering so child
-            # tasks resolve even when filtered out (e.g. children with no
-            # due date won't appear in a "due today" result, but their
-            # titles should still show on the parent's children field).
-            all_task_titles = {t.id: t.title for t in tasks if t.id}
+            # Capture {id: {title, priority}} from the FULL list before
+            # filtering, so subtasks resolve to title + priority even when
+            # filtered out (e.g. subtasks with no due date won't appear in a
+            # "due today" result, but the parent's children field still
+            # shows them).
+            all_child_meta = {
+                t.id: {"title": t.title, "priority": t.priority}
+                for t in tasks if t.id
+            }
 
             # Apply active-only filters
             if params.project_id:
@@ -829,6 +872,7 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
                 offset=params.offset,
                 tz_name=USER_TIMEZONE,
                 project_names=project_names,
+                child_meta=all_child_meta,
             )
         else:
             return json.dumps(
@@ -836,7 +880,7 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
                     tasks,
                     offset=params.offset,
                     tz_name=USER_TIMEZONE,
-                    task_titles=all_task_titles,
+                    child_meta=all_child_meta,
                 ),
                 indent=2,
             )
