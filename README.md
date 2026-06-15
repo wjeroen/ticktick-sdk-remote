@@ -880,8 +880,8 @@ You only need to do this if `need_captcha` is blocking the normal password login
 3. Go to the **Network** tab. In the filter box type `batch/check` (this is the V2 sync endpoint the app polls).
 4. Click around in TickTick (e.g. switch to "Today") so a request appears.
 5. Click any `batch/check/0` (or similar V2) request. In the right pane, look at **Request Headers**.
-6. Find the `Cookie:` header. Copy its **full value** — it'll look like `t=abcd1234...; AWSALB=xyz...; ...; tt_distid=...`. That entire string is your `TICKTICK_V2_COOKIES`.
-7. Inside that same cookie string, find the `t=...` part. Copy **just the value after `t=`** (up to the next `;`). That's your `TICKTICK_V2_TOKEN`.
+6. Find the **`Cookie:`** header (under *Request* Headers — what the browser *sends*, not `Set-Cookie` under Response Headers). Copy its **full value verbatim**. The order of the pieces is arbitrary — it may start with `tt_distid=`, `_ga=`, or anything else, and it will contain many entries (`tt_distid`, `_ga`, `t`, `__stripe_mid`, `SESSION`, `ap_user_id`, `AWSALB`, …). Copy the **whole string as-is** — that entire thing is your `TICKTICK_V2_COOKIES`. The server reads each `key=value` pair individually, so order doesn't matter and the analytics entries are harmless.
+7. Inside that same cookie string, find the **`t=`** segment (it can be anywhere in the string, not necessarily first). Copy **just the value after `t=`** up to the next `;`. That's your `TICKTICK_V2_TOKEN`. Tip: the `t=` value stays the same across requests, while routing cookies like `AWSALB=` change each request — if a value is constant across several requests, that's the right one.
 8. In Railway, set both env vars and redeploy. Logs should show `V2 authenticated via pre-obtained session token (fallback)`.
 
 The token typically lasts months. If you ever see `V2 token fallback also failed` in the logs, the token has gone stale — repeat the steps above to get a fresh one.
