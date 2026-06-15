@@ -11,8 +11,7 @@ The user is a coding noob. ELI5 (Explain Like I'm 5) frequently when discussing 
 
 ## User's Working Environment
 The user primarily works on **mobile** and deploys via Railway, so they **do not have access to browser developer tools**. When debugging:
-- Add `console.log()` statements to backend code - these show up in Railway logs
-- Prefer backend logging over frontend console debugging
+- Add `print()` or `logging` statements to the Python code — these show up in Railway logs
 - Railway logs are the primary debugging tool
 
 **Live TickTick MCP tools (great for testing):** Claude Code sessions — including remote/web sessions — usually have this project's own TickTick MCP connected as live tools (`mcp__TickTick__*`). You can call them directly to test changes end-to-end against a real TickTick account, no extra setup needed. **Caveat:** those tools run against whatever is *deployed*, and the branch you're working on may not be set up for deployment yet. Once a branch is set up it often **autodeploys** on push — but the user may also turn autodeploy off — so don't assume your in-progress branch code is what the live tools are executing. Check with the user what's actually deployed before trusting the live tools to verify your branch's changes.

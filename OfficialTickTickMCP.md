@@ -2,6 +2,82 @@
 
 These are instructions for the [official TickTick MCP](https://help.ticktick.com/articles/7438129581631995904), NOT the instructions for our own remote TickTick MCP. I am adding this to our repo purely for inspiration, to compare notes, to see what we might be lacking.
 
+The detailed comparison below was written to answer exactly that: how does the official MCP stack up against our own remote MCP? The official help doc it's based on is reproduced underneath it.
+
+---
+
+# Comparison: Official TickTick MCP vs. our remote MCP
+
+_Written 2026-06-15, based on the official help doc reproduced below plus a read of our own auth/tooling code (`server.py`, `unified/api.py`, `api/v1/auth.py`, `api/v2/auth.py`). Both products will keep changing — re-check specifics before relying on them._
+
+**One-line summary:** The official MCP is a first-party, hosted, OAuth-based server — it wins decisively on **connection/auth and reliability**. Our fork is self-hosted and still wins on **feature depth and control** (deletes, pinning, analytics, trash/abandoned views, tag merge, pagination/rendering, Dida365, customizability).
+
+## 1. Connection & auth (the big difference)
+
+### Setup
+
+| | **Ours (self-hosted)** | **Official (hosted)** |
+|---|---|---|
+| Deploy | You host it on Railway | Nothing to deploy |
+| Endpoint | `https://<your-app>.up.railway.app/mcp` | `https://mcp.ticktick.com` |
+| First-time setup | Register a TickTick dev app, run `ticktick-sdk auth` once, set ~5–10 env vars | Click "Connect", authorize in browser |
+| Transport | streamable-HTTP | streamable-HTTP |
+
+### Under the hood — and why our auth is painful
+
+Our server stitches together **two separate TickTick logins**, both static/manual:
+
+- **V1 — official OAuth API.** Used for a few task/project calls. The access token is read once from `TICKTICK_ACCESS_TOKEN` and **never refreshed** — `refresh_access_token()` exists in `api/v1/auth.py` but is never called. When it expires (~6 months) you must re-run `ticktick-sdk auth` and paste a fresh token into Railway by hand.
+- **V2 — unofficial, reverse-engineered API.** Does most of the real work (tags, folders, habits, focus, subtasks). There is **no OAuth** here — the server logs in with your **username + password** to `/api/v2/user/signon`, impersonating a browser via an `X-Device` header. This is the root of nearly everything we've fought:
+  - TickTick's anti-bot system flags "password login from a new device." If `TICKTICK_DEVICE_ID` isn't pinned, every redeploy looks like a new device → `need_captcha` → V2 dies.
+  - The session is in-memory only, so it re-logs-in on every restart (more chances to trip the wall).
+  - The `TICKTICK_V2_COOKIES` fallback skips the password login entirely — a clever workaround for a problem the official MCP simply doesn't have.
+
+**The official MCP removes this whole class of pain**, because:
+- It's **first-party**: OAuth-blessed access to the same features we have to reach via V2 → no reverse-engineered login, no captcha, no device ID, no cookie-grabbing, no degraded mode.
+- It uses **real OAuth with automatic token refresh** (their docs: _"OAuth authorization supports automatic token refresh… you do not need to sign in again"_) → no token to paste, no 6-month re-mint.
+- It also offers a **Bearer Token** (Settings → Account → API Token) for header-based clients.
+
+### Single-user vs. multi-user
+- **Ours is single-account**: whoever's credentials are in the env vars *is* the user; anyone who can reach `/mcp` acts as them.
+- **Theirs is per-user**: each person authorizes their own account via OAuth.
+
+> **Note on the Claude.ai connector fields:** Our server's own code never reads a `CLIENT_ID`/`CLIENT_SECRET` off the MCP connection — V1's credentials come from Railway env vars, and the only per-request check is an *optional* static `MCP_BEARER_TOKEN` (`server.py`, `BearerTokenMiddleware`; with no auth provider configured on FastMCP). So from the *server* side, whatever you type into Claude.ai's connector credential fields isn't consumed by us. **What we have not verified** is whether Claude.ai's connector UI still needs those fields populated on the *client* side to establish the connection — the documented Railway setup (with them filled in) is the configuration confirmed working, so the README keeps it as-is.
+
+## 2. What the official MCP can do that we can't
+- **Task comments** — `get_comment` / `add_comment` / `delete_comment`. We have none. (Biggest real gap.)
+- **Countdowns** — `list_countdowns`. Not implemented here.
+- **Focus _records_ (CRUD)** — they read, create, and delete individual focus/pomodoro sessions. We only have focus **analytics** (heatmap + by-tag).
+- **Named time presets** — `list_undone_tasks_by_time_query` (today / last24hour / last7day / tomorrow / next24hour / next7day). We cover the same ground with `due_before`/`due_after` but don't expose the shortcuts.
+- **"Complete everything in a list"** — `complete_tasks_in_project`. We complete by IDs (up to 100) instead.
+- **More clients out of the box** — Claude Desktop, Claude Code, ChatGPT, Cursor, VS Code, Codex, TRAE.
+
+## 3. What we can do that the official MCP can't
+(Based on their published tool list, which is create/read/update-heavy.)
+- **Full deletes** — projects, folders, habits, tags, columns.
+- **Pin / unpin tasks.**
+- **Explicit subtask control** — `set_task_parents` / `unparent_tasks`.
+- **Tag power tools** — update, recolor, nest, delete, and **merge** tags (they only list + create).
+- **Trash & "won't-do" views** — list `deleted` and `abandoned` tasks.
+- **Productivity statistics** — level, score, completion counts.
+- **Focus analytics** — heatmap + time-by-tag.
+- **User preferences** — timezone / date-format, etc.
+- **Response engineering** — budget-aware pagination, 500-char content caps, markdown↔JSON output.
+- **Rendering + timezone fixes** — priority/status/recurrence labels, project names, parent/child inlining, all-day off-by-one fix.
+- **Dida365 (滴答清单)** support.
+- **Open source / self-hosted** — forkable and extensible. Theirs is a closed SaaS that "only supports basic operations for now."
+
+## 4. Where we're basically tied
+Task CRUD, search, move, batch create/update/complete/delete, projects, folders, kanban columns, basic tags, habits (create/update/get/checkins), get-task-by-id, multi-condition filtering. Our batch limits are actually higher in places (1–100 vs. their "up to 20").
+
+## 5. Takeaway
+- **For auth/reliability, the official MCP wins outright** — first-party + OAuth eliminates the V2 password/captcha/device/cookie/token-refresh fragility.
+- **For feature depth and control, our fork still leads.**
+- **Running both** (as separate Claude connectors) is reasonable: official for rock-solid everyday task/list/habit ops, ours for the power features it lacks.
+- **Open question:** could we retire the painful V2 login by routing those features through TickTick's _official_ OAuth API now? The official MCP proves TickTick has an internal OAuth path to them — but it's unclear the public developer API exposes them. Worth checking before investing more in V2 hardening.
+
+---
+
 # Official TickTick MCP
 
 ## [What Is MCP?](https://help.ticktick.com/articles/7438129581631995904#what-is-mcp%3F)
