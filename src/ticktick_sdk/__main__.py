@@ -1,4 +1,4 @@
-"""Allow running the server with: python -m ticktick_sdk.server"""
+"""Allow running the server with: python -m ticktick_sdk"""
 
 from ticktick_sdk.server import main
 

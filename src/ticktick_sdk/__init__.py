@@ -77,13 +77,17 @@ from ticktick_sdk.constants import (
 # Exceptions - for error handling
 from ticktick_sdk.exceptions import (
     TickTickAPIError,
+    TickTickAPIUnavailableError,
     TickTickAuthenticationError,
     TickTickConfigurationError,
     TickTickError,
     TickTickForbiddenError,
     TickTickNotFoundError,
+    TickTickOAuthError,
+    TickTickQuotaExceededError,
     TickTickRateLimitError,
     TickTickServerError,
+    TickTickSessionError,
     TickTickValidationError,
 )
 
@@ -133,6 +137,8 @@ __all__ = [
     # Exceptions
     "TickTickError",
     "TickTickAuthenticationError",
+    "TickTickOAuthError",
+    "TickTickSessionError",
     "TickTickAPIError",
     "TickTickValidationError",
     "TickTickRateLimitError",
@@ -140,6 +146,8 @@ __all__ = [
     "TickTickConfigurationError",
     "TickTickForbiddenError",
     "TickTickServerError",
+    "TickTickQuotaExceededError",
+    "TickTickAPIUnavailableError",
     # Constants
     "TaskStatus",
     "TaskPriority",
