@@ -121,7 +121,7 @@ When completed, add date:
 
 Don't clutter TODO.md with:
 - Implementation details (those go in README.md or code comments)
-- API specifications / endpoint details (those go in `docs/API_INTERNALS.md` or the `docs/api-analysis/` notes)
+- API specifications / endpoint details (those go in `docs/ARCHITECTURE.md` or the `docs/api-analysis/` notes)
 - Architecture & design docs (those go in `docs/ARCHITECTURE.md` or the README)
 - Long-term vision/roadmap (use "Future Ideas" sparingly)
 
