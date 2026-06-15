@@ -318,6 +318,15 @@ class BaseTickTickClient(ABC):
             TickTickAPIError: On API errors
         """
         if require_auth and not self.is_authenticated:
+            if self.api_version == APIVersion.V2:
+                raise TickTickAuthenticationError(
+                    "TickTick V2 is unavailable — sign-on failed (captcha / "
+                    "anti-bot throttle, bad device id, or expired session) so the "
+                    "server is running in V1-only degraded mode. Set "
+                    "TICKTICK_V2_TOKEN + TICKTICK_V2_COOKIES to bypass V2 sign-on "
+                    "(see README), or redeploy to retry.",
+                    details={"endpoint": endpoint, "api_version": "v2", "degraded": True},
+                )
             raise TickTickAuthenticationError(
                 f"Authentication required for {self.api_version.value} API",
                 details={"endpoint": endpoint},

@@ -308,6 +308,23 @@ async def lifespan(mcp: FastMCP) -> AsyncIterator[dict[str, Any]]:
     # Warn early if device_id is ephemeral — every Railway redeploy will look
     # like a brand-new device to TickTick, which can trigger captcha walls.
     settings = get_settings()
+    # Validate the device id format. TickTick expects a 24-char lowercase-hex
+    # ObjectId; a malformed value (wrong length, non-hex chars, stray
+    # whitespace/quotes) can make V2 sign-on fail with misleading errors.
+    _did = settings.device_id
+    _did_valid = len(_did) == 24 and all(c in "0123456789abcdef" for c in _did.lower())
+    if not _did_valid:
+        logger.warning(
+            "TICKTICK_DEVICE_ID=%r does NOT look like a valid 24-char hex "
+            "ObjectId (length=%d). TickTick V2 sign-on may reject it. Use a "
+            "24-character lowercase-hex value — generate one with: "
+            "python -c \"import os; print(os.urandom(12).hex())\".",
+            _did,
+            len(_did),
+        )
+    else:
+        logger.info("TICKTICK_DEVICE_ID format looks valid (24-char hex).")
+
     if settings.device_id_is_ephemeral:
         logger.warning(
             "TICKTICK_DEVICE_ID is not set. A new device id was auto-generated "
