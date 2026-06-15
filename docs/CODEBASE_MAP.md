@@ -133,26 +133,15 @@ ticktick-mcp/
 | **Use cases** | Project with tasks (basic operations) | Tags, habits, focus, subtasks, folders |
 | **Limitations** | No tags, habits, focus tracking | None (comprehensive feature set) |
 
-### 2.3 Routing Strategy (router.py)
+### 2.3 How the SDK Picks V1 vs V2
 
-> ⚠️ **Historical — the `router.py` routing table was removed (2026-06-15).**
-> This table (and the one in Part 7.2) described *intended* routing, but the
-> `OPERATION_ROUTING` table and its helper methods were **dead code that
-> nothing called**, so they were deleted. Real routing is decided inline in
-> `unified/api.py` via `has_v2` / `has_v1` checks, and a "Fallback" column here
-> does **not** guarantee one exists. Notably, task creation and the batch task
-> operations the MCP server uses hard-require V2 (no V1 fallback). Kept below
-> only as a rough description; trust the code.
-
-| Resource | Primary API | Fallback | Reason |
-|----------|-------------|----------|--------|
-| Tasks | V2 | V1 | V2 has more fields (tags, subtasks) |
-| complete_task | V1 | - | Simpler dedicated endpoint |
-| Projects | V1 | V2 | V1 has dedicated endpoint |
-| Tags | V2 only | - | Not available in V1 |
-| Habits | V2 only | - | Not available in V1 |
-| User | V2 only | - | Not available in V1 |
-| Focus | V2 only | - | Not available in V1 |
+`UnifiedTickTickAPI` decides per call, inline, using `APIRouter.has_v1` /
+`has_v2` — there is no routing table. In practice: V2 is the default (richer
+data); `update_task` / `delete_task` / `complete_task` fall back to V1 if V2 is
+down; `create_task` and all batch task ops require V2 (they raise if it's
+down); `get_project_with_data` is V1-only; and everything V2 carries that V1
+can't (list all/completed/abandoned/deleted tasks, move, subtasks, tags,
+folders, columns, habits, focus, user, sync) is V2-only. See Part 7.
 
 ---
 
@@ -639,66 +628,22 @@ Helper Function: `_check_batch_response_errors()`
 
 `APIRouter` holds the V1/V2 clients and exposes availability/verification
 helpers only: `has_v1`, `has_v2`, `is_fully_configured`, `verify_clients`,
-`get_status`. It contains **no** routing table.
+`get_status`. It contains **no** routing table — routing is decided inline in
+`unified/api.py` (`has_v2` / `has_v1`); see Part 7.2 for the actual V1/V2 split.
 
-**~~APIPreference Enum~~ (removed 2026-06-15 — was dead code):**
-```python
-# Deleted from router.py. Routing is decided inline in api.py via has_v2/has_v1.
-V1_ONLY = auto()    # Only in V1
-V2_ONLY = auto()    # Only in V2
-V2_PRIMARY = auto() # Try V2 first, fallback to V1
-V1_PRIMARY = auto() # Try V1 first, fallback to V2
-```
+### 7.2 Actual V1/V2 split per operation
 
-### 7.2 Operation Routing Table
+No declarative table exists in the code — each `unified/api.py` method decides
+inline. The real behavior:
 
-> ⚠️ **Historical — removed from the code (2026-06-15).** The
-> `OPERATION_ROUTING` dict and the `get_routing` / `can_execute` /
-> `get_primary_client` / `get_fallback_client` methods were defined in
-> `router.py` but **never called**, so they were deleted. Actual routing is
-> hand-written inline in each `unified/api.py` method via `has_v2` / `has_v1`.
-> Where this table disagreed with the code, the code wins — `create_task` is
-> **V2-only in practice** (raises if V2 is down, despite the "V2_PRIMARY" label
-> below), and every batch task operation (`batch_create_tasks`,
-> `batch_update_tasks`, …) hard-requires V2 with no V1 fallback. Kept below as
-> a rough sketch of intent only.
-
-| Operation | Routing | Reason |
-|-----------|---------|--------|
-| **Tasks** | | |
-| create_task | V2_PRIMARY | tags support |
-| get_task | V2_PRIMARY | no project_id needed |
-| update_task | V2_PRIMARY | richer options |
-| complete_task | V1_PRIMARY | simpler endpoint |
-| list_all_tasks | V2_ONLY | V1 can only list per-project |
-| move_task | V2_ONLY | |
-| set_task_parent | V2_ONLY | subtasks |
-| **Projects** | | |
-| create_project | V2_PRIMARY | more options |
-| get_project | V1_PRIMARY | dedicated endpoint |
-| get_project_with_data | V1_ONLY | includes tasks + columns |
-| list_projects | V1_PRIMARY | |
-| update_project | V2_PRIMARY | batch operations |
-| delete_project | V2_PRIMARY | batch operations |
-| **Tags** | | |
-| create_tag | V2_ONLY | |
-| update_tag | V2_ONLY | |
-| delete_tag | V2_ONLY | |
-| rename_tag | V2_ONLY | |
-| merge_tags | V2_ONLY | |
-| list_tags | V2_ONLY | |
-| **Habits** | | |
-| create_habit | V2_ONLY | |
-| update_habit | V2_ONLY | |
-| delete_habit | V2_ONLY | |
-| list_habits | V2_ONLY | |
-| checkin_habit | V2_ONLY | |
-| **User** | | |
-| get_user_profile | V2_ONLY | |
-| get_user_status | V2_ONLY | |
-| get_user_statistics | V2_ONLY | |
-| get_focus_heatmap | V2_ONLY | |
-| get_focus_by_tag | V2_ONLY | |
+- **V2 default, falls back to V1:** `update_task`, `delete_task`,
+  `complete_task` (single-task).
+- **V2 required (raises if V2 down, no fallback):** `create_task` and every
+  batch task op (`batch_create_tasks`, `batch_update_tasks`, …).
+- **V1-only:** `get_project_with_data`.
+- **V2-only (no V1 equivalent):** list all/completed/abandoned/deleted tasks,
+  move, subtasks, tags, folders/project-groups, kanban columns, habits, focus,
+  user profile/status/statistics, sync.
 
 ---
 

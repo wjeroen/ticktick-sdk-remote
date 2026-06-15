@@ -143,7 +143,7 @@ TickTickClient.create_task(title="Buy groceries", tags=["shopping"])
     ▼
 UnifiedTickTickAPI.create_task(title="Buy groceries", tags=["shopping"])
     │
-    │  APIRouter determines V2_PRIMARY for create_task
+    │  api.py sends create_task to V2 (required — raises if V2 is down)
     │  Formats dates to V2 format, builds request payload
     ▼
 TickTickV2Client.create_task(payload)
@@ -214,80 +214,28 @@ To provide comprehensive functionality, this SDK reverse-engineers the **unoffic
 
 ### How the SDK Decides Which API to Use
 
-> ⚠️ **Historical (table removed 2026-06-15).** The declarative
-> `OPERATION_ROUTING` table and the `APIPreference` / `OperationConfig` /
-> `get_routing` / `can_execute` / `get_primary_client` / `get_fallback_client`
-> helpers shown in this section were **deleted from `router.py`** — they were
-> never called and had drifted out of sync with reality. Routing is decided
-> **inline** in `unified/api.py` via `self._router.has_v2` / `has_v1` checks.
-> The table below is kept only as a rough sketch of *intended* routing — trust
-> the code. Reality: task creation and **all** batch task ops hard-require V2
-> (no V1 fallback), despite the "V2_PRIMARY" labels here.
+`UnifiedTickTickAPI` (`unified/api.py`) chooses V1 or V2 **inline in each
+method**, using the `has_v1` / `has_v2` flags on `APIRouter`. There is no
+central routing table — the choice lives next to each operation. The rules in
+practice:
 
-The SDK historically used an **APIRouter** (`src/ticktick_sdk/unified/router.py`) routing table to define preferences for each operation:
+- **V2 is the default** for most task/project operations (it carries richer
+  data: tags, subtask links, pinning, more fields).
+- **`create_task` and every batch task operation hard-require V2** — they raise
+  `TickTickAPIUnavailableError` if V2 is down. No V1 fallback.
+- **`update_task` / `delete_task` / `complete_task` (single-task)** use V2 when
+  available and fall back to V1 when it isn't.
+- **`get_project_with_data` is V1-only** (one call returns a project with its
+  tasks + columns).
+- **V2-only (no V1 equivalent):** listing all/completed/abandoned/deleted
+  tasks, move, subtasks (parent/child), tags, folders/project-groups, kanban
+  columns, habits, focus, user profile/status/statistics, and sync.
 
-```python
-# REMOVED 2026-06-15 (dead code) - router.py APIPreference enum
-class APIPreference(StrEnum):
-    V1_ONLY = auto()    # Only available in V1
-    V2_ONLY = auto()    # Only available in V2
-    V2_PRIMARY = auto() # Prefer V2, can fallback to V1
-    V1_PRIMARY = auto() # Prefer V1, can fallback to V2
-```
+Net effect: when V2 is captcha-walled, the server can do very little (see the
+degraded-mode note in the auth section).
 
-**Complete Operation Routing Table** (`OPERATION_ROUTING` from `router.py:43-188`):
-
-| Operation | Routing Preference | Reason |
-|-----------|-------------------|--------|
-| **Tasks** | | |
-| `create_task` | V2_PRIMARY | V2 supports tags, parent_id |
-| `get_task` | V2_PRIMARY | V2 doesn't require project_id |
-| `update_task` | V2_PRIMARY | V2 has richer update options |
-| `delete_task` | V2_PRIMARY | V2 supports batch operations |
-| `complete_task` | V1_PRIMARY | V1 has dedicated simple endpoint |
-| `list_all_tasks` | V2_ONLY | V1 can only list per-project |
-| `list_completed_tasks` | V2_ONLY | V2-only feature |
-| `list_deleted_tasks` | V2_ONLY | V2-only feature (trash) |
-| `move_task` | V2_ONLY | V2-only feature |
-| `set_task_parent` | V2_ONLY | V2-only feature (subtasks) |
-| `pin_task` | V2_ONLY | V2-only feature (task pinning) |
-| `unpin_task` | V2_ONLY | V2-only feature (task pinning) |
-| **Projects** | | |
-| `create_project` | V2_PRIMARY | V2 supports more options |
-| `get_project` | V1_PRIMARY | V1 has dedicated endpoint |
-| `get_project_with_data` | V1_ONLY | V1-only (includes tasks + columns) |
-| `update_project` | V2_PRIMARY | V2 supports batch operations |
-| `delete_project` | V2_PRIMARY | V2 supports batch operations |
-| `list_projects` | V2_PRIMARY | V2 returns more metadata |
-| **Tags** | | |
-| `create_tag` | V2_ONLY | Not available in V1 |
-| `update_tag` | V2_ONLY | Not available in V1 |
-| `rename_tag` | V2_ONLY | Not available in V1 |
-| `delete_tag` | V2_ONLY | Not available in V1 |
-| `merge_tags` | V2_ONLY | Not available in V1 |
-| `list_tags` | V2_ONLY | Not available in V1 |
-| **Project Groups (Folders)** | | |
-| `create_project_group` | V2_ONLY | Not available in V1 |
-| `update_project_group` | V2_ONLY | Not available in V1 |
-| `delete_project_group` | V2_ONLY | Not available in V1 |
-| `list_project_groups` | V2_ONLY | Not available in V1 |
-| **Kanban Columns** | | |
-| `list_columns` | V2_ONLY | V2-only feature |
-| `create_column` | V2_ONLY | V2-only feature |
-| `update_column` | V2_ONLY | V2-only feature |
-| `delete_column` | V2_ONLY | V2-only feature |
-| `move_task_to_column` | V2_ONLY | V2-only feature |
-| **Habits** | | |
-| All habit operations | V2_ONLY | Not available in V1 |
-| **User** | | |
-| `get_user_profile` | V2_ONLY | Not available in V1 |
-| `get_user_status` | V2_ONLY | Not available in V1 |
-| `get_user_statistics` | V2_ONLY | Not available in V1 |
-| **Focus/Pomodoro** | | |
-| `get_focus_heatmap` | V2_ONLY | Not available in V1 |
-| `get_focus_by_tag` | V2_ONLY | Not available in V1 |
-| **Sync** | | |
-| `sync_all` | V2_ONLY | V2-only feature |
+For the authoritative, per-operation behavior, read the methods in
+`unified/api.py` — each one's V1/V2 handling (and any fallback) is right there.
 
 ---
 
@@ -626,16 +574,14 @@ async def initialize(self) -> None:
 
 **File**: `src/ticktick_sdk/unified/router.py`
 
-The `APIRouter` holds the V1/V2 clients and reports their availability. It does
-**not** contain a routing table — the `get_routing` / `can_execute` /
-`get_primary_client` / `get_fallback_client` helpers were removed (2026-06-15)
-as unused dead code; each `api.py` method decides V1 vs V2 inline. The live
-surface:
+The `APIRouter` holds the V1/V2 clients and reports their availability. It has
+**no** routing table — each `api.py` method decides V1 vs V2 inline using these
+flags:
 
 ```python
 @dataclass
 class APIRouter:
-    """Routes API operations to the appropriate client."""
+    """Holds the V1/V2 clients and reports their availability."""
 
     v1_client: TickTickV1Client | None = None
     v2_client: TickTickV2Client | None = None

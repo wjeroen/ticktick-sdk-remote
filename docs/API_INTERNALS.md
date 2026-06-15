@@ -1911,171 +1911,32 @@ class SyncTaskBeanV2(TypedDict):
 
 **File**: `/src/ticktick_sdk/unified/router.py`
 
-> ⚠️ **Historical (removed 2026-06-15).** The `OPERATION_ROUTING` table and the
-> `APIPreference` / `OperationConfig` / `get_routing` / `can_execute` /
-> `get_primary_client` / `get_fallback_client` helpers documented in this
-> section were **deleted from `router.py`** — they were never called and
-> contradicted the real behavior. Routing is decided **inline** in
-> `unified/api.py` via `has_v2` / `has_v1` checks. `APIRouter` now exposes only
-> `has_v1` / `has_v2` / `is_fully_configured` / `verify_clients` / `get_status`.
-> Treat the table and helper methods below as historical; trust the code. In
-> particular, task creation and all batch task ops hard-require V2 (no V1
-> fallback).
+`UnifiedTickTickAPI` selects V1 or V2 **inline in each method** via
+`APIRouter.has_v1` / `has_v2` — there is no routing table or preference enum in
+the code. The actual behavior:
 
-### 8.1 APIPreference Enum
+### 8.1 V1/V2 selection rules
 
-```python
-class APIPreference(StrEnum):
-    V1_ONLY = auto()      # Only available in V1
-    V2_ONLY = auto()      # Only available in V2
-    V2_PRIMARY = auto()   # Prefer V2, fallback to V1
-    V1_PRIMARY = auto()   # Prefer V1, fallback to V2
-```
+- **V2 default, falls back to V1 when V2 is down:** `update_task`,
+  `delete_task`, `complete_task` (single-task).
+- **V2 required (raises `TickTickAPIUnavailableError` if V2 is down — no
+  fallback):** `create_task` and every batch task op (`batch_create_tasks`,
+  `batch_update_tasks`, `batch_move_tasks`, `batch_set_task_parents`, …).
+- **V1-only:** `get_project_with_data` (project + tasks + columns in one call).
+- **V2-only (no V1 equivalent):** list all/completed/abandoned/deleted tasks,
+  move, subtasks, tags, folders/project-groups, kanban columns, habits, focus,
+  user profile/status/statistics, and sync.
 
-### 8.2 Operation Routing Table
+### 8.2 Where routing lives
 
-The complete routing table defines which API to use for each operation:
+Each operation's V1/V2 handling is written directly in its `unified/api.py`
+method (e.g. `create_task`, `batch_update_tasks`, `list_all_tasks`). Read the
+method for the authoritative behavior.
 
-```python
-OPERATION_ROUTING: dict[str, OperationConfig] = {
-    # =========== TASKS ===========
-    "create_task": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 supports tags, parent_id, and more fields"
-    ),
-    "get_task": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 doesn't require project_id"
-    ),
-    "update_task": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 has richer update options"
-    ),
-    "delete_task": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 supports batch operations"
-    ),
-    "complete_task": OperationConfig(
-        APIPreference.V1_PRIMARY,
-        "V1 has dedicated endpoint, simpler"
-    ),
-    "list_all_tasks": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V1 can only list per-project"
-    ),
-    "list_completed_tasks": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature"
-    ),
-    "pin_task": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature (task pinning)"
-    ),
-    "unpin_task": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature (task pinning)"
-    ),
-    "list_deleted_tasks": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature (trash)"
-    ),
-    "move_task": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature"
-    ),
-    "set_task_parent": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature (subtasks)"
-    ),
+### 8.3 APIRouter Class
 
-    # =========== PROJECTS ===========
-    "create_project": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 supports more options"
-    ),
-    "get_project": OperationConfig(
-        APIPreference.V1_PRIMARY,
-        "V1 has dedicated endpoint"
-    ),
-    "get_project_with_data": OperationConfig(
-        APIPreference.V1_ONLY,
-        "V1-only feature (includes tasks + columns)"
-    ),
-    "update_project": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 supports batch operations"
-    ),
-    "delete_project": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 supports batch operations"
-    ),
-    "list_projects": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 returns more metadata"
-    ),
-
-    # =========== PROJECT GROUPS ===========
-    "create_project_group": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "update_project_group": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "delete_project_group": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "list_project_groups": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-
-    # =========== COLUMNS (KANBAN) ===========
-    "list_columns": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "create_column": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "update_column": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "delete_column": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "move_task_to_column": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-
-    # =========== TAGS ===========
-    "create_tag": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "update_tag": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "rename_tag": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "delete_tag": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "merge_tags": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "list_tags": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-
-    # =========== USER ===========
-    "get_user_profile": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "get_user_status": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "get_user_statistics": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "get_user_settings": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-
-    # =========== FOCUS ===========
-    "get_focus_heatmap": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-    "get_focus_by_tag": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-
-    # =========== HABITS ===========
-    "get_habit_checkins": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-
-    # =========== SYNC ===========
-    "sync_all": OperationConfig(APIPreference.V2_ONLY, "V2-only"),
-}
-```
-
-### 8.3 Summary Table
-
-| Operation | Routing | Reason |
-|-----------|---------|--------|
-| **Tasks** | | |
-| create_task | V2_PRIMARY | Tags, more fields |
-| get_task | V2_PRIMARY | No project_id needed |
-| update_task | V2_PRIMARY | Richer options |
-| delete_task | V2_PRIMARY | Batch support |
-| complete_task | V1_PRIMARY | Dedicated endpoint |
-| list_all_tasks | V2_ONLY | V1 only per-project |
-| move_task | V2_ONLY | V2 exclusive |
-| set_task_parent | V2_ONLY | V2 exclusive |
-| **Projects** | | |
-| create_project | V2_PRIMARY | More options |
-| get_project | V1_PRIMARY | Dedicated endpoint |
-| get_project_with_data | V1_ONLY | Includes tasks/columns |
-| update_project | V2_PRIMARY | Batch support |
-| delete_project | V2_PRIMARY | Batch support |
-| list_projects | V2_PRIMARY | More metadata |
-| **Tags/Habits/Focus/User** | V2_ONLY | Not in V1 |
-
-### 8.4 APIRouter Class
+`APIRouter` just bundles the two clients and reports availability — it holds no
+routing logic:
 
 ```python
 @dataclass
@@ -2096,30 +1957,9 @@ class APIRouter:
     @property
     def is_fully_configured(self) -> bool:
         return self.has_v1 and self.has_v2
-```
 
-**Routing Methods:**
-
-```python
-def get_primary_client(self, operation: str) -> tuple[str, object | None]:
-    """Returns ('v1' or 'v2', client_instance)"""
-    config = self.get_routing(operation)
-
-    if config.preference == APIPreference.V1_ONLY:
-        return ("v1", self.v1_client)
-    elif config.preference == APIPreference.V2_ONLY:
-        return ("v2", self.v2_client)
-    elif config.preference == APIPreference.V1_PRIMARY:
-        if self.has_v1:
-            return ("v1", self.v1_client)
-        return ("v2", self.v2_client)
-    else:  # V2_PRIMARY
-        if self.has_v2:
-            return ("v2", self.v2_client)
-        return ("v1", self.v1_client)
-
-def get_fallback_client(self, operation: str) -> tuple[str, object | None]:
-    """Get fallback client. Returns (None, None) for V1_ONLY/V2_ONLY."""
+    async def verify_clients(self) -> dict[str, bool]: ...
+    def get_status(self) -> dict[str, Any]: ...
 ```
 
 ---

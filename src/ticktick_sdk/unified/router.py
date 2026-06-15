@@ -7,13 +7,10 @@ availability/verification helpers (``has_v1`` / ``has_v2`` /
 
 These are what ``UnifiedTickTickAPI`` actually uses: routing is decided
 *inline* in each ``unified/api.py`` method via ``if self._router.has_v2: ...
-elif self._router.has_v1: ...``. There is intentionally no declarative
-routing table here. An earlier ``OPERATION_ROUTING`` table plus
-``get_routing`` / ``can_execute`` / ``get_primary_client`` /
-``get_fallback_client`` helpers were never called and had drifted out of sync
-with the real behavior (e.g. they implied a V1 fallback for task creation
-that does not actually exist), so they were removed. If declarative routing
-is wanted later, build it fresh against the real ``api.py`` behavior.
+elif self._router.has_v1: ...``. There is intentionally no declarative routing
+table — the V1/V2 choice lives next to each operation. If you ever want
+table-driven routing, build it against the real ``api.py`` behavior (note that
+task creation and the batch task ops require V2, with no V1 fallback).
 """
 
 from __future__ import annotations
