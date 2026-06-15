@@ -104,21 +104,22 @@ class TickTickSettings(BaseSettings):
         default=SecretStr(""),
         description="TickTick account password",
     )
-    v2_token: SecretStr | None = Field(
-        default=None,
-        description=(
-            "Optional pre-obtained V2 session token (the value of the `t` cookie / "
-            "Bearer token from a logged-in TickTick browser session). Used as a "
-            "fallback when password sign-on fails (e.g. captcha-walled). Set "
-            "alongside TICKTICK_V2_COOKIES."
-        ),
-    )
     v2_cookies: SecretStr | None = Field(
         default=None,
         description=(
-            "Optional full Cookie header string from a logged-in TickTick browser "
-            "session (e.g. 't=...; AWSALB=...; ...'). Used together with "
-            "TICKTICK_V2_TOKEN as a fallback when password sign-on fails."
+            "Full Cookie header string from a logged-in TickTick browser session "
+            "(e.g. 'tt_distid=...; t=...; AWSALB=...'). Used as a fallback when "
+            "password sign-on fails (e.g. captcha-walled). The session token is "
+            "the `t` cookie inside it and is extracted automatically — this is the "
+            "only env var you need for the token fallback."
+        ),
+    )
+    v2_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Optional. The V2 session token explicitly. Normally unnecessary — it "
+            "is auto-extracted from the `t` cookie in TICKTICK_V2_COOKIES. Set this "
+            "only to override that (e.g. if your cookie string lacks `t`)."
         ),
     )
 

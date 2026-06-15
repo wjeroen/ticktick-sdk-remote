@@ -163,6 +163,59 @@ async def test_initialize_falls_back_to_session_token_when_password_fails(patche
     assert api.inbox_id == "inbox123"
 
 
+async def test_initialize_falls_back_with_cookies_only_extracting_t(patched_clients):
+    """Only TICKTICK_V2_COOKIES set (no explicit token) → `t` is auto-extracted."""
+    v1, v2 = patched_clients
+    v2.authenticate.side_effect = TickTickSessionError("need_captcha")
+    captured = {}
+
+    def _mark_authed(session):
+        captured["session"] = session
+        v2.is_authenticated = True
+        v2.verify_authentication = AsyncMock(return_value=True)
+    v2.set_session.side_effect = _mark_authed
+
+    api = UnifiedTickTickAPI(
+        client_id="cid",
+        client_secret="sec",
+        v1_access_token="v1tok",
+        username="user@example.com",
+        password="pw",
+        v2_cookies="tt_distid=abc; t=COOKIE_T_VALUE; AWSALB=xyz",
+        # no v2_token
+    )
+
+    await api.initialize()
+
+    assert api._router.has_v2 is True
+    # token was pulled from the `t` cookie
+    assert captured["session"].token == "COOKIE_T_VALUE"
+    assert captured["session"].cookies["t"] == "COOKIE_T_VALUE"
+    assert captured["session"].cookies["tt_distid"] == "abc"
+
+
+async def test_initialize_cookies_without_t_fails_gracefully(patched_clients):
+    """TICKTICK_V2_COOKIES set but missing `t=` and no token → V2 unavailable, V1 still up."""
+    v1, v2 = patched_clients
+    v2.authenticate.side_effect = TickTickSessionError("need_captcha")
+
+    api = UnifiedTickTickAPI(
+        client_id="cid",
+        client_secret="sec",
+        v1_access_token="v1tok",
+        username="user@example.com",
+        password="pw",
+        v2_cookies="tt_distid=abc; AWSALB=xyz",  # no t=
+    )
+
+    await api.initialize()
+
+    assert api._router.has_v1 is True
+    assert api._router.has_v2 is False
+    assert not v2.set_session.called  # never tried to build a session
+    assert "no `t` cookie" in (api._v2_unavailable_reason or "")
+
+
 async def test_initialize_token_fallback_failure_keeps_v2_unavailable(patched_clients):
     """Password fails AND token fallback fails → V2 stays unavailable, server still starts on V1."""
     v1, v2 = patched_clients

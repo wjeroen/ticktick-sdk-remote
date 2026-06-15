@@ -65,8 +65,8 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 | `TICKTICK_HOST` | No | API host: `ticktick.com` (default) or `dida365.com` (Chinese version) |
 | `TICKTICK_TIMEOUT` | No | Request timeout in seconds (default: `30`) |
 | `TICKTICK_DEVICE_ID` | **Strongly recommended** | Stable device id for V2 API (24-char hex). If unset, a fresh random id is generated every redeploy — see note below. |
-| `TICKTICK_V2_TOKEN` | No (fallback) | Pre-obtained V2 session token. Only used if the username+password login fails (e.g. captcha-walled). See "If V2 sign-on gets captcha-walled" below. |
-| `TICKTICK_V2_COOKIES` | No (fallback) | Cookie header string from a logged-in TickTick browser tab, used together with `TICKTICK_V2_TOKEN`. |
+| `TICKTICK_V2_COOKIES` | No (fallback) | Full Cookie header string from a logged-in TickTick browser tab. Only used if the username+password login fails (e.g. captcha-walled). The session token (`t` cookie) is extracted from it automatically. See "If V2 sign-on gets captcha-walled" below. |
+| `TICKTICK_V2_TOKEN` | No | Optional override for the session token — normally unnecessary, it's auto-extracted from the `t` cookie in `TICKTICK_V2_COOKIES`. |
 | `MCP_BEARER_TOKEN` | No | Bearer token for server authentication — see note below |
 | `PORT` | No | Server port (default: `8000`, Railway sets this automatically) |
 
@@ -867,11 +867,11 @@ TickTick's anti-bot system has flagged your password login (usually because too 
 
 1. **Wait it out + set `TICKTICK_DEVICE_ID`.** Stop redeploying for several hours (the flag usually clears on its own). Then set `TICKTICK_DEVICE_ID` to a stable 24-char hex string in Railway so future redeploys don't look like new devices, and redeploy once.
 
-2. **If it still won't lift: use the V2 session token fallback** (`TICKTICK_V2_TOKEN` + `TICKTICK_V2_COOKIES`). This makes the server skip `/user/signon` entirely and reuse a session you've already established in your browser. It can't trigger `need_captcha` because no login happens. See the next section for how to grab the values.
+2. **If it still won't lift: use the V2 session cookie fallback** (`TICKTICK_V2_COOKIES`). This makes the server skip `/user/signon` entirely and reuse a session you've already established in your browser. It can't trigger `need_captcha` because no login happens. See the next section for how to grab it.
 
-### Grabbing `TICKTICK_V2_TOKEN` and `TICKTICK_V2_COOKIES` from a browser
+### Grabbing `TICKTICK_V2_COOKIES` from a browser
 
-You only need to do this if `need_captcha` is blocking the normal password login. The values are sensitive — treat them like your password (paste only into Railway env vars, never into screenshots or chats).
+You only need to do this if `need_captcha` is blocking the normal password login. The cookie string is sensitive — treat it like your password (paste only into Railway env vars, never into screenshots or chats). You only need **one** env var, `TICKTICK_V2_COOKIES`; the session token is extracted from it automatically.
 
 **On a desktop browser (Chrome / Edge / Firefox):**
 
@@ -880,8 +880,8 @@ You only need to do this if `need_captcha` is blocking the normal password login
 3. Go to the **Network** tab. In the filter box type `batch/check` (this is the V2 sync endpoint the app polls).
 4. Click around in TickTick (e.g. switch to "Today") so a request appears.
 5. Click any `batch/check/0` (or similar V2) request. In the right pane, look at **Request Headers**.
-6. Find the **`Cookie:`** header (under *Request* Headers — what the browser *sends*, not `Set-Cookie` under Response Headers). Copy its **full value verbatim**. The order of the pieces is arbitrary — it may start with `tt_distid=`, `_ga=`, or anything else, and it will contain many entries (`tt_distid`, `_ga`, `t`, `__stripe_mid`, `SESSION`, `ap_user_id`, `AWSALB`, …). Copy the **whole string as-is** — that entire thing is your `TICKTICK_V2_COOKIES`. The server reads each `key=value` pair individually, so order doesn't matter and the analytics entries are harmless.
-7. Inside that same cookie string, find the **`t=`** segment (it can be anywhere in the string, not necessarily first). Copy **just the value after `t=`** up to the next `;`. That's your `TICKTICK_V2_TOKEN`. Tip: the `t=` value stays the same across requests, while routing cookies like `AWSALB=` change each request — if a value is constant across several requests, that's the right one.
+6. Find the **`Cookie:`** header (under *Request* Headers — what the browser *sends*, not `Set-Cookie` under Response Headers). Copy its **full value verbatim**. The order of the pieces is arbitrary — it may start with `tt_distid=`, `_ga=`, or anything else, and it will contain many entries (`tt_distid`, `_ga`, `t`, `__stripe_mid`, `SESSION`, `ap_user_id`, `AWSALB`, …). Copy the **whole string as-is** and paste it into `TICKTICK_V2_COOKIES` — that's the only env var you need. The server reads each `key=value` pair individually (order doesn't matter, analytics entries are harmless) and extracts the session token from the `t` cookie automatically.
+7. That's it — no need to isolate the token by hand. (The cookie string **must** contain a `t=...` entry; that's the session token. If for some reason it doesn't, you can set `TICKTICK_V2_TOKEN` separately to override.)
 8. In Railway, set both env vars and redeploy. Logs should show `V2 authenticated via pre-obtained session token (fallback)`.
 
 The token typically lasts months. If you ever see `V2 token fallback also failed` in the logs, the token has gone stale — repeat the steps above to get a fresh one.

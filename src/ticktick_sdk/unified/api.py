@@ -463,15 +463,34 @@ class UnifiedTickTickAPI:
             password_failed_reason = "no username/password configured"
 
         # --- Step 2: pre-obtained session token fallback ------------------
+        # The only required env var is TICKTICK_V2_COOKIES (the full Cookie
+        # header pasted from a logged-in browser). The session token is the
+        # `t` cookie inside it, so we extract it automatically. Setting
+        # TICKTICK_V2_TOKEN explicitly is optional and just overrides `t`.
         token = creds.get("v2_token")
         cookie_header = creds.get("v2_cookies")
-        if token and cookie_header:
+        if token or cookie_header:
+            cookies = _parse_cookie_header(cookie_header) if cookie_header else {}
+            # Token precedence: explicit env var, else the `t` cookie.
+            token = token or cookies.get("t")
+            if not token:
+                logger.error(
+                    "TICKTICK_V2_COOKIES is set but contains no `t=` cookie, and "
+                    "TICKTICK_V2_TOKEN is unset — cannot build a V2 session. Make "
+                    "sure you pasted the FULL Cookie header (it must include the "
+                    "`t=...` entry)."
+                )
+                self._v2_unavailable_reason = (
+                    f"password failed ({password_failed_reason}) and no `t` "
+                    "cookie found in TICKTICK_V2_COOKIES"
+                )
+                return
             logger.info(
                 "Attempting V2 fallback via pre-obtained session token "
-                "(TICKTICK_V2_TOKEN + TICKTICK_V2_COOKIES)"
+                "(from TICKTICK_V2_COOKIES%s)",
+                " + TICKTICK_V2_TOKEN" if creds.get("v2_token") else "",
             )
             try:
-                cookies = _parse_cookie_header(cookie_header)
                 # Always include the bare token as the 't' cookie too, since
                 # that's what the V2 API actually checks.
                 cookies.setdefault("t", token)
@@ -502,9 +521,9 @@ class UnifiedTickTickAPI:
                 return
             except Exception as e:
                 logger.error(
-                    "V2 token fallback also failed: %s. The token/cookies in "
-                    "TICKTICK_V2_TOKEN/TICKTICK_V2_COOKIES are probably stale "
-                    "— refresh them from a logged-in TickTick browser tab.",
+                    "V2 token fallback also failed: %s. The session in "
+                    "TICKTICK_V2_COOKIES is probably stale — refresh it from a "
+                    "logged-in TickTick browser tab.",
                     e,
                 )
                 # Clear the partially-set session so router.has_v2 = False
