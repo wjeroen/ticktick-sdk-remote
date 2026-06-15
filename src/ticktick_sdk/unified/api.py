@@ -17,6 +17,7 @@ from typing import Any, TypeVar
 
 from ticktick_sdk.api.v1 import TickTickV1Client
 from ticktick_sdk.api.v2 import TickTickV2Client
+from ticktick_sdk.api.v2.auth import SessionToken
 from ticktick_sdk.constants import TaskStatus
 from ticktick_sdk.exceptions import (
     TickTickAPIError,
@@ -189,6 +190,26 @@ def _calculate_streak_from_checkins(
     return streak
 
 
+def _parse_cookie_header(header: str) -> dict[str, str]:
+    """Parse a Cookie header string ('k1=v1; k2=v2; ...') into a dict.
+
+    Tolerates extra whitespace, trailing semicolons, and bare names (which
+    are skipped). Empty input returns {}.
+    """
+    out: dict[str, str] = {}
+    if not header:
+        return out
+    for piece in header.split(";"):
+        piece = piece.strip()
+        if not piece or "=" not in piece:
+            continue
+        name, _, value = piece.partition("=")
+        name = name.strip()
+        if name:
+            out[name] = value.strip()
+    return out
+
+
 def _count_total_checkins(checkins: list[HabitCheckin]) -> int:
     """
     Count total completed check-ins.
@@ -238,6 +259,8 @@ class UnifiedTickTickAPI:
         # V2 Session credentials
         username: str | None = None,
         password: str | None = None,
+        v2_token: str | None = None,
+        v2_cookies: str | None = None,
         # General
         timeout: float = 30.0,
         device_id: str | None = None,
@@ -253,6 +276,8 @@ class UnifiedTickTickAPI:
         self._v2_credentials = {
             "username": username,
             "password": password,
+            "v2_token": v2_token,
+            "v2_cookies": v2_cookies,
             "device_id": device_id,
             "timeout": timeout,
         }
@@ -268,22 +293,45 @@ class UnifiedTickTickAPI:
         self._initialized = False
         self._inbox_id: str | None = None
 
+        # V2 degraded-mode tracking. When V2 sign-on fails (e.g. need_captcha),
+        # we record a cooldown timestamp so logs and future code can see when
+        # it's reasonable to retry. The server only attempts sign-on at startup
+        # today; the cooldown is primarily informational + a guard against any
+        # future re-auth path. A redeploy always bypasses the cooldown.
+        self._v2_unavailable_until: datetime | None = None
+        self._v2_unavailable_reason: str | None = None
+        # Which path produced the current V2 session: "password", "cookie",
+        # or None when V2 isn't authenticated. Surfaced by get_auth_status().
+        self._v2_auth_method: str | None = None
+
     # =========================================================================
     # Initialization & Lifecycle
     # =========================================================================
+
+    # Cooldown after a failed V2 password sign-on. Long enough that we won't
+    # keep poking at TickTick (and re-triggering need_captcha) on incidental
+    # retries, but a Railway redeploy always resets in-memory state so the
+    # user can manually retry sooner.
+    _V2_PASSWORD_COOLDOWN = timedelta(hours=6)
 
     async def initialize(self) -> None:
         """
         Initialize both API clients.
 
-        This must be called before using the API, or use the async context manager.
+        Degrades gracefully: if V2 sign-on fails (e.g. captcha-walled) we keep
+        running with V1-only and surface a clear log message instead of
+        crashing the whole server. V2-only tool calls will raise
+        ``TickTickAPIUnavailableError`` from the existing per-method guards.
+
+        Only raises ``TickTickConfigurationError`` if *neither* API is usable
+        — which is the only state where the server genuinely cannot do
+        anything.
         """
         if self._initialized:
             return
 
-        errors: list[str] = []
-
-        # Initialize V1 client
+        # --- V1 (OAuth2) ---------------------------------------------------
+        v1_error: str | None = None
         try:
             self._v1_client = TickTickV1Client(
                 client_id=self._v1_credentials["client_id"],
@@ -294,51 +342,254 @@ class UnifiedTickTickAPI:
             )
             logger.info("V1 client initialized")
         except Exception as e:
-            errors.append(f"V1 initialization failed: {e}")
+            v1_error = f"V1 initialization failed: {e}"
             logger.error("Failed to initialize V1 client: %s", e)
 
-        # Initialize V2 client
+        # --- V2 (Session) --------------------------------------------------
+        # Always create the HTTP wrapper; auth is a separate step that can
+        # fail without us losing the wrapper.
         try:
             self._v2_client = TickTickV2Client(
                 device_id=self._v2_credentials["device_id"],
                 timeout=self._v2_credentials["timeout"],
             )
-
-            # Authenticate V2 if credentials provided
-            if self._v2_credentials["username"] and self._v2_credentials["password"]:
-                session = await self._v2_client.authenticate(
-                    self._v2_credentials["username"],
-                    self._v2_credentials["password"],
-                )
-                self._inbox_id = session.inbox_id
-                logger.info("V2 client authenticated")
-            else:
-                errors.append("V2 credentials not provided")
         except Exception as e:
-            errors.append(f"V2 initialization failed: {e}")
-            logger.error("Failed to initialize V2 client: %s", e)
+            logger.error("Failed to construct V2 client: %s", e)
+            self._v2_client = None
 
-        # Create router
+        await self._authenticate_v2()
+
+        # --- Router + verification ----------------------------------------
         self._router = APIRouter(
             v1_client=self._v1_client,
             v2_client=self._v2_client,
         )
 
-        # Verify clients
         verification = await self._router.verify_clients()
-        if not verification.get("v1"):
-            errors.append("V1 authentication verification failed")
-        if not verification.get("v2"):
-            errors.append("V2 authentication verification failed")
 
-        # Check if we have both APIs
-        if not self._router.is_fully_configured:
+        if not verification.get("v1") and self._v1_client is not None and self._v1_client.is_authenticated:
+            # The V1 client had a token but verify_clients() reported it
+            # unhealthy — almost always means the OAuth access token has
+            # expired or been revoked.
+            logger.error(
+                "V1 OAuth verification failed. Your TICKTICK_ACCESS_TOKEN is "
+                "probably expired or revoked. Run `ticktick-sdk auth` to mint "
+                "a fresh token and update TICKTICK_ACCESS_TOKEN in Railway. "
+                "Until then, all V1-routed tools (e.g. get_project_with_data) "
+                "will fail."
+            )
+
+        # --- Final state ---------------------------------------------------
+        has_v1 = self._router.has_v1
+        has_v2 = self._router.has_v2
+
+        if not has_v1 and not has_v2:
             raise TickTickConfigurationError(
-                "Both V1 and V2 APIs are required. " + "; ".join(errors),
+                "Both V1 and V2 APIs failed to initialize, server cannot start. "
+                + (v1_error or "V1 not configured")
+                + "; "
+                + (self._v2_unavailable_reason or "V2 not configured")
+            )
+
+        if has_v1 and has_v2:
+            logger.info("Unified API initialized successfully (V1 + V2)")
+        elif has_v1:
+            logger.warning(
+                "Unified API initialized in DEGRADED mode: V1 only. "
+                "V2-routed tools (tags, folders, habits, focus, subtasks, "
+                "full task listings) will return a friendly error until V2 "
+                "recovers. Reason: %s",
+                self._v2_unavailable_reason or "unknown",
+            )
+        else:
+            logger.warning(
+                "Unified API initialized in DEGRADED mode: V2 only. "
+                "V1-routed tools (get_project_with_data) will return a "
+                "friendly error. Reason: %s",
+                v1_error or "V1 not configured",
             )
 
         self._initialized = True
-        logger.info("Unified API initialized successfully")
+
+    async def _authenticate_v2(self) -> None:
+        """Authenticate the V2 client.
+
+        Tries password sign-on first (the common path). If it fails — most
+        often with ``need_captcha`` from TickTick's anti-bot — falls back to
+        an env-provided session token + cookies if the user has set them.
+
+        Never raises; records ``_v2_unavailable_reason`` /
+        ``_v2_unavailable_until`` and lets the caller decide what to do.
+        """
+        if self._v2_client is None:
+            self._v2_unavailable_reason = "V2 client not constructed"
+            return
+
+        creds = self._v2_credentials
+
+        # --- Step 1: password sign-on -------------------------------------
+        password_failed_reason: str | None = None
+        if creds["username"] and creds["password"]:
+            try:
+                session = await self._v2_client.authenticate(
+                    creds["username"],
+                    creds["password"],
+                )
+                self._inbox_id = session.inbox_id
+                self._v2_unavailable_reason = None
+                self._v2_unavailable_until = None
+                self._v2_auth_method = "password"
+                logger.info("V2 authenticated via username/password")
+                return
+            except Exception as e:
+                # Includes TickTickSessionError for need_captcha, 2FA, wrong
+                # password, etc., plus any network failure.
+                password_failed_reason = str(e)
+                cooldown_until = datetime.now(timezone.utc) + self._V2_PASSWORD_COOLDOWN
+                self._v2_unavailable_until = cooldown_until
+                logger.error(
+                    "V2 password sign-on failed: %s",
+                    e,
+                )
+                logger.error(
+                    "V2 will be unavailable until ~%s UTC (6h cooldown). "
+                    "You can REDEPLOY the server at any time to retry sooner "
+                    "— the cooldown is in-memory only and resets on restart. "
+                    "If this keeps happening, TickTick is probably anti-bot "
+                    "flagging your password login (look for 'need_captcha' in "
+                    "the error above). Workarounds: (1) set TICKTICK_DEVICE_ID "
+                    "to a stable value so each redeploy doesn't look like a "
+                    "new device, (2) set TICKTICK_V2_TOKEN + TICKTICK_V2_COOKIES "
+                    "from a logged-in browser to skip the password login.",
+                    cooldown_until.isoformat(timespec="seconds"),
+                )
+        else:
+            password_failed_reason = "no username/password configured"
+
+        # --- Step 2: pre-obtained session token fallback ------------------
+        # The only required env var is TICKTICK_V2_COOKIES (the full Cookie
+        # header pasted from a logged-in browser). The session token is the
+        # `t` cookie inside it, so we extract it automatically. Setting
+        # TICKTICK_V2_TOKEN explicitly is optional and just overrides `t`.
+        token = creds.get("v2_token")
+        cookie_header = creds.get("v2_cookies")
+        if token or cookie_header:
+            cookies = _parse_cookie_header(cookie_header) if cookie_header else {}
+            # Token precedence: explicit env var, else the `t` cookie.
+            token = token or cookies.get("t")
+            if not token:
+                logger.error(
+                    "TICKTICK_V2_COOKIES is set but contains no `t=` cookie, and "
+                    "TICKTICK_V2_TOKEN is unset — cannot build a V2 session. Make "
+                    "sure you pasted the FULL Cookie header (it must include the "
+                    "`t=...` entry)."
+                )
+                self._v2_unavailable_reason = (
+                    f"password failed ({password_failed_reason}) and no `t` "
+                    "cookie found in TICKTICK_V2_COOKIES"
+                )
+                return
+            logger.info(
+                "Attempting V2 fallback via pre-obtained session token "
+                "(from TICKTICK_V2_COOKIES%s)",
+                " + TICKTICK_V2_TOKEN" if creds.get("v2_token") else "",
+            )
+            try:
+                # Always include the bare token as the 't' cookie too, since
+                # that's what the V2 API actually checks.
+                cookies.setdefault("t", token)
+                session = SessionToken(
+                    token=token,
+                    user_id="",
+                    username=creds["username"] or "",
+                    inbox_id="",
+                    cookies=cookies,
+                )
+                self._v2_client.set_session(session)
+
+                # Verify by hitting /user/status — this also gives us the
+                # real inbox_id and user_id that the SessionToken didn't
+                # have. If the token is stale this will 401.
+                status = await self._v2_client.get_user_status()
+                session.inbox_id = str(status.get("inboxId", "")) if isinstance(status, dict) else ""
+                session.user_id = str(status.get("userId", "")) if isinstance(status, dict) else ""
+                self._inbox_id = session.inbox_id or self._inbox_id
+
+                self._v2_unavailable_reason = None
+                self._v2_unavailable_until = None
+                self._v2_auth_method = "cookie"
+                logger.info(
+                    "V2 authenticated via pre-obtained session token (fallback). "
+                    "Password sign-on failed earlier: %s",
+                    password_failed_reason or "n/a",
+                )
+                return
+            except Exception as e:
+                logger.error(
+                    "V2 token fallback also failed: %s. The session in "
+                    "TICKTICK_V2_COOKIES is probably stale — refresh it from a "
+                    "logged-in TickTick browser tab.",
+                    e,
+                )
+                # Clear the partially-set session so router.has_v2 = False
+                try:
+                    self._v2_client._session_handler.clear_session()
+                except Exception:
+                    pass
+                self._v2_unavailable_reason = (
+                    f"password failed ({password_failed_reason}) "
+                    f"and token fallback failed ({e})"
+                )
+                return
+
+        # No fallback configured — record reason and bail.
+        self._v2_unavailable_reason = password_failed_reason or "V2 credentials not provided"
+
+    async def get_auth_status(self) -> dict[str, Any]:
+        """Live auth health snapshot for diagnostics (no secrets).
+
+        Performs two lightweight read pings (V1 `/project`, V2 `/user/status`)
+        to test the *current* validity of each session — so it catches a
+        token/cookie that expired after startup, not just the boot-time state.
+        Never returns credential values; only booleans + derived facts.
+        """
+        # --- V1 live check ---
+        v1_has_token = self._v1_client is not None and self._v1_client.is_authenticated
+        v1_ok = False
+        v1_error: str | None = None
+        if v1_has_token:
+            try:
+                await self._v1_client.get_projects()
+                v1_ok = True
+            except Exception as e:
+                v1_error = str(e)
+
+        # --- V2 live check ---
+        v2_has_session = self._v2_client is not None and self._v2_client.is_authenticated
+        v2_ok = False
+        v2_error: str | None = None
+        if v2_has_session:
+            try:
+                await self._v2_client.get_user_status()
+                v2_ok = True
+            except Exception as e:
+                v2_error = str(e)
+
+        return {
+            "v1_has_credentials": v1_has_token,
+            "v1_ok": v1_ok,
+            "v1_error": v1_error,
+            "v2_has_session": v2_has_session,
+            "v2_ok": v2_ok,
+            "v2_error": v2_error,
+            "v2_auth_method": self._v2_auth_method,
+            "v2_unavailable_reason": self._v2_unavailable_reason,
+            "v2_cooldown_until": (
+                self._v2_unavailable_until.isoformat(timespec="seconds")
+                if self._v2_unavailable_until
+                else None
+            ),
+        }
 
     async def close(self) -> None:
         """Close all API clients."""
@@ -1040,6 +1291,13 @@ class UnifiedTickTickAPI:
 
         V2-only operation.
 
+        Each update preserves unspecified fields: the existing task is fetched,
+        the user-supplied delta is merged into it, and the full task is sent
+        back. This is required because TickTick's V2 /batch/task endpoint
+        treats the update payload as the new task representation — any field
+        not present in the body is reset to its default (e.g. repeatFlag
+        becomes null, isAllDay flips to false, timeZone is wiped).
+
         Args:
             updates: List of update specifications. Each dict must contain:
                 - task_id (required): Task ID to update
@@ -1048,13 +1306,14 @@ class UnifiedTickTickAPI:
                 - title: New title
                 - content: New content
                 - priority: New priority (0, 1, 3, 5 or 'none', 'low', 'medium', 'high')
-                - start_date: New start date
-                - due_date: New due date
+                - start_date: New start date (datetime or ISO string)
+                - due_date: New due date (datetime or ISO string)
                 - time_zone: New timezone
                 - all_day: All-day flag
                 - tags: New tags (replaces existing)
                 - recurrence: New recurrence rule
                 - column_id: Kanban column ID (empty string to remove from column)
+                - kind: TEXT / NOTE / CHECKLIST
 
         Returns:
             Batch response with id2etag and id2error
@@ -1071,6 +1330,7 @@ class UnifiedTickTickAPI:
                 operation="batch_update_tasks",
             )
 
+        priority_map = {"none": 0, "low": 1, "medium": 3, "high": 5}
         v2_updates: list[dict[str, Any]] = []
 
         for update in updates:
@@ -1083,45 +1343,47 @@ class UnifiedTickTickAPI:
                     details={"update": update},
                 )
 
-            v2_update: dict[str, Any] = {
-                "id": task_id,
-                "projectId": project_id,
-            }
+            # Pre-fetch so we can send the full task representation. Without
+            # this, fields not in the delta would be wiped server-side.
+            existing = await self.get_task(task_id, project_id)
 
-            # Map fields to V2 format
             if "title" in update and update["title"] is not None:
-                v2_update["title"] = update["title"]
+                existing.title = update["title"]
             if "content" in update and update["content"] is not None:
-                v2_update["content"] = update["content"]
+                existing.content = update["content"]
+            if "kind" in update and update["kind"] is not None:
+                existing.kind = update["kind"]
             if "priority" in update and update["priority"] is not None:
                 priority = update["priority"]
                 if isinstance(priority, str):
-                    priority_map = {"none": 0, "low": 1, "medium": 3, "high": 5}
-                    priority = priority_map.get(priority.lower(), int(priority))
-                v2_update["priority"] = priority
+                    key = priority.lower()
+                    priority = priority_map[key] if key in priority_map else int(priority)
+                existing.priority = priority
             if "start_date" in update and update["start_date"] is not None:
                 start_date = update["start_date"]
-                if isinstance(start_date, datetime):
-                    start_date = Task.format_datetime(start_date, "v2")
-                v2_update["startDate"] = start_date
+                if isinstance(start_date, str):
+                    start_date = Task.parse_datetime(start_date)
+                existing.start_date = start_date
             if "due_date" in update and update["due_date"] is not None:
                 due_date = update["due_date"]
-                if isinstance(due_date, datetime):
-                    due_date = Task.format_datetime(due_date, "v2")
-                v2_update["dueDate"] = due_date
+                if isinstance(due_date, str):
+                    due_date = Task.parse_datetime(due_date)
+                existing.due_date = due_date
             if "time_zone" in update and update["time_zone"] is not None:
-                v2_update["timeZone"] = update["time_zone"]
+                existing.time_zone = update["time_zone"]
             if "all_day" in update and update["all_day"] is not None:
-                v2_update["isAllDay"] = update["all_day"]
+                existing.is_all_day = update["all_day"]
             if "tags" in update and update["tags"] is not None:
-                v2_update["tags"] = update["tags"]
+                existing.tags = update["tags"]
             if "recurrence" in update and update["recurrence"] is not None:
-                v2_update["repeatFlag"] = update["recurrence"]
+                existing.repeat_flag = update["recurrence"]
+
+            v2_update = existing.to_v2_dict(for_update=True)
+
+            # column_id is not serialized by to_v2_dict; pass through if the
+            # caller explicitly set it (empty string removes from column).
             if "column_id" in update:
-                # column_id can be empty string to remove from column
                 v2_update["columnId"] = update["column_id"] if update["column_id"] else ""
-            if "kind" in update and update["kind"] is not None:
-                v2_update["kind"] = update["kind"]
 
             v2_updates.append(v2_update)
 

@@ -74,6 +74,8 @@ class TickTickClient:
         # V2 Session credentials
         username: str | None = None,
         password: str | None = None,
+        v2_token: str | None = None,
+        v2_cookies: str | None = None,
         # General
         timeout: float = 30.0,
         device_id: str | None = None,
@@ -85,6 +87,8 @@ class TickTickClient:
             v1_access_token=v1_access_token,
             username=username,
             password=password,
+            v2_token=v2_token,
+            v2_cookies=v2_cookies,
             timeout=timeout,
             device_id=device_id,
         )
@@ -114,6 +118,8 @@ class TickTickClient:
             v1_access_token=settings.get_v1_access_token(),
             username=settings.username,
             password=settings.get_v2_password(),
+            v2_token=settings.get_v2_token(),
+            v2_cookies=settings.get_v2_cookies(),
             timeout=settings.timeout,
             device_id=settings.device_id,
         )
@@ -156,6 +162,10 @@ class TickTickClient:
     def is_connected(self) -> bool:
         """Check if connected."""
         return self._initialized
+
+    async def get_auth_status(self) -> dict[str, Any]:
+        """Live auth health snapshot for diagnostics (no secrets)."""
+        return await self._api.get_auth_status()
 
     @property
     def inbox_id(self) -> str | None:
@@ -298,20 +308,27 @@ class TickTickClient:
         self,
         days: int = 7,
         limit: int = 100,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
     ) -> list[Task]:
         """
         Get recently completed tasks.
 
         Args:
-            days: Number of days to look back
+            days: Number of days to look back (ignored if from_date/to_date provided)
             limit: Maximum number of tasks
+            from_date: Explicit start of the range (overrides days when both
+                from_date and to_date are provided)
+            to_date: Explicit end of the range
 
         Returns:
             List of completed tasks
         """
-        to_date = datetime.now()
-        from_date = to_date - timedelta(days=days)
-        return await self._api.list_completed_tasks(from_date, to_date, limit)
+        if from_date is not None and to_date is not None:
+            return await self._api.list_completed_tasks(from_date, to_date, limit)
+        to_dt = datetime.now()
+        from_dt = to_dt - timedelta(days=days)
+        return await self._api.list_completed_tasks(from_dt, to_dt, limit)
 
     async def move_task(
         self,
@@ -367,20 +384,27 @@ class TickTickClient:
         self,
         days: int = 7,
         limit: int = 100,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
     ) -> list[Task]:
         """
         Get recently abandoned ("won't do") tasks.
 
         Args:
-            days: Number of days to look back
+            days: Number of days to look back (ignored if from_date/to_date provided)
             limit: Maximum number of tasks
+            from_date: Explicit start of the range (overrides days when both
+                from_date and to_date are provided)
+            to_date: Explicit end of the range
 
         Returns:
             List of abandoned tasks
         """
-        to_date = datetime.now()
-        from_date = to_date - timedelta(days=days)
-        return await self._api.list_abandoned_tasks(from_date, to_date, limit)
+        if from_date is not None and to_date is not None:
+            return await self._api.list_abandoned_tasks(from_date, to_date, limit)
+        to_dt = datetime.now()
+        from_dt = to_dt - timedelta(days=days)
+        return await self._api.list_abandoned_tasks(from_dt, to_dt, limit)
 
     async def get_deleted_tasks(
         self,

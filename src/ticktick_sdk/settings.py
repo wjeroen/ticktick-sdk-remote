@@ -104,6 +104,24 @@ class TickTickSettings(BaseSettings):
         default=SecretStr(""),
         description="TickTick account password",
     )
+    v2_cookies: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Full Cookie header string from a logged-in TickTick browser session "
+            "(e.g. 'tt_distid=...; t=...; AWSALB=...'). Used as a fallback when "
+            "password sign-on fails (e.g. captcha-walled). The session token is "
+            "the `t` cookie inside it and is extracted automatically — this is the "
+            "only env var you need for the token fallback."
+        ),
+    )
+    v2_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Optional. The V2 session token explicitly. Normally unnecessary — it "
+            "is auto-extracted from the `t` cookie in TICKTICK_V2_COOKIES. Set this "
+            "only to override that (e.g. if your cookie string lacks `t`)."
+        ),
+    )
 
     # =========================================================================
     # General Settings
@@ -123,6 +141,29 @@ class TickTickSettings(BaseSettings):
         default_factory=_generate_object_id,
         description="Unique device identifier for V2 API (MongoDB-style ObjectId)",
     )
+
+    @property
+    def device_id_is_ephemeral(self) -> bool:
+        """True when device_id was auto-generated rather than env-provided.
+
+        An ephemeral (per-process) device id makes every Railway redeploy look
+        like a brand-new device logging in with the user's password, which is
+        exactly the pattern that triggers TickTick's anti-bot captcha wall.
+        Callers can check this to warn the user to set TICKTICK_DEVICE_ID.
+        """
+        return "device_id" not in self.model_fields_set
+
+    @property
+    def device_id_looks_valid(self) -> bool:
+        """True when device_id is a 24-char lowercase-hex ObjectId.
+
+        TickTick expects the device id (sent in the X-Device header) to look
+        like a MongoDB ObjectId. A malformed value — wrong length, non-hex
+        chars, stray whitespace/quotes — can make V2 sign-on fail with
+        misleading errors (e.g. username_password_not_match).
+        """
+        did = self.device_id
+        return len(did) == 24 and all(c in "0123456789abcdef" for c in did.lower())
 
     # =========================================================================
     # Validation
@@ -247,6 +288,20 @@ class TickTickSettings(BaseSettings):
     def get_v2_password(self) -> str:
         """Get the V2 password value."""
         return self.password.get_secret_value()
+
+    def get_v2_token(self) -> str | None:
+        """Get the optional pre-obtained V2 session token, if set."""
+        if self.v2_token:
+            value = self.v2_token.get_secret_value()
+            return value or None
+        return None
+
+    def get_v2_cookies(self) -> str | None:
+        """Get the optional V2 cookie header string, if set."""
+        if self.v2_cookies:
+            value = self.v2_cookies.get_secret_value()
+            return value or None
+        return None
 
 
 # Global settings instance (lazy initialization)

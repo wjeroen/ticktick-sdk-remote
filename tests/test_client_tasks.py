@@ -841,6 +841,34 @@ class TestTaskListing:
         completed = await client.get_completed_tasks(days=1)
         assert len(completed) >= 1
 
+    async def test_get_completed_tasks_explicit_from_to(self, client: TickTickClient, mock_api: MockUnifiedAPI):
+        """Explicit from_date/to_date should override the days window."""
+        task = await client.create_task(title="Completed today")
+        await client.complete_task(task.id, task.project_id)
+
+        # Range entirely in the past — must exclude the just-completed task
+        # even though days=7 would otherwise include it.
+        old_from = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        old_to = datetime(2020, 1, 31, tzinfo=timezone.utc)
+        completed = await client.get_completed_tasks(
+            days=7, from_date=old_from, to_date=old_to,
+        )
+        assert len(completed) == 0
+
+        # Range that includes today — must include it.
+        recent_from = datetime.now(timezone.utc) - timedelta(days=1)
+        recent_to = datetime.now(timezone.utc) + timedelta(days=1)
+        completed = await client.get_completed_tasks(
+            days=7, from_date=recent_from, to_date=recent_to,
+        )
+        assert any(t.id == task.id for t in completed)
+
+        # Verify the mock was called with the explicit dates, not the
+        # days-based defaults. (Last call is the recent_from/recent_to one.)
+        last_call = [c for c in mock_api.call_history if c[0] == "list_completed_tasks"][-1]
+        assert last_call[1][0] == recent_from
+        assert last_call[1][1] == recent_to
+
     @pytest.mark.mock_only
     async def test_get_abandoned_tasks(self, client: TickTickClient, mock_api: MockUnifiedAPI):
         """Test getting abandoned (won't do) tasks.

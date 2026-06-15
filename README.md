@@ -11,7 +11,7 @@ Forked from [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mirzabicer/tick
 
 - [Quick Start (Deploy to Railway)](#quick-start-deploy-to-railway)
 - [Features](#features)
-- [Available MCP Tools (43 Total)](#available-mcp-tools-43-total)
+- [Available MCP Tools (44 Total)](#available-mcp-tools-44-total)
 - [Example Conversations](#example-conversations)
 - [Health Check & Monitoring](#health-check--monitoring)
 - [Architecture](#architecture)
@@ -64,9 +64,13 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 | `TICKTICK_TIMEZONE` | **Recommended** | Your local timezone for correct date display (default: `UTC`). Without this, all-day tasks may show the wrong date — see note below. |
 | `TICKTICK_HOST` | No | API host: `ticktick.com` (default) or `dida365.com` (Chinese version) |
 | `TICKTICK_TIMEOUT` | No | Request timeout in seconds (default: `30`) |
-| `TICKTICK_DEVICE_ID` | No | Device ID for V2 API (auto-generated if not set) |
+| `TICKTICK_DEVICE_ID` | **Strongly recommended** | Stable device id for V2 API (24-char hex). If unset, a fresh random id is generated every redeploy — see note below. |
+| `TICKTICK_V2_COOKIES` | No (fallback) | Full Cookie header string from a logged-in TickTick browser tab. Only used if the username+password login fails (e.g. captcha-walled). The session token (`t` cookie) is extracted from it automatically. See "If V2 sign-on gets captcha-walled" below. |
+| `TICKTICK_V2_TOKEN` | No | Optional override for the session token — normally unnecessary, it's auto-extracted from the `t` cookie in `TICKTICK_V2_COOKIES`. |
 | `MCP_BEARER_TOKEN` | No | Bearer token for server authentication — see note below |
 | `PORT` | No | Server port (default: `8000`, Railway sets this automatically) |
+
+> **`TICKTICK_DEVICE_ID`:** TickTick tracks the devices logging into your account. Without this env var, every Railway redeploy invents a new random device id, so each redeploy looks like *"a stranger on a new device just logged in with your password"* — which can trigger TickTick's anti-bot CAPTCHA wall (`need_captcha`) and break V2 sign-on. Pick any stable 24-character hex string (e.g. the value printed in your first deploy's logs as `TICKTICK_DEVICE_ID is not set... auto-generated: <value>`) and paste it into Railway.
 
 > **Timezone:** TickTick stores all-day task dates as midnight in your local timezone, expressed as UTC. Without `TICKTICK_TIMEZONE`, a task due March 14 in Brussels appears as March 13. Set this to your [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) — the "TZ identifier" column on that page. Common examples: `Europe/Brussels`, `Europe/London`, `America/New_York`, `America/Chicago`, `America/Los_Angeles`, `Asia/Tokyo`, `Asia/Shanghai`, `Australia/Sydney`.
 
@@ -103,7 +107,7 @@ Note that it also misses some other features, like correct timezones and display
 
 ## Features
 
-- **43 MCP Tools**: Tasks, projects, folders, kanban columns, tags, habits, focus, user analytics
+- **44 MCP Tools**: Tasks, projects, folders, kanban columns, tags, habits, focus, user analytics, auth diagnostics
 - **Batch Operations**: All mutations accept lists (1-100 items) for bulk operations
 - **Remote Access**: Runs as an HTTP server with streamable-http transport
 - **Health Check**: `/health` endpoint for deployment platform monitoring
@@ -112,7 +116,58 @@ Note that it also misses some other features, like correct timezones and display
 
 ---
 
-## Available MCP Tools (43 Total)
+## What this fork adds
+
+Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mirzabicer/ticktick-sdk). Most items are explained in more detail in the sections below.
+
+**Deployment & hosting**
+- [x] Remote HTTP server (streamable-http) for Railway deployment, replacing upstream's stdio-only local MCP
+- [x] Bearer token authentication for the HTTP transport
+- [x] `/health` endpoint for platform monitoring
+- [x] Railway deployment files (Procfile, Dockerfile)
+
+**Auth resilience**
+- [x] Graceful V2 degradation — server keeps V1 working (degraded mode) instead of crash-looping when V2 sign-on fails (e.g. `need_captcha`); V2-only tools return a friendly "V2 unavailable" error
+- [x] Pre-obtained V2 session token fallback (`TICKTICK_V2_TOKEN` + `TICKTICK_V2_COOKIES`) — automatically used when password sign-on fails; bypasses `/user/signon` entirely
+- [x] Startup warnings when `TICKTICK_DEVICE_ID` is unset **or not a valid 24-char hex** (a malformed device id can break V2 sign-on)
+- [x] V1 OAuth 401 → specific log + error message pointing at `ticktick-sdk auth` token refresh, instead of generic "Authentication failed"
+- [x] Auth-failure errors are self-explanatory to the MCP consumer (name the exact env var to refresh) so a model/person can fix it without repo or log access
+- [x] `ticktick_auth_status` tool — live V1/V2 health check with a plain-English verdict and the exact fix, exposing **no** secret values
+
+**Task filtering** (all on `ticktick_list_tasks`)
+- [x] `due_before` filter — active tasks due on or before a date
+- [x] `due_after` filter — active tasks due on or after a date (combine with `due_before` for ranges)
+- [x] `has_due_date` filter — find scheduled or unscheduled tasks
+- [x] `from_date`/`to_date` now honored for completed/abandoned status (previously silently ignored)
+
+**Pagination & response sizing**
+- [x] Budget-aware pagination across **all** list-returning tools (`list_tasks`, `search_tasks`, `list_projects`, `list_folders`, `list_tags`, `list_columns`, `habits`) — pass `offset`, response surfaces `next_offset`
+- [x] Per-task `content` capped at 500 chars in JSON list views (with `content_truncated` flag + `_content_hint` pointing at `ticktick_get_task` for the full text)
+- [x] Exact size-checking — no more zero-task truncated responses
+
+**Task list & detail rendering**
+- [x] `[HIGH]` / `[MEDIUM]` / `[LOW]` / `[NONE]` priority labels visible in markdown list rows
+- [x] `[PINNED]` / `[DONE]` / `[ABANDONED]` / `[DAILY|WEEKLY|MONTHLY|YEARLY|REPEATS]` status flags in list rows
+- [x] Parent/children relationships shown inline (`Child of: <id>`, `N children`)
+- [x] Project name (not just ID) shown in multi-project list views and in detail view
+- [x] Recurrence rule, all-day flag, and non-default time zone surfaced in detail view
+- [x] `is_pinned` exposed in JSON output
+- [x] Child IDs listed in detail view (matching JSON's `child_ids`)
+
+**Bug fixes**
+- [x] Timezone handling: all-day tasks no longer off by one day (uses `TICKTICK_TIMEZONE`)
+- [x] `batch_update_tasks` no longer wipes `repeat_flag` / `is_all_day` / `time_zone` on sparse partial updates
+- [x] `batch_update_tasks` also preserves recurrence-anchor fields (`repeatFrom`, `repeatFirstDate`, `repeatTaskId`, `exDate`) — without these, TickTick keeps the RRULE but silently kills the chain (no next occurrence) when a recurring task's due date is moved
+- [x] V2 wire-format datetime conversion no longer drifts by +N hours when input has a non-UTC tzinfo
+- [x] Empty `repeatFrom` from V2 no longer fails Pydantic validation
+
+**Project conventions**
+- [x] `CLAUDE.md` with project instructions for Claude Code sessions
+- [x] `TODO.md` for cross-session task tracking
+
+---
+
+## Available MCP Tools (44 Total)
 
 All mutation tools accept lists for batch operations (1-100 items).
 
@@ -121,20 +176,20 @@ All mutation tools accept lists for batch operations (1-100 items).
 |------|-------------|
 | `ticktick_create_tasks` | Create 1-50 tasks with titles, dates, tags, etc. |
 | `ticktick_get_task` | Get task details by ID |
-| `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter; supports `due_before` for date-range filtering) |
+| `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter; supports `due_before` / `due_after` for date-range filtering — combine both for a range). **Paginated** — pass `offset` to continue. |
 | `ticktick_update_tasks` | Update 1-100 tasks (includes column assignment) |
 | `ticktick_complete_tasks` | Complete 1-100 tasks |
 | `ticktick_delete_tasks` | Delete 1-100 tasks (moves to trash) |
 | `ticktick_move_tasks` | Move 1-50 tasks between projects |
 | `ticktick_set_task_parents` | Set parent-child relationships for 1-50 tasks |
 | `ticktick_unparent_tasks` | Remove parent relationships from 1-50 tasks |
-| `ticktick_search_tasks` | Search tasks by text |
+| `ticktick_search_tasks` | Search tasks by text. **Paginated** — pass `offset` to continue. |
 | `ticktick_pin_tasks` | Pin or unpin 1-100 tasks |
 
 ### Project Tools
 | Tool | Description |
 |------|-------------|
-| `ticktick_list_projects` | List all projects |
+| `ticktick_list_projects` | List all projects. **Paginated** — pass `offset` to continue. |
 | `ticktick_get_project` | Get project details with tasks |
 | `ticktick_create_project` | Create a new project |
 | `ticktick_update_project` | Update project properties |
@@ -143,7 +198,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 ### Folder Tools
 | Tool | Description |
 |------|-------------|
-| `ticktick_list_folders` | List all folders |
+| `ticktick_list_folders` | List all folders. **Paginated** — pass `offset` to continue. |
 | `ticktick_create_folder` | Create a folder |
 | `ticktick_rename_folder` | Rename a folder |
 | `ticktick_delete_folder` | Delete a folder |
@@ -151,7 +206,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 ### Kanban Column Tools
 | Tool | Description |
 |------|-------------|
-| `ticktick_list_columns` | List columns for a kanban project |
+| `ticktick_list_columns` | List columns for a kanban project. **Paginated** — pass `offset` to continue. |
 | `ticktick_create_column` | Create a kanban column |
 | `ticktick_update_column` | Update column name or order |
 | `ticktick_delete_column` | Delete a kanban column |
@@ -159,7 +214,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 ### Tag Tools
 | Tool | Description |
 |------|-------------|
-| `ticktick_list_tags` | List all tags |
+| `ticktick_list_tags` | List all tags. **Paginated** — pass `offset` to continue. |
 | `ticktick_create_tag` | Create a tag with color |
 | `ticktick_update_tag` | Update tag properties (includes rename via label) |
 | `ticktick_delete_tag` | Delete a tag |
@@ -168,7 +223,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 ### Habit Tools (Batch-Capable)
 | Tool | Description |
 |------|-------------|
-| `ticktick_habits` | List all habits |
+| `ticktick_habits` | List all habits. **Paginated** — pass `offset` to continue. |
 | `ticktick_habit` | Get habit details |
 | `ticktick_habit_sections` | List sections (morning/afternoon/night) |
 | `ticktick_create_habit` | Create a new habit |
@@ -186,6 +241,97 @@ All mutation tools accept lists for batch operations (1-100 items).
 | `ticktick_get_preferences` | Get user preferences |
 | `ticktick_focus_heatmap` | Get focus heatmap data |
 | `ticktick_focus_by_tag` | Get focus time by tag |
+| `ticktick_auth_status` | Diagnose V1/V2 auth health (live check, no secrets) — use when tools fail with auth errors |
+
+---
+
+## Response Format & Pagination
+
+Every list-returning tool uses **budget-aware pagination** to stay under the ~25,000 character MCP response limit. The model never has to guess how many items will fit — the server tells it.
+
+### How pagination works
+
+- All list tools accept an `offset` parameter (default `0`).
+- Markdown responses include a footer when more items remain:
+  ```
+  ---
+  More tasks available. Call again with `offset=50` to fetch the next page.
+  ```
+- JSON responses include explicit metadata:
+  ```json
+  {
+    "count": 50,           // items on this page
+    "total": 234,          // total matching
+    "offset": 0,           // where this page starts
+    "next_offset": 50,     // pass back to fetch next page, or null when done
+    "_pagination_hint": "More tasks available — call this tool again with offset=50 to fetch the next page (showing 50 of 234).",
+    "tasks": [...]
+  }
+  ```
+- When everything fits on one page, `next_offset` is `null`, the `_pagination_hint` is omitted, and the markdown footer is omitted. Pagination is invisible to the consumer.
+- Task lists are sorted deterministically before paging so calls with different offsets return a consistent ordering: active tasks by `due_date` ascending (undated last) then by `id`; completed/abandoned tasks by `completed_time` descending then by `id`.
+
+### Per-task content cap in JSON list views
+
+Task notes (`content`) can be arbitrarily long. To keep JSON list pages from being dominated by a single multi-kilobyte note, list-view responses truncate `content` to **500 characters** per task. When truncation happens:
+- Each affected task gets a `"content_truncated": true` flag.
+- The top-level response gets a `"_content_hint"` pointing at `ticktick_get_task` for the full text.
+
+`ticktick_get_task` (the detail view) never truncates content.
+
+### Subtask rendering — list view (`list_tasks`/`search_tasks`)
+
+When a task has children, both formats enrich them with title + priority — no extra API calls, the data comes from a `{id: {title, priority}}` map built from the same fetch that produced the list.
+
+**JSON** returns each child as `{id, title, priority_label}`:
+```json
+"children": [
+  {"id": "abc1", "title": "Pay landlord", "priority_label": "High"},
+  {"id": "abc2", "title": "Pay utilities", "priority_label": "None"}
+]
+```
+
+**Markdown** renders children as indented sub-bullets under the parent row:
+```
+- [HIGH] **Pay rent** (`668e...`) | Due: 2026-06-06
+  - [HIGH] Pay landlord (`abc1`)
+  - [NONE] Pay utilities (`abc2`)
+```
+
+Because the meta map is filtered by the query's status (e.g. active queries see only active titles), children whose status doesn't match are dropped. When that happens:
+
+- JSON adds `total_children`, `children_hidden`, and a `_children_hint`.
+- Markdown appends ` | N more subtasks hidden` (or ` | N subtasks (not in this filter)` when every child is filtered out).
+
+### Subtask rendering — detail view (`get_task`)
+
+`ticktick_get_task` fetches each child task concurrently (one parallel `get_task` per child) so the detail view can show the same enriched `[PRIORITY] title (\`id\`)` rows in markdown and `{id, title, priority_label}` in JSON. A failed child fetch falls back to a bare ID — never blocks the parent render.
+
+### Task list row format (markdown)
+
+Each task row in `ticktick_list_tasks` / `ticktick_search_tasks` / project-tasks views shows:
+
+```
+- [PRIORITY] [PINNED] [DONE|ABANDONED] [REPEATS] **Title** (`id`) | Project: Name | Due: YYYY-MM-DD | Tags: a, b | Child of: `parent_id` | N children
+```
+
+- `[PRIORITY]` — `[HIGH]` / `[MEDIUM]` / `[LOW]` / `[NONE]`
+- `[PINNED]` — only when pinned
+- `[DONE]` / `[ABANDONED]` — only on non-active tasks (active is the implicit default and gets no flag)
+- `[DAILY]` / `[WEEKLY]` / `[MONTHLY]` / `[YEARLY]` — when the task has a recurrence rule (parsed from `FREQ=` in the iCalendar RRULE). Falls back to `[REPEATS]` for unrecognized rules.
+- `Project: Name` — shown only when the rendered list spans more than one project (single-project lists omit it as redundant)
+- `Child of: <parent_id>` — only when the task is a subtask
+- `N children` — count of subtasks beneath this task
+
+### Task detail view (markdown)
+
+`ticktick_get_task` and create/update single-task results show full details: project name + ID, parent ID, child IDs (listed), checklist items with check states, full content/notes, recurrence rule, time zone (when different from yours), tags, due/start dates in your local timezone.
+
+### Format choice: markdown vs JSON
+
+- **Markdown** is typically more compact per task (~400 chars/task) — it omits null/empty fields and renders compact one-line rows.
+- **JSON** is more verbose (~700 chars/task) but includes every field explicitly, both numeric and label variants of priority/status, raw ISO timestamps, and is structured for programmatic consumption.
+- Both go through the same per-task formatter, so the **fields shown are identical between `list_tasks` and `search_tasks`** and between markdown and JSON modulo the format-specific render.
 
 ---
 
@@ -240,7 +386,7 @@ This server combines TickTick's two different APIs:
                           │ streamable-http
 ┌─────────────────────────▼───────────────────────────────────┐
 │              FastMCP Server (Railway)                         │
-│              43 tools, /health endpoint                      │
+│              44 tools, /health endpoint                      │
 └─────────────────────────┬───────────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
@@ -280,6 +426,12 @@ The API does not preserve tag order — tags may be returned in any order.
 
 ### 6. Inbox is Special
 The inbox is a special project that cannot be deleted.
+
+### 7. V2 Batch Updates Replace, Not Patch
+TickTick's V2 `/batch/task` endpoint treats each update payload as the **new task representation** — fields you don't send are reset to defaults (`repeatFlag` → null, `isAllDay` → false, `timeZone` → wiped). The unified `batch_update_tasks` handles this transparently by pre-fetching each task and merging the delta before sending, so callers can safely send sparse updates (e.g. just `start_date`) and the rest of the task is preserved.
+
+### 8. V2 Wire Format Hardcodes +0000
+The V2 datetime wire format is `YYYY-MM-DDTHH:MM:SS.000+0000` with a literal UTC suffix. `Task.format_datetime` converts any input datetime to UTC before serializing so wall-clock times match the offset. If you bypass `format_datetime` and pass a raw ISO string with a non-UTC offset (e.g. `+02:00`) directly through to V2, TickTick will still parse it correctly — but anything routed through the model layer is normalized to UTC first.
 
 ---
 
@@ -417,11 +569,13 @@ async with TickTickClient.from_settings() as client:
 
 #### Filtering Active Tasks with `ticktick_list_tasks`
 
-The `ticktick_list_tasks` MCP tool supports filters that the Python SDK doesn't expose as standalone methods. The most useful one for date-range queries is `due_before`:
+The `ticktick_list_tasks` MCP tool supports filters that the Python SDK doesn't expose as standalone methods. For date-range queries, use `due_before` and `due_after` — combine both to get tasks due in a range:
 
 | Parameter | Type | Example | Effect |
 |-----------|------|---------|--------|
 | `due_before` | `string` (YYYY-MM-DD) | `"2026-03-16"` | Active tasks due **on or before** this date |
+| `due_after` | `string` (YYYY-MM-DD) | `"2026-03-16"` | Active tasks due **on or after** this date (combine with `due_before` for a range) |
+| `has_due_date` | `boolean` | `false` | `true` = only tasks with a due date, `false` = only tasks **without** one (unscheduled) |
 | `due_today` | `boolean` | `true` | Only tasks due today |
 | `overdue` | `boolean` | `true` | Only tasks past their due date |
 | `priority` | `string` | `"high"` | Filter by priority: `none` / `low` / `medium` / `high` |
@@ -436,6 +590,18 @@ Example parameter combinations:
 # Tasks due in the next 3 days (assuming today is 2026-03-13):
 status="active", due_before="2026-03-16"
 
+# Tasks due from a specific date onwards:
+status="active", due_after="2026-03-16"
+
+# Tasks due in a date range (March 16-20 inclusive):
+status="active", due_after="2026-03-16", due_before="2026-03-20"
+
+# Unscheduled tasks (no due date set):
+status="active", has_due_date=false
+
+# Only tasks that have a due date (any date):
+status="active", has_due_date=true
+
 # High-priority tasks due this week:
 status="active", due_before="2026-03-20", priority="high"
 
@@ -449,7 +615,7 @@ status="completed", days=14
 status="active", project_id="63563f0c24f4f791814f9308"
 ```
 
-> **Note:** `due_before` uses your configured `TICKTICK_TIMEZONE` for the date comparison, so "due before March 16" means before the end of March 16 in your local timezone.
+> **Note:** `due_before` and `due_after` use your configured `TICKTICK_TIMEZONE` for the date comparison, so "due before March 16" means before the end of March 16 in your local timezone, and "due after March 16" means starting at the beginning of March 16.
 
 ### Projects & Folders
 
@@ -688,6 +854,47 @@ async with TickTickClient.from_settings() as client:
 ### "V2 initialization failed"
 - Your password may contain special characters — try changing it
 - Check for 2FA/MFA (not currently supported)
+
+### `need_captcha` from `/api/v2/user/signon` (V2 anti-bot wall)
+
+If you see this in Railway logs:
+
+```
+V2 password sign-on failed: Authentication failed: {"errorCode":"need_captcha", ...}
+V2 will be unavailable until ~<timestamp> UTC (6h cooldown).
+```
+
+TickTick's anti-bot system has flagged your password login (usually because too many login attempts came from your Railway datacenter IP in a short window — e.g. a crash loop, or many redeploys in a row). The server keeps running in **V1-only degraded mode** — task/project tools still work, but tags/folders/habits/focus/subtasks return a "V2 unavailable" error.
+
+> **Tip:** call the **`ticktick_auth_status`** tool any time to get a live, plain-English read on what's authenticated, why V2 is down, whether your device id is valid, and the exact env var to fix — without exposing any secrets.
+
+**What to do, in order of "least techy" → "most reliable":**
+
+1. **Wait it out + set `TICKTICK_DEVICE_ID`.** Stop redeploying for several hours (the flag usually clears on its own). Then set `TICKTICK_DEVICE_ID` to a stable 24-char hex string in Railway so future redeploys don't look like new devices, and redeploy once.
+
+2. **If it still won't lift: use the V2 session cookie fallback** (`TICKTICK_V2_COOKIES`). This makes the server skip `/user/signon` entirely and reuse a session you've already established in your browser. It can't trigger `need_captcha` because no login happens. See the next section for how to grab it.
+
+### Grabbing `TICKTICK_V2_COOKIES` from a browser
+
+You only need to do this if `need_captcha` is blocking the normal password login. The cookie string is sensitive — treat it like your password (paste only into Railway env vars, never into screenshots or chats). You only need **one** env var, `TICKTICK_V2_COOKIES`; the session token is extracted from it automatically.
+
+**On a desktop browser (Chrome / Edge / Firefox):**
+
+1. Open https://ticktick.com and sign in normally.
+2. Open the browser **DevTools** (F12, or right-click → *Inspect*).
+3. Go to the **Network** tab. In the filter box type `batch/check` (this is the V2 sync endpoint the app polls).
+4. Click around in TickTick (e.g. switch to "Today") so a request appears.
+5. Click any `batch/check/0` (or similar V2) request. In the right pane, look at **Request Headers**.
+6. Find the **`Cookie:`** header (under *Request* Headers — what the browser *sends*, not `Set-Cookie` under Response Headers). Copy its **full value verbatim**. The order of the pieces is arbitrary — it may start with `tt_distid=`, `_ga=`, or anything else, and it will contain many entries (`tt_distid`, `_ga`, `t`, `__stripe_mid`, `SESSION`, `ap_user_id`, `AWSALB`, …). Copy the **whole string as-is** and paste it into `TICKTICK_V2_COOKIES` — that's the only env var you need. The server reads each `key=value` pair individually (order doesn't matter, analytics entries are harmless) and extracts the session token from the `t` cookie automatically.
+7. That's it — no need to isolate the token by hand. (The cookie string **must** contain a `t=...` entry; that's the session token. If for some reason it doesn't, you can set `TICKTICK_V2_TOKEN` separately to override.)
+8. In Railway, set both env vars and redeploy. Logs should show `V2 authenticated via pre-obtained session token (fallback)`.
+
+The token typically lasts months. If you ever see `V2 token fallback also failed` in the logs, the token has gone stale — repeat the steps above to get a fresh one.
+
+### "V1 OAuth token expired or invalid"
+- Your `TICKTICK_ACCESS_TOKEN` has expired (TickTick OAuth tokens last ~6 months) or been revoked
+- Run `ticktick-sdk auth` again to mint a fresh token (same Step 2 from setup)
+- Update `TICKTICK_ACCESS_TOKEN` in Railway and redeploy
 
 ### "Configuration incomplete"
 - Make sure all 5 required environment variables are set in Railway

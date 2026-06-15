@@ -68,7 +68,10 @@ V2 (Session) - Required for most operations:
 Optional:
     TICKTICK_REDIRECT_URI   - OAuth2 redirect URI (default: http://localhost:8080/callback)
     TICKTICK_TIMEOUT        - Request timeout in seconds (default: 30)
-    TICKTICK_DEVICE_ID      - Device identifier (auto-generated if not set)
+    TICKTICK_DEVICE_ID      - Device identifier. STRONGLY RECOMMENDED to set
+                              this. If unset, a fresh random id is generated
+                              every redeploy, which makes each redeploy look
+                              like a new device to TickTick's anti-bot.
 
 === RESPONSE FORMATS ===
 
@@ -92,11 +95,12 @@ Tools return clear, actionable error messages:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 from zoneinfo import ZoneInfo
 
@@ -156,6 +160,19 @@ from ticktick_sdk.tools.formatting import (
     format_task_json,
     format_tasks_markdown,
     format_tasks_json,
+    paginate_tasks_markdown,
+    paginate_tasks_json,
+    paginate_markdown,
+    paginate_json,
+    paginate_projects_markdown,
+    paginate_projects_json,
+    paginate_tags_markdown,
+    paginate_tags_json,
+    paginate_folders_markdown,
+    paginate_folders_json,
+    paginate_columns_markdown,
+    paginate_columns_json,
+    LIST_CONTENT_MAX_CHARS,
     format_project_markdown,
     format_project_json,
     format_projects_markdown,
@@ -240,12 +257,38 @@ def truncate_response(
         f"\n\n---\n"
         f"⚠️ **Response truncated** (exceeded {CHARACTER_LIMIT:,} characters)\n\n"
         f"Showing partial results. To see more:\n"
-        f"- Use filters (project_id, tag, priority) to narrow results\n"
-        f"- Use the 'limit' parameter to reduce the number of items\n"
-        f"- Request response_format='json' for more compact output"
+        f"- Use filters (project_id, tag, priority, due_before/after) to narrow results\n"
+        f"- Use the 'limit' parameter to reduce the number of items"
     )
 
     return truncated + message
+
+
+# =============================================================================
+# Stable Sort Helpers
+# =============================================================================
+
+# TickTick's task-list endpoints don't guarantee a stable order between calls,
+# so offset-based pagination would otherwise risk duplicates or gaps. We apply
+# an explicit sort before paginating.
+
+def _active_sort_key(task) -> tuple:
+    """Active tasks: by due_date ascending (None last), then by id."""
+    if task.due_date is not None:
+        return (0, task.due_date, task.id or "")
+    return (1, datetime.max.replace(tzinfo=timezone.utc), task.id or "")
+
+
+def _completed_sort_key(task) -> tuple:
+    """Completed/abandoned tasks: by completed_time descending (None last), then id."""
+    if task.completed_time is not None:
+        return (0, -task.completed_time.timestamp(), task.id or "")
+    return (1, 0.0, task.id or "")
+
+
+def _id_sort_key(task) -> tuple:
+    """Fallback: by id only."""
+    return (task.id or "",)
 
 
 # =============================================================================
@@ -262,8 +305,38 @@ async def lifespan(mcp: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """
     logger.info("Initializing TickTick MCP Server...")
 
+    # Warn early if device_id is ephemeral — every Railway redeploy will look
+    # like a brand-new device to TickTick, which can trigger captcha walls.
+    settings = get_settings()
+    # Validate the device id format. TickTick expects a 24-char lowercase-hex
+    # ObjectId; a malformed value (wrong length, non-hex chars, stray
+    # whitespace/quotes) can make V2 sign-on fail with misleading errors.
+    if not settings.device_id_looks_valid:
+        logger.warning(
+            "TICKTICK_DEVICE_ID=%r does NOT look like a valid 24-char hex "
+            "ObjectId (length=%d). TickTick V2 sign-on may reject it. Use a "
+            "24-character lowercase-hex value — generate one with: "
+            "python -c \"import os; print(os.urandom(12).hex())\".",
+            settings.device_id,
+            len(settings.device_id),
+        )
+    else:
+        logger.info("TICKTICK_DEVICE_ID format looks valid (24-char hex).")
+
+    if settings.device_id_is_ephemeral:
+        logger.warning(
+            "TICKTICK_DEVICE_ID is not set. A new device id was auto-generated "
+            "for this process: %s — every redeploy will produce a different id, "
+            "which makes TickTick's anti-bot system more likely to flag your "
+            "logins. Set TICKTICK_DEVICE_ID in Railway to this value (or any "
+            "stable 24-char hex string) to make logins look like a single "
+            "consistent device.",
+            settings.device_id,
+        )
+
+    client: TickTickClient | None = None
     try:
-        client = TickTickClient.from_settings()
+        client = TickTickClient.from_settings(settings)
         await client.connect()
         logger.info("TickTick client connected successfully")
         yield {"client": client}
@@ -271,7 +344,7 @@ async def lifespan(mcp: FastMCP) -> AsyncIterator[dict[str, Any]]:
         logger.error("Failed to initialize TickTick client: %s", e)
         raise
     finally:
-        if "client" in locals():
+        if client is not None:
             await client.disconnect()
             logger.info("TickTick client disconnected")
 
@@ -295,6 +368,64 @@ async def health_check(request: Request) -> JSONResponse:
 def get_client(ctx: Context) -> TickTickClient:
     """Get the TickTick client from context."""
     return ctx.request_context.lifespan_context["client"]
+
+
+async def build_project_name_map(
+    client: TickTickClient, tasks: list
+) -> dict[str, str] | None:
+    """Return {project_id: name} for the formatter when tasks span >1 project.
+
+    Returns None when all tasks share a project (the per-row Project badge would
+    be redundant noise) or the list is empty. One extra API call per render —
+    `format_tasks_markdown` will use this to add a `| Project: <name>` suffix.
+    """
+    distinct = {t.project_id for t in tasks if t.project_id}
+    if len(distinct) <= 1:
+        return None
+    projects = await client.get_all_projects()
+    return {p.id: p.name for p in projects}
+
+
+async def build_child_meta_for_task(
+    client: TickTickClient, task
+) -> dict[str, dict[str, Any]] | None:
+    """Detail-view helper: fetch each child task in parallel so the
+    formatter can show title + priority for every subtask.
+
+    Returns None when the task has no children. Failed fetches are skipped
+    silently — the formatter will fall back to bare IDs for those.
+    """
+    if not task.child_ids:
+        return None
+    pid = task.project_id
+    results = await asyncio.gather(
+        *[client.get_task(cid, pid) for cid in task.child_ids],
+        return_exceptions=True,
+    )
+    meta: dict[str, dict[str, Any]] = {}
+    for cid, child in zip(task.child_ids, results):
+        if isinstance(child, Exception):
+            continue
+        meta[cid] = {"title": child.title, "priority": child.priority}
+    return meta
+
+
+async def build_project_name_for_task(
+    client: TickTickClient, task
+) -> dict[str, str] | None:
+    """Single-project lookup for detail-view rendering.
+
+    Returns {project_id: name} for the one project the task belongs to, or
+    None if lookup fails / no project_id. `format_task_markdown` falls back
+    to ID-only display when the map is None, so failures here are benign.
+    """
+    if not task.project_id:
+        return None
+    try:
+        project = await client.get_project(task.project_id)
+        return {project.id: project.name}
+    except Exception:
+        return None
 
 
 # =============================================================================
@@ -525,14 +656,25 @@ async def ticktick_create_tasks(params: CreateTasksInput, ctx: Context) -> str:
 
         if params.response_format == ResponseFormat.MARKDOWN:
             if len(created_tasks) == 1:
-                return f"# Task Created\n\n{format_task_markdown(created_tasks[0], USER_TIMEZONE)}"
+                project_names = await build_project_name_for_task(client, created_tasks[0])
+                return (
+                    f"# Task Created\n\n"
+                    f"{format_task_markdown(created_tasks[0], USER_TIMEZONE, project_names=project_names)}"
+                )
             else:
-                return f"# {len(created_tasks)} Tasks Created\n\n{format_tasks_markdown(created_tasks, 'Created Tasks', USER_TIMEZONE)}"
+                project_names = await build_project_name_map(client, created_tasks)
+                return (
+                    f"# {len(created_tasks)} Tasks Created\n\n"
+                    f"{format_tasks_markdown(created_tasks, 'Created Tasks', USER_TIMEZONE, project_names=project_names)}"
+                )
         else:
             return json.dumps({
                 "success": True,
                 "count": len(created_tasks),
-                "tasks": [format_task_json(t, USER_TIMEZONE) for t in created_tasks]
+                "tasks": [
+                    format_task_json(t, USER_TIMEZONE, content_max_chars=LIST_CONTENT_MAX_CHARS)
+                    for t in created_tasks
+                ],
             }, indent=2)
 
     except Exception as e:
@@ -570,10 +712,25 @@ async def ticktick_get_task(params: TaskGetInput, ctx: Context) -> str:
         client = get_client(ctx)
         task = await client.get_task(params.task_id, params.project_id)
 
+        # Fetch child meta and project name concurrently — the children
+        # call is N parallel get_tasks; both are independent of each other.
+        child_meta, project_names = await asyncio.gather(
+            build_child_meta_for_task(client, task),
+            build_project_name_for_task(client, task),
+        )
+
         if params.response_format == ResponseFormat.MARKDOWN:
-            return format_task_markdown(task, USER_TIMEZONE)
+            return format_task_markdown(
+                task,
+                USER_TIMEZONE,
+                project_names=project_names,
+                child_meta=child_meta,
+            )
         else:
-            return json.dumps(format_task_json(task, USER_TIMEZONE), indent=2)
+            return json.dumps(
+                format_task_json(task, USER_TIMEZONE, child_meta=child_meta),
+                indent=2,
+            )
 
     except Exception as e:
         return handle_error(e, "get_task")
@@ -609,6 +766,11 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
             - due_today (bool): Only tasks due today (active only, uses TICKTICK_TIMEZONE)
             - overdue (bool): Only overdue tasks (active only, uses TICKTICK_TIMEZONE)
             - due_before (str): Active tasks due on or before this date, e.g. '2026-03-16' (uses TICKTICK_TIMEZONE)
+            - due_after (str): Active tasks due on or after this date, e.g. '2026-03-16' (uses TICKTICK_TIMEZONE).
+              Combine with due_before for a date range (e.g. due_after='2026-03-16' + due_before='2026-03-20'
+              returns tasks due March 16-20 inclusive).
+            - has_due_date (bool): If true, only tasks with a due date. If false, only tasks without one
+              (good for finding ad-hoc/unscheduled tasks). Omit for no filtering.
             - from_date (str): Start date for completed/abandoned (YYYY-MM-DD)
             - to_date (str): End date for completed/abandoned (YYYY-MM-DD)
             - days (int): Days to look back for completed/abandoned (default 7)
@@ -626,13 +788,27 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         - Active + project: status="active", project_id="..."
         - Tasks in column: project_id="...", column_id="..." (kanban workflow)
         - Due in next 3 days: status="active", due_before="2026-03-16"
+        - Due from a specific date: status="active", due_after="2026-03-16"
+        - Due in a date range: status="active", due_after="2026-03-16", due_before="2026-03-20"
+        - Unscheduled tasks: status="active", has_due_date=False
+        - Only tasks with a due date: status="active", has_due_date=True
     """
     try:
         client = get_client(ctx)
 
         # Handle different status types
+        all_child_meta: dict[str, dict[str, Any]] | None = None
         if params.status == "active":
             tasks = await client.get_all_tasks()
+            # Capture {id: {title, priority}} from the FULL list before
+            # filtering, so subtasks resolve to title + priority even when
+            # filtered out (e.g. subtasks with no due date won't appear in a
+            # "due today" result, but the parent's children field still
+            # shows them).
+            all_child_meta = {
+                t.id: {"title": t.title, "priority": t.priority}
+                for t in tasks if t.id
+            }
 
             # Apply active-only filters
             if params.project_id:
@@ -662,20 +838,42 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
                 due_before_date = date.fromisoformat(params.due_before)
                 tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() <= due_before_date]
 
-        elif params.status == "completed":
-            # Completed tasks require date range
-            if params.from_date and params.to_date:
-                from_dt = datetime.fromisoformat(params.from_date)
-                to_dt = datetime.fromisoformat(params.to_date)
-            else:
-                to_dt = datetime.now()
-                from_dt = to_dt - timedelta(days=params.days)
+            if params.due_after:
+                due_after_date = date.fromisoformat(params.due_after)
+                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() >= due_after_date]
 
-            tasks = await client.get_completed_tasks(days=params.days, limit=params.limit)
+            if params.has_due_date is True:
+                tasks = [t for t in tasks if t.due_date is not None]
+            elif params.has_due_date is False:
+                tasks = [t for t in tasks if t.due_date is None]
+
+        elif params.status == "completed":
+            if params.from_date and params.to_date:
+                # Interpret naive YYYY-MM-DD strings as full local-TZ days:
+                # from_date starts at 00:00, to_date ends at 23:59:59.
+                tz = ZoneInfo(USER_TIMEZONE)
+                from_dt = datetime.fromisoformat(params.from_date).replace(tzinfo=tz)
+                to_dt = datetime.fromisoformat(params.to_date).replace(
+                    hour=23, minute=59, second=59, tzinfo=tz,
+                )
+                tasks = await client.get_completed_tasks(
+                    limit=params.limit, from_date=from_dt, to_date=to_dt,
+                )
+            else:
+                tasks = await client.get_completed_tasks(days=params.days, limit=params.limit)
 
         elif params.status == "abandoned":
-            # Abandoned tasks require date range
-            tasks = await client.get_abandoned_tasks(days=params.days, limit=params.limit)
+            if params.from_date and params.to_date:
+                tz = ZoneInfo(USER_TIMEZONE)
+                from_dt = datetime.fromisoformat(params.from_date).replace(tzinfo=tz)
+                to_dt = datetime.fromisoformat(params.to_date).replace(
+                    hour=23, minute=59, second=59, tzinfo=tz,
+                )
+                tasks = await client.get_abandoned_tasks(
+                    limit=params.limit, from_date=from_dt, to_date=to_dt,
+                )
+            else:
+                tasks = await client.get_abandoned_tasks(days=params.days, limit=params.limit)
 
         elif params.status == "deleted":
             tasks = await client.get_deleted_tasks(limit=params.limit)
@@ -683,18 +881,42 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         else:
             tasks = await client.get_all_tasks()
 
-        # Apply limit
-        total_count = len(tasks)
-        tasks = tasks[: params.limit]
+        # Deterministic sort so paginated calls return a stable order
+        # (TickTick's list endpoints don't guarantee one).
+        if params.status == "active":
+            tasks.sort(key=_active_sort_key)
+        elif params.status in ("completed", "abandoned"):
+            tasks.sort(key=_completed_sort_key)
+        else:
+            tasks.sort(key=_id_sort_key)
+
+        # Cap consideration to offset + limit so the requested offset can
+        # always reach into the window. (Earlier `tasks[:limit]` was buggy:
+        # with limit=50 and offset=60, the slice threw away the very tasks
+        # the offset was asking for, yielding 0 results.)
+        tasks = tasks[: params.offset + params.limit]
 
         if params.response_format == ResponseFormat.MARKDOWN:
             title = f"{params.status.capitalize()} Tasks" if params.status else "Tasks"
-            result = format_tasks_markdown(tasks, title, USER_TIMEZONE)
+            project_names = await build_project_name_map(client, tasks)
+            return paginate_tasks_markdown(
+                tasks,
+                title=title,
+                offset=params.offset,
+                tz_name=USER_TIMEZONE,
+                project_names=project_names,
+                child_meta=all_child_meta,
+            )
         else:
-            result = json.dumps(format_tasks_json(tasks, USER_TIMEZONE), indent=2)
-
-        # Apply truncation if response is too large
-        return truncate_response(result, total_count, len(tasks))
+            return json.dumps(
+                paginate_tasks_json(
+                    tasks,
+                    offset=params.offset,
+                    tz_name=USER_TIMEZONE,
+                    child_meta=all_child_meta,
+                ),
+                indent=2,
+            )
 
     except Exception as e:
         return handle_error(e, "list_tasks")
@@ -1108,14 +1330,25 @@ async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
     try:
         client = get_client(ctx)
         tasks = await client.search_tasks(params.query)
-        tasks = tasks[: params.limit]
+        tasks.sort(key=_active_sort_key)
+        tasks = tasks[: params.offset + params.limit]
 
         title = f"Search Results: '{params.query}'"
 
         if params.response_format == ResponseFormat.MARKDOWN:
-            return format_tasks_markdown(tasks, title, USER_TIMEZONE)
+            project_names = await build_project_name_map(client, tasks)
+            return paginate_tasks_markdown(
+                tasks,
+                title=title,
+                offset=params.offset,
+                tz_name=USER_TIMEZONE,
+                project_names=project_names,
+            )
         else:
-            return json.dumps(format_tasks_json(tasks, USER_TIMEZONE), indent=2)
+            return json.dumps(
+                paginate_tasks_json(tasks, offset=params.offset, tz_name=USER_TIMEZONE),
+                indent=2,
+            )
 
     except Exception as e:
         return handle_error(e, "search_tasks")
@@ -1183,19 +1416,30 @@ async def ticktick_pin_tasks(params: PinTasksInput, ctx: Context) -> str:
             task = updated_tasks[0]
             action = "pinned" if params.tasks[0].pin else "unpinned"
             if params.response_format == ResponseFormat.MARKDOWN:
-                return f"**Success**: Task '{task.title}' has been {action}.\n\n" + format_task_markdown(task, USER_TIMEZONE)
+                project_names = await build_project_name_for_task(client, task)
+                return (
+                    f"**Success**: Task '{task.title}' has been {action}.\n\n"
+                    + format_task_markdown(task, USER_TIMEZONE, project_names=project_names)
+                )
             else:
                 result = format_task_json(task, USER_TIMEZONE)
                 result["action"] = action
                 return json.dumps(result, indent=2, default=str)
         else:
             if params.response_format == ResponseFormat.MARKDOWN:
-                return f"**Success**: {count} tasks updated.\n\n{format_tasks_markdown(updated_tasks, tz_name=USER_TIMEZONE)}"
+                project_names = await build_project_name_map(client, updated_tasks)
+                return (
+                    f"**Success**: {count} tasks updated.\n\n"
+                    f"{format_tasks_markdown(updated_tasks, tz_name=USER_TIMEZONE, project_names=project_names)}"
+                )
             else:
                 return json.dumps({
                     "success": True,
                     "count": count,
-                    "tasks": [format_task_json(t, USER_TIMEZONE) for t in updated_tasks]
+                    "tasks": [
+                        format_task_json(t, USER_TIMEZONE, content_max_chars=LIST_CONTENT_MAX_CHARS)
+                        for t in updated_tasks
+                    ],
                 }, indent=2, default=str)
 
     except Exception as e:
@@ -1238,9 +1482,13 @@ async def ticktick_list_columns(params: ColumnListInput, ctx: Context) -> str:
         columns = await client.get_columns(params.project_id)
 
         if params.response_format == ResponseFormat.MARKDOWN:
-            return format_columns_markdown(columns)
+            return paginate_columns_markdown(columns, offset=params.offset)
         else:
-            return json.dumps(format_columns_json(columns, USER_TIMEZONE), indent=2, default=str)
+            return json.dumps(
+                paginate_columns_json(columns, offset=params.offset, tz_name=USER_TIMEZONE),
+                indent=2,
+                default=str,
+            )
 
     except Exception as e:
         return handle_error(e, "list_columns")
@@ -1375,11 +1623,21 @@ async def ticktick_delete_column(params: ColumnDeleteInput, ctx: Context) -> str
         "openWorldHint": True,
     },
 )
-async def ticktick_list_projects(ctx: Context, response_format: ResponseFormat = ResponseFormat.MARKDOWN) -> str:
+async def ticktick_list_projects(
+    ctx: Context,
+    offset: int = 0,
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN,
+) -> str:
     """
     List all projects.
 
-    Retrieves all user projects with their details.
+    Retrieves all user projects with their details. Paginated: response
+    includes `next_offset` (JSON) or a footer (markdown) when more
+    projects remain.
+
+    Args:
+        offset: Zero-based offset for paging (default 0). Pass the
+            `next_offset` value from the previous call to continue.
 
     Returns:
         List of projects with: id, name, kind (TASK/NOTE), view_mode (list/kanban/timeline),
@@ -1390,9 +1648,9 @@ async def ticktick_list_projects(ctx: Context, response_format: ResponseFormat =
         projects = await client.get_all_projects()
 
         if response_format == ResponseFormat.MARKDOWN:
-            return format_projects_markdown(projects)
+            return paginate_projects_markdown(projects, offset=offset)
         else:
-            return json.dumps(format_projects_json(projects), indent=2)
+            return json.dumps(paginate_projects_json(projects, offset=offset), indent=2)
 
     except Exception as e:
         return handle_error(e, "list_projects")
@@ -1438,7 +1696,11 @@ async def ticktick_get_project(params: ProjectGetInput, ctx: Context) -> str:
             else:
                 return json.dumps({
                     "project": format_project_json(project_data.project),
-                    "tasks": format_tasks_json(project_data.tasks, USER_TIMEZONE),
+                    "tasks": format_tasks_json(
+                        project_data.tasks,
+                        USER_TIMEZONE,
+                        content_max_chars=LIST_CONTENT_MAX_CHARS,
+                    ),
                 }, indent=2)
         else:
             project = await client.get_project(params.project_id)
@@ -1620,11 +1882,16 @@ async def ticktick_delete_project(params: ProjectDeleteInput, ctx: Context) -> s
         "openWorldHint": True,
     },
 )
-async def ticktick_list_folders(ctx: Context, response_format: ResponseFormat = ResponseFormat.MARKDOWN) -> str:
+async def ticktick_list_folders(
+    ctx: Context,
+    offset: int = 0,
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN,
+) -> str:
     """
-    List all folders (project groups).
+    List all folders (project groups). Paginated.
 
-    Retrieves all folders used to organize projects.
+    Args:
+        offset: Zero-based offset for paging (default 0).
 
     Returns:
         Formatted list of folders or error message.
@@ -1634,9 +1901,9 @@ async def ticktick_list_folders(ctx: Context, response_format: ResponseFormat = 
         folders = await client.get_all_folders()
 
         if response_format == ResponseFormat.MARKDOWN:
-            return format_folders_markdown(folders)
+            return paginate_folders_markdown(folders, offset=offset)
         else:
-            return json.dumps(format_folders_json(folders), indent=2)
+            return json.dumps(paginate_folders_json(folders, offset=offset), indent=2)
 
     except Exception as e:
         return handle_error(e, "list_folders")
@@ -1759,11 +2026,16 @@ async def ticktick_delete_folder(params: FolderDeleteInput, ctx: Context) -> str
         "openWorldHint": True,
     },
 )
-async def ticktick_list_tags(ctx: Context, response_format: ResponseFormat = ResponseFormat.MARKDOWN) -> str:
+async def ticktick_list_tags(
+    ctx: Context,
+    offset: int = 0,
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN,
+) -> str:
     """
-    List all tags.
+    List all tags. Paginated.
 
-    Retrieves all tags with their colors and hierarchy.
+    Args:
+        offset: Zero-based offset for paging (default 0).
 
     Returns:
         Formatted list of tags or error message.
@@ -1773,9 +2045,9 @@ async def ticktick_list_tags(ctx: Context, response_format: ResponseFormat = Res
         tags = await client.get_all_tags()
 
         if response_format == ResponseFormat.MARKDOWN:
-            return format_tags_markdown(tags)
+            return paginate_tags_markdown(tags, offset=offset)
         else:
-            return json.dumps(format_tags_json(tags), indent=2)
+            return json.dumps(paginate_tags_json(tags, offset=offset), indent=2)
 
     except Exception as e:
         return handle_error(e, "list_tags")
@@ -2041,6 +2313,174 @@ async def ticktick_get_status(ctx: Context, response_format: ResponseFormat = Re
         return handle_error(e, "get_status")
 
 
+def _mask_secret(value: str | None) -> str:
+    """Mask a sensitive-ish value for safe display — never the full thing."""
+    if not value:
+        return "(not set)"
+    if len(value) <= 8:
+        return "****"
+    return f"{value[:4]}…{value[-4:]}"
+
+
+def _build_auth_verdict(
+    *,
+    v1_ok: bool,
+    v2_ok: bool,
+    v2_auth_method: str | None,
+    v2_cookies_configured: bool,
+    v2_reason: str | None,
+    v2_error: str | None,
+    device_id_valid: bool,
+    device_id_ephemeral: bool,
+) -> str:
+    """One-line, plain-English summary + next step for the current state."""
+    parts: list[str] = []
+    if v1_ok and v2_ok:
+        parts.append(f"All good — V1 and V2 both authenticated (V2 via {v2_auth_method}).")
+    elif v1_ok and not v2_ok:
+        detail = v2_error or v2_reason or "unknown reason"
+        if not v2_cookies_configured:
+            parts.append(
+                "DEGRADED (V1-only): V2 is down — "
+                f"{detail}. Fix: set TICKTICK_V2_COOKIES from a logged-in TickTick "
+                "browser tab (see README) and redeploy. Tasks/projects still work; "
+                "tags/folders/habits/focus/subtasks don't until V2 is back."
+            )
+        else:
+            parts.append(
+                "DEGRADED (V1-only): the V2 session (cookie) has failed or expired — "
+                f"{detail}. Fix: refresh TICKTICK_V2_COOKIES from a logged-in browser "
+                "and redeploy."
+            )
+    elif v2_ok and not v1_ok:
+        parts.append(
+            "DEGRADED (V2-only): V1 (OAuth) is down — refresh TICKTICK_ACCESS_TOKEN "
+            "via `ticktick-sdk auth` and redeploy. get_project_with_data won't work "
+            "until then."
+        )
+    else:
+        parts.append(
+            "BOTH V1 and V2 are failing right now — check credentials in the hosting "
+            "env (Railway) and redeploy."
+        )
+
+    if not device_id_valid:
+        parts.append(
+            "Also: TICKTICK_DEVICE_ID is not a valid 24-char hex value, which can "
+            "break the password login — set it to a valid hex id."
+        )
+    elif device_id_ephemeral:
+        parts.append(
+            "Also: TICKTICK_DEVICE_ID isn't set (auto-generated per deploy) — set a "
+            "stable 24-char hex id to look like one consistent device."
+        )
+    return " ".join(parts)
+
+
+@mcp.tool(
+    name="ticktick_auth_status",
+    annotations={
+        "title": "Check TickTick Auth Status",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def ticktick_auth_status(ctx: Context, response_format: ResponseFormat = ResponseFormat.MARKDOWN) -> str:
+    """
+    Diagnose TickTick authentication health (live check) without exposing secrets.
+
+    Performs lightweight read pings to test whether the V1 (OAuth) and V2
+    (session) connections are valid RIGHT NOW — so it catches a token or cookie
+    that expired after the server started. Use this when TickTick tools start
+    failing with auth errors, to understand what's wrong and how to fix it.
+
+    The result NEVER contains credential values (password, cookies, tokens) —
+    only booleans, a masked device id, and a plain-English verdict that the
+    person hosting the server can act on.
+
+    Returns:
+        A status report with a verdict and the exact env var to fix, if any.
+    """
+    try:
+        client = get_client(ctx)
+        settings = get_settings()
+        status = await client.get_auth_status()
+
+        v2_cookies_configured = settings.get_v2_cookies() is not None
+        device_id_valid = settings.device_id_looks_valid
+        device_id_ephemeral = settings.device_id_is_ephemeral
+
+        verdict = _build_auth_verdict(
+            v1_ok=status["v1_ok"],
+            v2_ok=status["v2_ok"],
+            v2_auth_method=status["v2_auth_method"],
+            v2_cookies_configured=v2_cookies_configured,
+            v2_reason=status["v2_unavailable_reason"],
+            v2_error=status["v2_error"],
+            device_id_valid=device_id_valid,
+            device_id_ephemeral=device_id_ephemeral,
+        )
+
+        report = {
+            "v1": {
+                "configured": status["v1_has_credentials"],
+                "ok": status["v1_ok"],
+            },
+            "v2": {
+                "configured": settings.has_v2_credentials or v2_cookies_configured,
+                "has_session": status["v2_has_session"],
+                "ok": status["v2_ok"],
+                "auth_method": status["v2_auth_method"],
+                "cookie_fallback_configured": v2_cookies_configured,
+                "unavailable_reason": status["v2_unavailable_reason"],
+                "cooldown_until": status["v2_cooldown_until"],
+            },
+            "device_id": {
+                "configured": not device_id_ephemeral,
+                "valid_24char_hex": device_id_valid,
+                "length": len(settings.device_id),
+                "masked": _mask_secret(settings.device_id),
+            },
+            "degraded_mode": not (status["v1_ok"] and status["v2_ok"]),
+            "verdict": verdict,
+        }
+
+        if response_format == ResponseFormat.MARKDOWN:
+            v2 = report["v2"]
+            lines = [
+                "## TickTick Auth Status",
+                "",
+                f"**Verdict:** {verdict}",
+                "",
+                f"- **V1 (OAuth, tasks/projects):** {'✅ OK' if report['v1']['ok'] else '❌ failing'}"
+                f" (configured: {report['v1']['configured']})",
+                f"- **V2 (session, tags/folders/habits/etc.):** {'✅ OK' if v2['ok'] else '❌ failing'}"
+                f" (auth method: {v2['auth_method'] or 'none'}; cookie fallback configured: "
+                f"{v2['cookie_fallback_configured']})",
+                f"- **Degraded mode:** {report['degraded_mode']}",
+                f"- **Device ID:** valid 24-char hex: {report['device_id']['valid_24char_hex']} "
+                f"(length {report['device_id']['length']}, value {report['device_id']['masked']}, "
+                f"configured: {report['device_id']['configured']})",
+            ]
+            if v2["cooldown_until"]:
+                lines.append(f"- **V2 cooldown until:** {v2['cooldown_until']} (redeploy bypasses it)")
+            if v2["unavailable_reason"]:
+                lines.append(f"- **Last V2 failure reason:** {v2['unavailable_reason']}")
+            lines.append("")
+            lines.append(
+                "_No credential values are shown. Fixes require the server host's "
+                "Railway access, not this chat._"
+            )
+            return "\n".join(lines)
+        else:
+            return json.dumps(report, indent=2)
+
+    except Exception as e:
+        return handle_error(e, "auth_status")
+
+
 @mcp.tool(
     name="ticktick_get_statistics",
     annotations={
@@ -2290,28 +2730,34 @@ def format_habit_json(habit: Habit) -> dict[str, Any]:
     }
 
 
+def format_habit_row_markdown(habit: Habit) -> str:
+    """Format a single habit as a multi-line list block."""
+    status = "📦" if habit.is_archived else "✅" if habit.current_streak > 0 else "⏳"
+    parts = [
+        f"### {status} {habit.name}",
+        f"- **ID**: `{habit.id}`",
+        f"- **Type**: {habit.habit_type}",
+        f"- **Streak**: {habit.current_streak} | Total: {habit.total_checkins}",
+    ]
+    if habit.target_days > 0:
+        parts.append(f"- **Target**: {habit.target_days} days")
+    parts.append("")  # trailing blank line so consecutive habits read as separate blocks
+    return "\n".join(parts)
+
+
 def format_habits_markdown(habits: list[Habit], title: str = "Habits") -> str:
-    """Format multiple habits for markdown display."""
+    """Format multiple habits for markdown (non-paginated convenience wrapper)."""
     if not habits:
         return f"# {title}\n\nNo habits found."
 
     lines = [f"# {title}", f"*{len(habits)} habits*", ""]
-
     for habit in habits:
-        status = "📦" if habit.is_archived else "✅" if habit.current_streak > 0 else "⏳"
-        lines.append(f"### {status} {habit.name}")
-        lines.append(f"- **ID**: `{habit.id}`")
-        lines.append(f"- **Type**: {habit.habit_type}")
-        lines.append(f"- **Streak**: {habit.current_streak} | Total: {habit.total_checkins}")
-        if habit.target_days > 0:
-            lines.append(f"- **Target**: {habit.target_days} days")
-        lines.append("")
-
+        lines.append(format_habit_row_markdown(habit))
     return "\n".join(lines)
 
 
 def format_habits_json(habits: list[Habit]) -> list[dict[str, Any]]:
-    """Format multiple habits for JSON output."""
+    """Format multiple habits for JSON output (legacy bare-list shape)."""
     return [format_habit_json(h) for h in habits]
 
 
@@ -2360,9 +2806,23 @@ async def ticktick_habits(params: HabitListInput, ctx: Context) -> str:
             habits = [h for h in habits if h.is_active]
 
         if params.response_format == ResponseFormat.MARKDOWN:
-            return format_habits_markdown(habits)
+            return paginate_markdown(
+                habits,
+                title="Habits",
+                offset=params.offset,
+                format_item=format_habit_row_markdown,
+                item_label="habits",
+            )
         else:
-            return json.dumps(format_habits_json(habits), indent=2)
+            return json.dumps(
+                paginate_json(
+                    habits,
+                    offset=params.offset,
+                    format_item=format_habit_json,
+                    item_key="habits",
+                ),
+                indent=2,
+            )
 
     except Exception as e:
         return handle_error(e, "list_habits")

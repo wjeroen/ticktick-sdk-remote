@@ -8,6 +8,7 @@ in both Markdown and JSON formats.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -61,13 +62,185 @@ def status_label(status: int) -> str:
     return labels.get(status, "Unknown")
 
 
+_KNOWN_RRULE_FREQS = {"DAILY", "WEEKLY", "MONTHLY", "YEARLY", "HOURLY", "MINUTELY"}
+
+
+def repeat_flag_indicator(repeat_flag: str | None) -> str:
+    """Compact list-row label for a task's recurrence rule.
+
+    Parses FREQ= out of an iCalendar RRULE (e.g. ``RRULE:FREQ=WEEKLY;BYDAY=MO``)
+    and returns ``[WEEKLY] `` so the cadence is visible at a glance. Falls back
+    to ``[REPEATS] `` when the rule is set but FREQ is missing or unknown.
+    """
+    if not repeat_flag:
+        return ""
+    match = re.search(r"FREQ=(\w+)", repeat_flag, re.IGNORECASE)
+    if not match:
+        return "[REPEATS] "
+    freq = match.group(1).upper()
+    if freq in _KNOWN_RRULE_FREQS:
+        return f"[{freq}] "
+    return "[REPEATS] "
+
+
+# =============================================================================
+# Generic Pagination Helpers
+# =============================================================================
+
+# Reserves for header/footer (markdown) and envelope (JSON) so we don't blow
+# the budget when adding the surrounding scaffolding.
+_MD_HEADER_RESERVE = 150
+_MD_FOOTER_RESERVE = 250
+_JSON_ENVELOPE_RESERVE = 300
+
+
+def paginate_markdown(
+    items: list,
+    title: str,
+    offset: int,
+    format_item: Callable[[Any], str],
+    item_label: str = "items",
+    budget: int = CHARACTER_LIMIT,
+) -> str:
+    """Budget-aware paginated markdown rendering.
+
+    Adds one item at a time until the next would exceed `budget`, then stops
+    and appends a footer telling the caller how to fetch the next page. If
+    every item fits, the footer is omitted entirely so pagination is
+    invisible to the consumer.
+    """
+    total = len(items)
+    if total == 0:
+        return f"# {title}\n\nNo {item_label} found."
+    if offset >= total:
+        return (
+            f"# {title}\n\n"
+            f"No {item_label} at offset {offset} (total: {total}). "
+            f"Use offset=0 to start from the beginning."
+        )
+
+    page = items[offset:]
+    available = budget - _MD_HEADER_RESERVE - _MD_FOOTER_RESERVE
+
+    rows = []
+    used = 0
+    for item in page:
+        row = format_item(item)
+        if used + len(row) + 1 > available:
+            break
+        rows.append(row)
+        used += len(row) + 1
+
+    shown = len(rows)
+    next_offset = offset + shown if offset + shown < total else None
+
+    if shown == total:
+        summary = f"Found {total} {item_label}:"
+    else:
+        summary = (
+            f"Showing {item_label} {offset + 1}–{offset + shown} of {total} total:"
+        )
+
+    out = [f"# {title}", "", summary, ""]
+    out.extend(rows)
+
+    if next_offset is not None:
+        out.append("")
+        out.append("---")
+        out.append(
+            f"More {item_label} available. Call again with `offset={next_offset}` "
+            f"to fetch the next page."
+        )
+
+    return "\n".join(out)
+
+
+def paginate_json(
+    items: list,
+    offset: int,
+    format_item: Callable[[Any], dict],
+    budget: int = CHARACTER_LIMIT,
+    item_key: str = "items",
+) -> dict[str, Any]:
+    """Budget-aware paginated JSON rendering.
+
+    Returns `{count, total, offset, next_offset, <item_key>}`. Caller
+    serializes with `json.dumps`. When `next_offset` is None there are no
+    more pages; otherwise pass it back as `offset` to continue.
+
+    Sizing is exact: after each item we serialize the whole envelope and
+    back off if we've gone over budget. O(n²) in page size but n is small.
+    """
+    total = len(items)
+    if total == 0:
+        return {
+            "count": 0,
+            "total": 0,
+            "offset": 0,
+            "next_offset": None,
+            item_key: [],
+        }
+    if offset >= total:
+        return {
+            "count": 0,
+            "total": total,
+            "offset": offset,
+            "next_offset": None,
+            item_key: [],
+            "_hint": f"offset {offset} is past the end (total: {total}).",
+        }
+
+    def envelope(items_list: list[dict], next_off: int | None) -> dict[str, Any]:
+        env: dict[str, Any] = {
+            "count": len(items_list),
+            "total": total,
+            "offset": offset,
+            "next_offset": next_off,
+        }
+        if next_off is not None:
+            env["_pagination_hint"] = (
+                f"More {item_key} available — call this tool again with "
+                f"offset={next_off} to fetch the next page "
+                f"(showing {len(items_list)} of {total})."
+            )
+        env[item_key] = items_list
+        return env
+
+    formatted: list[dict] = []
+    for idx, item in enumerate(items[offset:]):
+        formatted.append(format_item(item))
+        # Worst-case envelope: next_offset present (longer than null)
+        provisional_next = offset + len(formatted) + 1
+        if len(json.dumps(envelope(formatted, provisional_next), indent=2, default=str)) > budget:
+            formatted.pop()
+            break
+
+    shown = len(formatted)
+    next_offset = offset + shown if offset + shown < total else None
+    return envelope(formatted, next_offset)
+
+
 # =============================================================================
 # Task Formatting
 # =============================================================================
 
 
-def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
-    """Format a single task as Markdown."""
+def format_task_markdown(
+    task: Task,
+    tz_name: str = "UTC",
+    project_names: dict[str, str] | None = None,
+    child_meta: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    """Format a single task as Markdown.
+
+    When `project_names` is provided and contains an entry for this task's
+    `project_id`, the **Project** line shows `Name (\`id\`)` instead of just
+    the ID.
+
+    When `child_meta` is provided (`{child_id: {"title": str, "priority":
+    int}}`), each child row shows `[PRIORITY] title (\`id\`)`. Without it,
+    children render as bare IDs.
+    """
     lines = []
 
     # Title with priority indicator
@@ -78,9 +251,29 @@ def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
 
     # Key details
     lines.append(f"- **ID**: `{task.id}`")
-    lines.append(f"- **Project**: `{task.project_id}`")
+    if project_names and task.project_id in project_names:
+        lines.append(
+            f"- **Project**: {project_names[task.project_id]} (`{task.project_id}`)"
+        )
+    else:
+        lines.append(f"- **Project**: `{task.project_id}`")
+    if task.parent_id:
+        lines.append(f"- **Parent**: `{task.parent_id}`")
+    if task.child_ids:
+        lines.append("- **Children**:")
+        for child_id in task.child_ids:
+            meta = (child_meta or {}).get(child_id)
+            if meta:
+                ind = priority_indicator(meta.get("priority", 0))
+                ctitle = meta.get("title") or "(No title)"
+                lines.append(f"  - {ind} {ctitle} (`{child_id}`)")
+            else:
+                lines.append(f"  - `{child_id}`")
     lines.append(f"- **Status**: {status_label(task.status)}")
     lines.append(f"- **Priority**: {priority_label(task.priority)}")
+
+    if task.progress is not None and task.progress > 0:
+        lines.append(f"- **Progress**: {task.progress}%")
 
     if task.is_pinned:
         lines.append("- **Pinned**: Yes")
@@ -93,6 +286,14 @@ def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
         lines.append(f"- **Due**: {format_datetime(task.due_date, tz_name)}")
     if task.start_date:
         lines.append(f"- **Start**: {format_datetime(task.start_date, tz_name)}")
+    if task.is_all_day:
+        lines.append("- **All-day**: Yes")
+    if task.repeat_flag:
+        lines.append(f"- **Repeats**: `{task.repeat_flag}`")
+    # Only surface time_zone when it differs from the user's configured TZ —
+    # otherwise it's noise on every task.
+    if task.time_zone and task.time_zone != tz_name:
+        lines.append(f"- **Time zone**: {task.time_zone}")
 
     if task.tags:
         tags_str = ", ".join(f"`{t}`" for t in task.tags)
@@ -104,8 +305,11 @@ def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
         lines.append(task.content)
 
     if task.items:
+        # task.items are checklist items (a TODO list *inside* the task),
+        # not child tasks. Child tasks are tracked separately via child_ids
+        # and listed under **Children** in the key-details block above.
         lines.append("")
-        lines.append("### Subtasks")
+        lines.append("### Checklist")
         for item in task.items:
             checkbox = "[x]" if item.is_completed else "[ ]"
             lines.append(f"- {checkbox} {item.title or '(No title)'}")
@@ -113,21 +317,74 @@ def format_task_markdown(task: Task, tz_name: str = "UTC") -> str:
     return "\n".join(lines)
 
 
-def format_task_json(task: Task, tz_name: str = "UTC") -> dict[str, Any]:
-    """Format a single task as JSON-serializable dict."""
+def format_task_json(
+    task: Task,
+    tz_name: str = "UTC",
+    content_max_chars: int | None = None,
+    child_meta: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Format a single task as JSON-serializable dict.
+
+    `content_max_chars` is the per-task content cap used in list views to
+    keep page sizes manageable. When set and the content is longer, it's
+    truncated with an ellipsis and an extra `content_truncated: true` field
+    is added — the model should call `ticktick_get_task` for the full text.
+    Detail-view callers leave this at None to get the full content.
+
+    `child_meta` is `{child_id: {"title": str, "priority": int}}`. When
+    provided, the `children` array becomes a list of `{id, title,
+    priority_label}` objects; children not present in the map are dropped
+    (with `total_children`/`children_hidden` reported). When None (detail
+    view fallback), children are listed as bare `{id}` entries.
+    """
     start_date = convert_tz(task.start_date, tz_name)
     due_date = convert_tz(task.due_date, tz_name)
     completed_time = convert_tz(task.completed_time, tz_name)
-    return {
+
+    content = task.content
+    content_truncated = False
+    if (
+        content_max_chars is not None
+        and content is not None
+        and len(content) > content_max_chars
+    ):
+        content = content[:content_max_chars] + "…"
+        content_truncated = True
+
+    # Children: when child_meta is provided (list/search/detail contexts),
+    # render `{id, title, priority_label}`. Entries not in the map are dropped
+    # (they're a different status than the current filter — e.g. completed
+    # subtasks under an active-filtered parent). When child_meta is None,
+    # children are listed as bare `{id}` entries.
+    total_children = len(task.child_ids or [])
+    if task.child_ids and child_meta is not None:
+        children = []
+        for cid in task.child_ids:
+            meta = child_meta.get(cid)
+            if meta is None:
+                continue
+            children.append({
+                "id": cid,
+                "title": meta.get("title"),
+                "priority_label": priority_label(meta.get("priority", 0)),
+            })
+    elif task.child_ids:
+        children = [{"id": cid} for cid in task.child_ids]
+    else:
+        children = []
+
+    payload: dict[str, Any] = {
         "id": task.id,
         "project_id": task.project_id,
         "title": task.title,
-        "content": task.content,
+        "content": content,
         "kind": task.kind,
         "status": task.status,
         "status_label": status_label(task.status),
         "priority": task.priority,
         "priority_label": priority_label(task.priority),
+        "progress": task.progress,
+        "is_pinned": task.is_pinned,
         "start_date": start_date.isoformat() if start_date else None,
         "due_date": due_date.isoformat() if due_date else None,
         "completed_time": completed_time.isoformat() if completed_time else None,
@@ -136,7 +393,7 @@ def format_task_json(task: Task, tz_name: str = "UTC") -> dict[str, Any]:
         "time_zone": task.time_zone,
         "repeat_flag": task.repeat_flag,
         "parent_id": task.parent_id,
-        "child_ids": task.child_ids,
+        "children": children,
         "items": [
             {
                 "id": item.id,
@@ -147,33 +404,208 @@ def format_task_json(task: Task, tz_name: str = "UTC") -> dict[str, Any]:
             for item in task.items
         ],
     }
+    if total_children > len(children):
+        payload["total_children"] = total_children
+        payload["children_hidden"] = total_children - len(children)
+        payload["_children_hint"] = (
+            f"{payload['children_hidden']} of {total_children} subtasks aren't "
+            "shown here because they have a different status than the current "
+            "filter (e.g. completed/abandoned subtasks under an active parent)."
+        )
+    if content_truncated:
+        payload["content_truncated"] = True
+    return payload
 
 
-def format_tasks_markdown(tasks: list[Task], title: str = "Tasks", tz_name: str = "UTC") -> str:
-    """Format multiple tasks as Markdown."""
+def format_task_row_markdown(
+    task: Task,
+    tz_name: str = "UTC",
+    project_names: dict[str, str] | None = None,
+    child_meta: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    """Format a single task as one markdown list row.
+
+    When `child_meta` is provided and the task has children, the row is
+    followed by indented sub-bullets — one per resolvable child showing
+    `[PRIORITY] title (\`id\`)`. Children not in the map (different status
+    than the active filter) are counted as hidden in the row suffix.
+    Without `child_meta`, the row shows only the plain `| N children` count.
+    """
+    priority_str = priority_indicator(task.priority)
+    pinned_str = "[PINNED] " if task.is_pinned else ""
+    # Only flag non-active statuses — [ACTIVE] on every row is noise.
+    if task.status == -1:
+        status_flag = "[ABANDONED] "
+    elif task.status in (1, 2):
+        status_flag = "[DONE] "
+    else:
+        status_flag = ""
+    repeat_flag_str = repeat_flag_indicator(task.repeat_flag)
+    task_title = task.title or "(No title)"
+    due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
+    tags_str = f" | Tags: {', '.join(task.tags)}" if task.tags else ""
+    parent_str = f" | Child of: `{task.parent_id}`" if task.parent_id else ""
+    # Skip 0 (redundant noise) and 100 (already implied by [DONE]).
+    progress_str = (
+        f" | {task.progress}%"
+        if task.progress is not None and 0 < task.progress < 100
+        else ""
+    )
+    project_str = ""
+    if project_names and task.project_id in project_names:
+        project_str = f" | Project: {project_names[task.project_id]}"
+
+    # Children: list inline when child_meta is provided; otherwise just count.
+    child_lines: list[str] = []
+    children_suffix = ""
+    total_children = len(task.child_ids or [])
+    if task.child_ids and child_meta is not None:
+        hidden = 0
+        for cid in task.child_ids:
+            meta = child_meta.get(cid)
+            if meta is None:
+                hidden += 1
+                continue
+            cind = priority_indicator(meta.get("priority", 0))
+            ctitle = meta.get("title") or "(No title)"
+            child_lines.append(f"  - {cind} {ctitle} (`{cid}`)")
+        if not child_lines and hidden > 0:
+            children_suffix = f" | {hidden} subtasks (not in this filter)"
+        elif hidden > 0:
+            children_suffix = f" | {hidden} more subtasks hidden"
+    elif task.child_ids:
+        children_suffix = f" | {total_children} children"
+
+    main_row = (
+        f"- {priority_str} {pinned_str}{status_flag}{repeat_flag_str}**{task_title}** "
+        f"(`{task.id}`){project_str}{due_str}{progress_str}{tags_str}{parent_str}{children_suffix}"
+    )
+    if child_lines:
+        return main_row + "\n" + "\n".join(child_lines)
+    return main_row
+
+
+def format_tasks_markdown(
+    tasks: list[Task],
+    title: str = "Tasks",
+    tz_name: str = "UTC",
+    project_names: dict[str, str] | None = None,
+    child_meta: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    """Format multiple tasks as Markdown (non-paginated convenience wrapper).
+
+    For budget-aware paginated output, use `paginate_tasks_markdown`.
+    """
     if not tasks:
         return f"# {title}\n\nNo tasks found."
 
+    meta = child_meta if child_meta is not None else _build_child_meta(tasks)
     lines = [f"# {title}", "", f"Found {len(tasks)} task(s):", ""]
-
     for task in tasks:
-        priority_str = priority_indicator(task.priority)
-        pinned_str = "[PINNED] " if task.is_pinned else ""
-        task_title = task.title or "(No title)"
-        due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
-        tags_str = f" | Tags: {', '.join(task.tags)}" if task.tags else ""
-
-        lines.append(f"- {priority_str} {pinned_str}**{task_title}** (`{task.id}`){due_str}{tags_str}")
-
+        lines.append(format_task_row_markdown(task, tz_name, project_names, child_meta=meta))
     return "\n".join(lines)
 
 
-def format_tasks_json(tasks: list[Task], tz_name: str = "UTC") -> dict[str, Any]:
-    """Format multiple tasks as JSON."""
-    return {
+def _build_child_meta(tasks: list[Task]) -> dict[str, dict[str, Any]]:
+    """Build a `{id: {title, priority}}` map from a task list — used to
+    enrich child references when no explicit map was passed."""
+    return {t.id: {"title": t.title, "priority": t.priority} for t in tasks if t.id}
+
+
+def format_tasks_json(
+    tasks: list[Task],
+    tz_name: str = "UTC",
+    content_max_chars: int | None = None,
+    child_meta: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Format multiple tasks as JSON (non-paginated convenience wrapper).
+
+    `content_max_chars` defaults to None for backward compatibility, but
+    list-view callers should pass `LIST_CONTENT_MAX_CHARS` so the per-task
+    notes don't blow up batch responses with multi-kilobyte content fields.
+    For budget-aware paginated output use `paginate_tasks_json` instead.
+
+    `child_meta` is `{id: {title, priority}}` for enriching child references
+    with title + priority_label. When omitted, it's built from `tasks` itself
+    (which only helps when children happen to be in the same batch).
+    """
+    meta = child_meta if child_meta is not None else _build_child_meta(tasks)
+    formatted = [format_task_json(t, tz_name, content_max_chars=content_max_chars, child_meta=meta) for t in tasks]
+    result: dict[str, Any] = {
         "count": len(tasks),
-        "tasks": [format_task_json(t, tz_name) for t in tasks],
+        "tasks": formatted,
     }
+    if content_max_chars is not None and any(t.get("content_truncated") for t in formatted):
+        result["_content_hint"] = (
+            f"Some content fields are truncated to {content_max_chars} chars. "
+            "Use ticktick_get_task(task_id) for the full note."
+        )
+    return result
+
+
+# Per-task content cap for list views (~one or two tweets); the model can
+# call ticktick_get_task to retrieve the full notes when needed.
+LIST_CONTENT_MAX_CHARS = 500
+
+
+def paginate_tasks_markdown(
+    tasks: list[Task],
+    title: str,
+    offset: int,
+    tz_name: str = "UTC",
+    project_names: dict[str, str] | None = None,
+    budget: int = CHARACTER_LIMIT,
+    child_meta: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    """Paginated, budget-aware markdown rendering of a task list.
+
+    `child_meta` enables nested-children rendering (see
+    `format_task_row_markdown`). Falls back to building one from `tasks`.
+    """
+    meta = child_meta if child_meta is not None else _build_child_meta(tasks)
+    return paginate_markdown(
+        tasks,
+        title=title,
+        offset=offset,
+        format_item=lambda t: format_task_row_markdown(t, tz_name, project_names, child_meta=meta),
+        item_label="tasks",
+        budget=budget,
+    )
+
+
+def paginate_tasks_json(
+    tasks: list[Task],
+    offset: int,
+    tz_name: str = "UTC",
+    content_max_chars: int = LIST_CONTENT_MAX_CHARS,
+    budget: int = CHARACTER_LIMIT,
+    child_meta: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Paginated, budget-aware JSON rendering of a task list.
+
+    Each task's `content` is capped at `content_max_chars` (default 500).
+    When any task hits the cap, a `_content_hint` is added at the top level
+    pointing the caller at `ticktick_get_task` for the full text.
+
+    `child_meta` is `{id: {title, priority}}` for enriching child references
+    even when the children aren't in `tasks` (e.g. a filtered "due today"
+    list whose parents' subtasks have no due date). When omitted, the map
+    is built from `tasks` itself.
+    """
+    meta = child_meta if child_meta is not None else _build_child_meta(tasks)
+    result = paginate_json(
+        tasks,
+        offset=offset,
+        format_item=lambda t: format_task_json(t, tz_name, content_max_chars=content_max_chars, child_meta=meta),
+        budget=budget,
+        item_key="tasks",
+    )
+    if any(t.get("content_truncated") for t in result["tasks"]):
+        result["_content_hint"] = (
+            f"Some content fields are truncated to {content_max_chars} chars. "
+            "Use ticktick_get_task(task_id) for the full note."
+        )
+    return result
 
 
 # =============================================================================
@@ -215,17 +647,20 @@ def format_project_json(project: Project) -> dict[str, Any]:
     }
 
 
+def format_project_row_markdown(project: Project) -> str:
+    """Format a single project as one markdown list row."""
+    color_indicator = f"({project.color})" if project.color else ""
+    return f"- **{project.name}** (`{project.id}`) {color_indicator}".rstrip()
+
+
 def format_projects_markdown(projects: list[Project], title: str = "Projects") -> str:
-    """Format multiple projects as Markdown."""
+    """Format multiple projects as Markdown (non-paginated convenience wrapper)."""
     if not projects:
         return f"# {title}\n\nNo projects found."
 
     lines = [f"# {title}", "", f"Found {len(projects)} project(s):", ""]
-
     for project in projects:
-        color_indicator = f"({project.color})" if project.color else ""
-        lines.append(f"- **{project.name}** (`{project.id}`) {color_indicator}")
-
+        lines.append(format_project_row_markdown(project))
     return "\n".join(lines)
 
 
@@ -235,6 +670,36 @@ def format_projects_json(projects: list[Project]) -> dict[str, Any]:
         "count": len(projects),
         "projects": [format_project_json(p) for p in projects],
     }
+
+
+def paginate_projects_markdown(
+    projects: list[Project],
+    offset: int,
+    title: str = "Projects",
+    budget: int = CHARACTER_LIMIT,
+) -> str:
+    return paginate_markdown(
+        projects,
+        title=title,
+        offset=offset,
+        format_item=format_project_row_markdown,
+        item_label="projects",
+        budget=budget,
+    )
+
+
+def paginate_projects_json(
+    projects: list[Project],
+    offset: int,
+    budget: int = CHARACTER_LIMIT,
+) -> dict[str, Any]:
+    return paginate_json(
+        projects,
+        offset=offset,
+        format_item=format_project_json,
+        budget=budget,
+        item_key="projects",
+    )
 
 
 # =============================================================================
@@ -269,18 +734,21 @@ def format_tag_json(tag: Tag) -> dict[str, Any]:
     }
 
 
+def format_tag_row_markdown(tag: Tag) -> str:
+    """Format a single tag as one markdown list row."""
+    color_indicator = f"({tag.color})" if tag.color else ""
+    parent_indicator = f" (in {tag.parent})" if tag.parent else ""
+    return f"- **{tag.label}** (`{tag.name}`) {color_indicator}{parent_indicator}".rstrip()
+
+
 def format_tags_markdown(tags: list[Tag], title: str = "Tags") -> str:
-    """Format multiple tags as Markdown."""
+    """Format multiple tags as Markdown (non-paginated convenience wrapper)."""
     if not tags:
         return f"# {title}\n\nNo tags found."
 
     lines = [f"# {title}", "", f"Found {len(tags)} tag(s):", ""]
-
     for tag in tags:
-        color_indicator = f"({tag.color})" if tag.color else ""
-        parent_indicator = f" (in {tag.parent})" if tag.parent else ""
-        lines.append(f"- **{tag.label}** (`{tag.name}`) {color_indicator}{parent_indicator}")
-
+        lines.append(format_tag_row_markdown(tag))
     return "\n".join(lines)
 
 
@@ -290,6 +758,36 @@ def format_tags_json(tags: list[Tag]) -> dict[str, Any]:
         "count": len(tags),
         "tags": [format_tag_json(t) for t in tags],
     }
+
+
+def paginate_tags_markdown(
+    tags: list[Tag],
+    offset: int,
+    title: str = "Tags",
+    budget: int = CHARACTER_LIMIT,
+) -> str:
+    return paginate_markdown(
+        tags,
+        title=title,
+        offset=offset,
+        format_item=format_tag_row_markdown,
+        item_label="tags",
+        budget=budget,
+    )
+
+
+def paginate_tags_json(
+    tags: list[Tag],
+    offset: int,
+    budget: int = CHARACTER_LIMIT,
+) -> dict[str, Any]:
+    return paginate_json(
+        tags,
+        offset=offset,
+        format_item=format_tag_json,
+        budget=budget,
+        item_key="tags",
+    )
 
 
 # =============================================================================
@@ -312,15 +810,13 @@ def format_folder_json(folder: ProjectGroup) -> dict[str, Any]:
 
 
 def format_folders_markdown(folders: list[ProjectGroup], title: str = "Folders") -> str:
-    """Format multiple folders as Markdown."""
+    """Format multiple folders as Markdown (non-paginated convenience wrapper)."""
     if not folders:
         return f"# {title}\n\nNo folders found."
 
     lines = [f"# {title}", "", f"Found {len(folders)} folder(s):", ""]
-
     for folder in folders:
         lines.append(format_folder_markdown(folder))
-
     return "\n".join(lines)
 
 
@@ -330,6 +826,36 @@ def format_folders_json(folders: list[ProjectGroup]) -> dict[str, Any]:
         "count": len(folders),
         "folders": [format_folder_json(f) for f in folders],
     }
+
+
+def paginate_folders_markdown(
+    folders: list[ProjectGroup],
+    offset: int,
+    title: str = "Folders",
+    budget: int = CHARACTER_LIMIT,
+) -> str:
+    return paginate_markdown(
+        folders,
+        title=title,
+        offset=offset,
+        format_item=format_folder_markdown,
+        item_label="folders",
+        budget=budget,
+    )
+
+
+def paginate_folders_json(
+    folders: list[ProjectGroup],
+    offset: int,
+    budget: int = CHARACTER_LIMIT,
+) -> dict[str, Any]:
+    return paginate_json(
+        folders,
+        offset=offset,
+        format_item=format_folder_json,
+        budget=budget,
+        item_key="folders",
+    )
 
 
 # =============================================================================
@@ -358,17 +884,14 @@ def format_column_json(column: Column, tz_name: str = "UTC") -> dict[str, Any]:
 
 
 def format_columns_markdown(columns: list[Column], title: str = "Kanban Columns") -> str:
-    """Format multiple columns as Markdown."""
+    """Format multiple columns as Markdown (non-paginated convenience wrapper)."""
     if not columns:
         return f"# {title}\n\nNo columns found."
 
     lines = [f"# {title}", "", f"Found {len(columns)} column(s):", ""]
-
-    # Sort by sort_order for display
     sorted_columns = sorted(columns, key=lambda c: c.sort_order or 0)
     for column in sorted_columns:
         lines.append(format_column_markdown(column))
-
     return "\n".join(lines)
 
 
@@ -378,6 +901,39 @@ def format_columns_json(columns: list[Column], tz_name: str = "UTC") -> dict[str
         "count": len(columns),
         "columns": [format_column_json(c, tz_name) for c in columns],
     }
+
+
+def paginate_columns_markdown(
+    columns: list[Column],
+    offset: int,
+    title: str = "Kanban Columns",
+    budget: int = CHARACTER_LIMIT,
+) -> str:
+    sorted_columns = sorted(columns, key=lambda c: c.sort_order or 0)
+    return paginate_markdown(
+        sorted_columns,
+        title=title,
+        offset=offset,
+        format_item=format_column_markdown,
+        item_label="columns",
+        budget=budget,
+    )
+
+
+def paginate_columns_json(
+    columns: list[Column],
+    offset: int,
+    tz_name: str = "UTC",
+    budget: int = CHARACTER_LIMIT,
+) -> dict[str, Any]:
+    sorted_columns = sorted(columns, key=lambda c: c.sort_order or 0)
+    return paginate_json(
+        sorted_columns,
+        offset=offset,
+        format_item=lambda c: format_column_json(c, tz_name),
+        budget=budget,
+        item_key="columns",
+    )
 
 
 # =============================================================================
