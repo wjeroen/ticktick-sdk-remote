@@ -112,6 +112,7 @@ from ticktick_sdk.client import TickTickClient
 from ticktick_sdk.settings import get_settings
 from ticktick_sdk.tools.inputs import (
     ResponseFormat,
+    StatisticsSection,
     # Task inputs - list-based for batch operations
     CreateTasksInput,
     TaskGetInput,
@@ -190,6 +191,7 @@ from ticktick_sdk.tools.formatting import (
     format_user_markdown,
     format_user_status_markdown,
     format_statistics_markdown,
+    format_statistics_json,
     format_response,
     success_message,
     error_message,
@@ -2491,11 +2493,24 @@ async def ticktick_auth_status(ctx: Context, response_format: ResponseFormat = R
         "openWorldHint": True,
     },
 )
-async def ticktick_get_statistics(ctx: Context, response_format: ResponseFormat = ResponseFormat.MARKDOWN) -> str:
+async def ticktick_get_statistics(
+    ctx: Context,
+    section: StatisticsSection = StatisticsSection.ALL,
+    response_format: ResponseFormat = ResponseFormat.MARKDOWN,
+) -> str:
     """
-    Get productivity statistics.
+    Get productivity statistics (all from one `/statistics/general` call — no task fetching).
 
-    Retrieves task completion statistics, scores, levels, and focus/pomodoro data.
+    Use `section` to focus the output:
+    - `all` (default): score/level, the task-completion overview + per-day/week/month
+      breakdown (total, daily average, completion rate), and a pomodoro summary.
+    - `completions`: task completions only — today/yesterday/all-time plus the per-day,
+      per-week and per-month breakdown with total, average and completion rate.
+    - `score`: score, level, and the per-day score history.
+    - `pomodoros`: focus/pomodoro counts, durations, daily goal, and per-day/week/month history.
+
+    Note: the per-day/week/month window is fixed by TickTick (this endpoint takes no date
+    range). For completions in a date range *you* choose, use a date-filtered task query.
 
     Returns:
         Formatted statistics or error message.
@@ -2505,18 +2520,13 @@ async def ticktick_get_statistics(ctx: Context, response_format: ResponseFormat 
         stats = await client.get_statistics()
 
         if response_format == ResponseFormat.MARKDOWN:
-            return format_statistics_markdown(stats)
+            return format_statistics_markdown(stats, section=section.value)
         else:
-            return json.dumps({
-                "level": stats.level,
-                "score": stats.score,
-                "today_completed": stats.today_completed,
-                "yesterday_completed": stats.yesterday_completed,
-                "total_completed": stats.total_completed,
-                "today_pomo_count": stats.today_pomo_count,
-                "total_pomo_count": stats.total_pomo_count,
-                "total_pomo_duration_hours": stats.total_pomo_duration_hours,
-            }, indent=2)
+            return json.dumps(
+                format_statistics_json(stats, section=section.value),
+                indent=2,
+                default=str,
+            )
 
     except Exception as e:
         return handle_error(e, "get_statistics")

@@ -13,6 +13,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from ticktick_sdk.models.user import TaskCount, UserStatistics
+from ticktick_sdk.tools.formatting import (
+    format_statistics_json,
+    format_statistics_markdown,
+)
+
 if TYPE_CHECKING:
     from tests.conftest import MockUnifiedAPI
     from ticktick_sdk.client import TickTickClient
@@ -288,3 +294,78 @@ class TestUserCombinations:
 
         assert profile1.username == profile2.username == profile3.username
         assert profile1.display_name == profile2.display_name == profile3.display_name
+
+
+# =============================================================================
+# Statistics Formatter Tests (section-aware enrichment)
+# =============================================================================
+
+
+def _sample_stats() -> UserStatistics:
+    """A UserStatistics with per-day/week history for formatter tests."""
+    return UserStatistics(
+        score=1200,
+        level=6,
+        today_completed=4,
+        yesterday_completed=6,
+        total_completed=900,
+        task_by_day={
+            "2026-06-13": TaskCount(complete_count=3, not_complete_count=1),
+            "2026-06-14": TaskCount(complete_count=6, not_complete_count=2),
+            "2026-06-15": TaskCount(complete_count=4, not_complete_count=0),
+        },
+        task_by_week={"2026-W24": TaskCount(complete_count=13, not_complete_count=3)},
+        score_by_day={"2026-06-14": 1150, "2026-06-15": 1200},
+        today_pomo_count=2,
+        total_pomo_count=120,
+        total_pomo_duration=720000,
+    )
+
+
+class TestStatisticsFormatting:
+    """Section-aware statistics formatters (all from one /statistics/general call)."""
+
+    def test_completions_markdown_has_per_day_total_average(self):
+        md = format_statistics_markdown(_sample_stats(), section="completions")
+        assert "Completed per day" in md
+        assert "2026-06-15: 4" in md
+        assert "2026-06-13: 3" in md
+        assert "**Total**: 13" in md  # 3 + 6 + 4
+        assert "**Avg/day**: 4.33" in md  # 13 / 3
+        assert "Completion rate" in md
+        assert "Focus/Pomodoro" not in md  # completions section only
+
+    def test_completions_json_window(self):
+        data = format_statistics_json(_sample_stats(), section="completions")
+        assert "completions" in data and "pomodoros" not in data
+        win = data["completions"]["window"]
+        assert win["total_completed"] == 13
+        assert win["days"] == 3
+        assert win["avg_per_day"] == round(13 / 3, 2)
+        assert win["completion_rate_pct"] == round(13 / 16 * 100, 1)
+
+    def test_pomodoros_section_only(self):
+        md = format_statistics_markdown(_sample_stats(), section="pomodoros")
+        assert "Focus/Pomodoro" in md
+        assert "Task Completion" not in md
+        data = format_statistics_json(_sample_stats(), section="pomodoros")
+        assert "pomodoros" in data and "completions" not in data
+
+    def test_score_section_only(self):
+        md = format_statistics_markdown(_sample_stats(), section="score")
+        assert "Score by day" in md
+        assert "Task Completion" not in md
+
+    def test_all_section_includes_everything(self):
+        md = format_statistics_markdown(_sample_stats(), section="all")
+        assert "Task Completion" in md
+        assert "Focus/Pomodoro" in md
+        data = format_statistics_json(_sample_stats(), section="all")
+        assert "completions" in data and "pomodoros" in data
+        assert data["level"] == 6
+
+    def test_empty_history_does_not_crash(self):
+        stats = UserStatistics(score=10, level=1, total_completed=5)
+        md = format_statistics_markdown(stats, section="all")
+        assert "Productivity Statistics" in md
+        assert "Completed per day" not in md

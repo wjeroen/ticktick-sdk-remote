@@ -772,7 +772,10 @@ descriptions):
 - **Habits (8):** `habits`, `habit`, `habit_sections`, `create_habit`,
   `update_habit`, `delete_habit`, `checkin_habits`, `habit_checkins`.
 - **User & analytics (6):** `get_profile`, `get_status`, `get_statistics`,
-  `get_preferences`, `focus_heatmap`, `focus_by_tag`.
+  `get_preferences`, `focus_heatmap`, `focus_by_tag`. (`get_statistics` takes a
+  `section` param — `all`/`completions`/`score`/`pomodoros` — and surfaces the
+  per-day/week/month completion breakdown, score trend, and pomodoro history
+  that `/statistics/general` already returns; all from one call, no task fetch.)
 - **Auth (1):** `auth_status`.
 
 (All tool names are prefixed `ticktick_`. 11+5+4+4+5+8+6+1 = 44.)

@@ -976,27 +976,134 @@ def format_user_status_markdown(status: UserStatus) -> str:
     return "\n".join(lines)
 
 
-def format_statistics_markdown(stats: UserStatistics) -> str:
-    """Format user statistics as Markdown."""
-    lines = ["# Productivity Statistics", ""]
+def _completion_window(stats: UserStatistics) -> dict[str, Any] | None:
+    """Summarize the per-day completion window TickTick returns in task_by_day.
 
-    lines.append(f"- **Level**: {stats.level}")
-    lines.append(f"- **Score**: {stats.score}")
-    lines.append("")
+    Returns None when there's no daily history. The date keys are whatever
+    TickTick sends — we don't control the window (the /statistics/general
+    endpoint takes no date params), we just summarize what's present.
+    """
+    if not stats.task_by_day:
+        return None
+    days = sorted(stats.task_by_day.items())
+    completed = sum(tc.complete_count for _, tc in days)
+    scheduled = sum(tc.total for _, tc in days)
+    n = len(days)
+    return {
+        "from": days[0][0],
+        "to": days[-1][0],
+        "days": n,
+        "total_completed": completed,
+        "avg_per_day": round(completed / n, 2) if n else 0,
+        "completion_rate_pct": round(completed / scheduled * 100, 1) if scheduled else None,
+        # most-recent-first for display
+        "per_day": {d: tc.complete_count for d, tc in reversed(days)},
+    }
 
-    lines.append("## Task Completion")
-    lines.append(f"- Today: {stats.today_completed}")
-    lines.append(f"- Yesterday: {stats.yesterday_completed}")
-    lines.append(f"- All Time: {stats.total_completed}")
-    lines.append("")
 
-    if stats.total_pomo_count > 0:
+def format_statistics_markdown(stats: UserStatistics, section: str = "all") -> str:
+    """Format user statistics as Markdown.
+
+    section: "all" (everything), "completions", "score", or "pomodoros".
+    All data comes from one /statistics/general call (no task fetching).
+    """
+    show_all = section == "all"
+    lines: list[str] = ["# Productivity Statistics", ""]
+
+    if show_all or section == "score":
+        lines.append(f"- **Level**: {stats.level}")
+        lines.append(f"- **Score**: {stats.score}")
+        if section == "score" and stats.score_by_day:
+            lines.append("")
+            lines.append("## Score by day")
+            for day, sc in reversed(sorted(stats.score_by_day.items())):
+                lines.append(f"- {day}: {sc}")
+        lines.append("")
+
+    if show_all or section == "completions":
+        lines.append("## Task Completion")
+        lines.append(f"- Today: {stats.today_completed}")
+        lines.append(f"- Yesterday: {stats.yesterday_completed}")
+        lines.append(f"- All Time: {stats.total_completed}")
+        lines.append("")
+        window = _completion_window(stats)
+        if window:
+            lines.append(
+                f"### Completed per day ({window['from']} → {window['to']}, "
+                f"{window['days']} days)"
+            )
+            for day, count in window["per_day"].items():
+                lines.append(f"- {day}: {count}")
+            summary = (
+                f"- **Total**: {window['total_completed']} | "
+                f"**Avg/day**: {window['avg_per_day']}"
+            )
+            if window["completion_rate_pct"] is not None:
+                summary += f" | **Completion rate**: {window['completion_rate_pct']}%"
+            lines.append(summary)
+            lines.append("")
+        if stats.task_by_week:
+            lines.append("### Completed by week")
+            for wk, tc in reversed(sorted(stats.task_by_week.items())):
+                lines.append(f"- {wk}: {tc.complete_count}")
+            lines.append("")
+        if stats.task_by_month:
+            lines.append("### Completed by month")
+            for mo, tc in reversed(sorted(stats.task_by_month.items())):
+                lines.append(f"- {mo}: {tc.complete_count}")
+            lines.append("")
+
+    if show_all or section == "pomodoros":
         lines.append("## Focus/Pomodoro")
-        lines.append(f"- Today: {stats.today_pomo_count} pomos ({stats.today_pomo_duration_minutes:.1f} min)")
+        lines.append(
+            f"- Today: {stats.today_pomo_count} pomos "
+            f"({stats.today_pomo_duration_minutes:.1f} min)"
+        )
         lines.append(f"- Yesterday: {stats.yesterday_pomo_count} pomos")
-        lines.append(f"- All Time: {stats.total_pomo_count} pomos ({stats.total_pomo_duration_hours:.1f} hours)")
+        lines.append(
+            f"- All Time: {stats.total_pomo_count} pomos "
+            f"({stats.total_pomo_duration_hours:.1f} hours)"
+        )
+        if section == "pomodoros" and stats.pomo_goal:
+            lines.append(f"- Daily goal: {stats.pomo_goal} pomos")
+        lines.append("")
 
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip()
+
+
+def format_statistics_json(stats: UserStatistics, section: str = "all") -> dict[str, Any]:
+    """Format user statistics as a JSON-able dict (enriched, section-aware)."""
+    out: dict[str, Any] = {}
+    if section in ("all", "score"):
+        out["level"] = stats.level
+        out["score"] = stats.score
+        if section == "score":
+            out["score_by_day"] = stats.score_by_day
+    if section in ("all", "completions"):
+        out["completions"] = {
+            "today": stats.today_completed,
+            "yesterday": stats.yesterday_completed,
+            "total": stats.total_completed,
+            "window": _completion_window(stats),
+            "by_week": {w: tc.complete_count for w, tc in sorted(stats.task_by_week.items())},
+            "by_month": {m: tc.complete_count for m, tc in sorted(stats.task_by_month.items())},
+        }
+    if section in ("all", "pomodoros"):
+        pomo: dict[str, Any] = {
+            "today_count": stats.today_pomo_count,
+            "yesterday_count": stats.yesterday_pomo_count,
+            "total_count": stats.total_pomo_count,
+            "today_duration_minutes": round(stats.today_pomo_duration_minutes, 1),
+            "total_duration_hours": round(stats.total_pomo_duration_hours, 2),
+            "pomo_goal": stats.pomo_goal,
+            "pomo_duration_goal": stats.pomo_duration_goal,
+        }
+        if section == "pomodoros":
+            pomo["by_day"] = stats.pomo_by_day
+            pomo["by_week"] = stats.pomo_by_week
+            pomo["by_month"] = stats.pomo_by_month
+        out["pomodoros"] = pomo
+    return out
 
 
 # =============================================================================

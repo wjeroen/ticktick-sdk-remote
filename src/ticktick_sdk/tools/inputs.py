@@ -31,6 +31,15 @@ class ResponseFormat(str, Enum):
     JSON = "json"
 
 
+class StatisticsSection(str, Enum):
+    """Which slice of productivity statistics to return."""
+
+    ALL = "all"
+    COMPLETIONS = "completions"
+    SCORE = "score"
+    POMODOROS = "pomodoros"
+
+
 class BaseMCPInput(BaseModel):
     """Base input model with common configuration."""
 
