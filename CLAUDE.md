@@ -3,6 +3,12 @@
 ## TL;DR
 The user is a coding noob. ELI5 (Explain Like I'm 5) frequently when discussing technical concepts, code changes, and tradeoffs. Always make sure to update the README.md and TODO.md when making changes. Always consider at least 3 possible causes when something isn't working.
 
+## How to Ask the User Questions
+**Do NOT use the AskUserQuestion poll/multiple-choice UI — the user dislikes it.** When you need to clarify requirements or have the user choose between approaches, ask in **regular chat text** instead. Lay out the options and tradeoffs in prose (ELI5) and let the user reply normally. Asking questions is encouraged — just do it conversationally, not through the poll widget.
+
+## Pull Requests
+**Do NOT subscribe to / watch PRs for activity.** The user does not want PR-activity subscriptions (CI babysitting, auto-fixing failures, watching review comments). Create the PR and keep its description current, but never call `subscribe_pr_activity` and don't offer to watch the PR — unless the user explicitly asks you to in a specific case.
+
 ## User's Working Environment
 The user primarily works on **mobile** and deploys via Railway, so they **do not have access to browser developer tools**. When debugging:
 - Add `console.log()` statements to backend code - these show up in Railway logs
