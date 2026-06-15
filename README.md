@@ -11,7 +11,7 @@ Forked from [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mirzabicer/tick
 
 - [Quick Start (Deploy to Railway)](#quick-start-deploy-to-railway)
 - [Features](#features)
-- [Available MCP Tools (43 Total)](#available-mcp-tools-43-total)
+- [Available MCP Tools (44 Total)](#available-mcp-tools-44-total)
 - [Example Conversations](#example-conversations)
 - [Health Check & Monitoring](#health-check--monitoring)
 - [Architecture](#architecture)
@@ -107,7 +107,7 @@ Note that it also misses some other features, like correct timezones and display
 
 ## Features
 
-- **43 MCP Tools**: Tasks, projects, folders, kanban columns, tags, habits, focus, user analytics
+- **44 MCP Tools**: Tasks, projects, folders, kanban columns, tags, habits, focus, user analytics, auth diagnostics
 - **Batch Operations**: All mutations accept lists (1-100 items) for bulk operations
 - **Remote Access**: Runs as an HTTP server with streamable-http transport
 - **Health Check**: `/health` endpoint for deployment platform monitoring
@@ -129,8 +129,10 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 **Auth resilience**
 - [x] Graceful V2 degradation — server keeps V1 working (degraded mode) instead of crash-looping when V2 sign-on fails (e.g. `need_captcha`); V2-only tools return a friendly "V2 unavailable" error
 - [x] Pre-obtained V2 session token fallback (`TICKTICK_V2_TOKEN` + `TICKTICK_V2_COOKIES`) — automatically used when password sign-on fails; bypasses `/user/signon` entirely
-- [x] Loud startup warning when `TICKTICK_DEVICE_ID` isn't set (prevents redeploys looking like new devices)
+- [x] Startup warnings when `TICKTICK_DEVICE_ID` is unset **or not a valid 24-char hex** (a malformed device id can break V2 sign-on)
 - [x] V1 OAuth 401 → specific log + error message pointing at `ticktick-sdk auth` token refresh, instead of generic "Authentication failed"
+- [x] Auth-failure errors are self-explanatory to the MCP consumer (name the exact env var to refresh) so a model/person can fix it without repo or log access
+- [x] `ticktick_auth_status` tool — live V1/V2 health check with a plain-English verdict and the exact fix, exposing **no** secret values
 
 **Task filtering** (all on `ticktick_list_tasks`)
 - [x] `due_before` filter — active tasks due on or before a date
@@ -165,7 +167,7 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 
 ---
 
-## Available MCP Tools (43 Total)
+## Available MCP Tools (44 Total)
 
 All mutation tools accept lists for batch operations (1-100 items).
 
@@ -239,6 +241,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 | `ticktick_get_preferences` | Get user preferences |
 | `ticktick_focus_heatmap` | Get focus heatmap data |
 | `ticktick_focus_by_tag` | Get focus time by tag |
+| `ticktick_auth_status` | Diagnose V1/V2 auth health (live check, no secrets) — use when tools fail with auth errors |
 
 ---
 
@@ -383,7 +386,7 @@ This server combines TickTick's two different APIs:
                           │ streamable-http
 ┌─────────────────────────▼───────────────────────────────────┐
 │              FastMCP Server (Railway)                         │
-│              43 tools, /health endpoint                      │
+│              44 tools, /health endpoint                      │
 └─────────────────────────┬───────────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
@@ -862,6 +865,8 @@ V2 will be unavailable until ~<timestamp> UTC (6h cooldown).
 ```
 
 TickTick's anti-bot system has flagged your password login (usually because too many login attempts came from your Railway datacenter IP in a short window — e.g. a crash loop, or many redeploys in a row). The server keeps running in **V1-only degraded mode** — task/project tools still work, but tags/folders/habits/focus/subtasks return a "V2 unavailable" error.
+
+> **Tip:** call the **`ticktick_auth_status`** tool any time to get a live, plain-English read on what's authenticated, why V2 is down, whether your device id is valid, and the exact env var to fix — without exposing any secrets.
 
 **What to do, in order of "least techy" → "most reliable":**
 

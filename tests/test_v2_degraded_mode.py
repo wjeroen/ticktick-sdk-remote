@@ -60,6 +60,7 @@ def _make_v1_client_mock(authenticated: bool = True, verify_ok: bool = True) -> 
     v1 = MagicMock()
     v1.is_authenticated = authenticated
     v1.verify_authentication = AsyncMock(return_value=verify_ok)
+    v1.get_projects = AsyncMock(return_value=[])
     v1.close = AsyncMock()
     return v1
 
@@ -161,6 +162,107 @@ async def test_initialize_falls_back_to_session_token_when_password_fails(patche
     assert api._router.has_v2 is True
     assert api._v2_unavailable_reason is None
     assert api.inbox_id == "inbox123"
+
+
+# =============================================================================
+# get_auth_status() live snapshot
+# =============================================================================
+
+
+async def _init_cookie_authed_api(patched_clients, **status_side_effect):
+    """Helper: bring an API up authenticated via the cookie fallback."""
+    v1, v2 = patched_clients
+    v2.authenticate.side_effect = TickTickSessionError("need_captcha")
+
+    def _mark_authed(session):
+        v2.is_authenticated = True
+        v2.verify_authentication = AsyncMock(return_value=True)
+    v2.set_session.side_effect = _mark_authed
+
+    api = UnifiedTickTickAPI(
+        client_id="cid",
+        client_secret="sec",
+        v1_access_token="v1tok",
+        username="user@example.com",
+        password="pw",
+        v2_cookies="t=SECRET_T; AWSALB=z",
+    )
+    await api.initialize()
+    return api, v1, v2
+
+
+async def test_get_auth_status_reports_live_ok_and_cookie_method(patched_clients):
+    api, v1, v2 = await _init_cookie_authed_api(patched_clients)
+
+    status = await api.get_auth_status()
+
+    assert status["v1_ok"] is True
+    assert status["v2_ok"] is True
+    assert status["v2_auth_method"] == "cookie"
+    assert v1.get_projects.called  # live V1 ping happened
+    # the raw token must never appear anywhere in the status payload
+    assert "SECRET_T" not in str(status)
+
+
+async def test_get_auth_status_detects_session_expired_after_startup(patched_clients):
+    api, v1, v2 = await _init_cookie_authed_api(patched_clients)
+    # Session was fine at startup, but the live ping now 401s.
+    v2.get_user_status = AsyncMock(side_effect=TickTickSessionError("session expired (401)"))
+
+    status = await api.get_auth_status()
+
+    assert status["v1_ok"] is True
+    assert status["v2_ok"] is False
+    assert "session expired" in (status["v2_error"] or "")
+
+
+# =============================================================================
+# server-side formatting helpers (no secrets, actionable verdict)
+# =============================================================================
+
+
+def test_mask_secret_never_reveals_full_value():
+    from ticktick_sdk.server import _mask_secret
+
+    full = "IvMRTShR414qyyCSzUE6h3Kn"
+    masked = _mask_secret(full)
+    assert masked == "IvMR…h3Kn"
+    assert full not in masked
+    assert _mask_secret(None) == "(not set)"
+    assert _mask_secret("short") == "****"
+
+
+def test_build_auth_verdict_points_at_cookie_fix_when_v2_down_no_fallback():
+    from ticktick_sdk.server import _build_auth_verdict
+
+    verdict = _build_auth_verdict(
+        v1_ok=True,
+        v2_ok=False,
+        v2_auth_method=None,
+        v2_cookies_configured=False,
+        v2_reason="need_captcha",
+        v2_error=None,
+        device_id_valid=True,
+        device_id_ephemeral=False,
+    )
+    assert "TICKTICK_V2_COOKIES" in verdict
+    assert "DEGRADED" in verdict
+
+
+def test_build_auth_verdict_flags_invalid_device_id():
+    from ticktick_sdk.server import _build_auth_verdict
+
+    verdict = _build_auth_verdict(
+        v1_ok=True,
+        v2_ok=True,
+        v2_auth_method="cookie",
+        v2_cookies_configured=True,
+        v2_reason=None,
+        v2_error=None,
+        device_id_valid=False,
+        device_id_ephemeral=False,
+    )
+    assert "DEVICE_ID" in verdict.upper()
 
 
 def test_auth_error_message_v2_tells_consumer_to_refresh_cookies():

@@ -300,6 +300,9 @@ class UnifiedTickTickAPI:
         # future re-auth path. A redeploy always bypasses the cooldown.
         self._v2_unavailable_until: datetime | None = None
         self._v2_unavailable_reason: str | None = None
+        # Which path produced the current V2 session: "password", "cookie",
+        # or None when V2 isn't authenticated. Surfaced by get_auth_status().
+        self._v2_auth_method: str | None = None
 
     # =========================================================================
     # Initialization & Lifecycle
@@ -435,6 +438,7 @@ class UnifiedTickTickAPI:
                 self._inbox_id = session.inbox_id
                 self._v2_unavailable_reason = None
                 self._v2_unavailable_until = None
+                self._v2_auth_method = "password"
                 logger.info("V2 authenticated via username/password")
                 return
             except Exception as e:
@@ -513,6 +517,7 @@ class UnifiedTickTickAPI:
 
                 self._v2_unavailable_reason = None
                 self._v2_unavailable_until = None
+                self._v2_auth_method = "cookie"
                 logger.info(
                     "V2 authenticated via pre-obtained session token (fallback). "
                     "Password sign-on failed earlier: %s",
@@ -539,6 +544,52 @@ class UnifiedTickTickAPI:
 
         # No fallback configured — record reason and bail.
         self._v2_unavailable_reason = password_failed_reason or "V2 credentials not provided"
+
+    async def get_auth_status(self) -> dict[str, Any]:
+        """Live auth health snapshot for diagnostics (no secrets).
+
+        Performs two lightweight read pings (V1 `/project`, V2 `/user/status`)
+        to test the *current* validity of each session — so it catches a
+        token/cookie that expired after startup, not just the boot-time state.
+        Never returns credential values; only booleans + derived facts.
+        """
+        # --- V1 live check ---
+        v1_has_token = self._v1_client is not None and self._v1_client.is_authenticated
+        v1_ok = False
+        v1_error: str | None = None
+        if v1_has_token:
+            try:
+                await self._v1_client.get_projects()
+                v1_ok = True
+            except Exception as e:
+                v1_error = str(e)
+
+        # --- V2 live check ---
+        v2_has_session = self._v2_client is not None and self._v2_client.is_authenticated
+        v2_ok = False
+        v2_error: str | None = None
+        if v2_has_session:
+            try:
+                await self._v2_client.get_user_status()
+                v2_ok = True
+            except Exception as e:
+                v2_error = str(e)
+
+        return {
+            "v1_has_credentials": v1_has_token,
+            "v1_ok": v1_ok,
+            "v1_error": v1_error,
+            "v2_has_session": v2_has_session,
+            "v2_ok": v2_ok,
+            "v2_error": v2_error,
+            "v2_auth_method": self._v2_auth_method,
+            "v2_unavailable_reason": self._v2_unavailable_reason,
+            "v2_cooldown_until": (
+                self._v2_unavailable_until.isoformat(timespec="seconds")
+                if self._v2_unavailable_until
+                else None
+            ),
+        }
 
     async def close(self) -> None:
         """Close all API clients."""

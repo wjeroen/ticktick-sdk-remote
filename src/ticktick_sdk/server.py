@@ -311,16 +311,14 @@ async def lifespan(mcp: FastMCP) -> AsyncIterator[dict[str, Any]]:
     # Validate the device id format. TickTick expects a 24-char lowercase-hex
     # ObjectId; a malformed value (wrong length, non-hex chars, stray
     # whitespace/quotes) can make V2 sign-on fail with misleading errors.
-    _did = settings.device_id
-    _did_valid = len(_did) == 24 and all(c in "0123456789abcdef" for c in _did.lower())
-    if not _did_valid:
+    if not settings.device_id_looks_valid:
         logger.warning(
             "TICKTICK_DEVICE_ID=%r does NOT look like a valid 24-char hex "
             "ObjectId (length=%d). TickTick V2 sign-on may reject it. Use a "
             "24-character lowercase-hex value — generate one with: "
             "python -c \"import os; print(os.urandom(12).hex())\".",
-            _did,
-            len(_did),
+            settings.device_id,
+            len(settings.device_id),
         )
     else:
         logger.info("TICKTICK_DEVICE_ID format looks valid (24-char hex).")
@@ -2313,6 +2311,174 @@ async def ticktick_get_status(ctx: Context, response_format: ResponseFormat = Re
 
     except Exception as e:
         return handle_error(e, "get_status")
+
+
+def _mask_secret(value: str | None) -> str:
+    """Mask a sensitive-ish value for safe display — never the full thing."""
+    if not value:
+        return "(not set)"
+    if len(value) <= 8:
+        return "****"
+    return f"{value[:4]}…{value[-4:]}"
+
+
+def _build_auth_verdict(
+    *,
+    v1_ok: bool,
+    v2_ok: bool,
+    v2_auth_method: str | None,
+    v2_cookies_configured: bool,
+    v2_reason: str | None,
+    v2_error: str | None,
+    device_id_valid: bool,
+    device_id_ephemeral: bool,
+) -> str:
+    """One-line, plain-English summary + next step for the current state."""
+    parts: list[str] = []
+    if v1_ok and v2_ok:
+        parts.append(f"All good — V1 and V2 both authenticated (V2 via {v2_auth_method}).")
+    elif v1_ok and not v2_ok:
+        detail = v2_error or v2_reason or "unknown reason"
+        if not v2_cookies_configured:
+            parts.append(
+                "DEGRADED (V1-only): V2 is down — "
+                f"{detail}. Fix: set TICKTICK_V2_COOKIES from a logged-in TickTick "
+                "browser tab (see README) and redeploy. Tasks/projects still work; "
+                "tags/folders/habits/focus/subtasks don't until V2 is back."
+            )
+        else:
+            parts.append(
+                "DEGRADED (V1-only): the V2 session (cookie) has failed or expired — "
+                f"{detail}. Fix: refresh TICKTICK_V2_COOKIES from a logged-in browser "
+                "and redeploy."
+            )
+    elif v2_ok and not v1_ok:
+        parts.append(
+            "DEGRADED (V2-only): V1 (OAuth) is down — refresh TICKTICK_ACCESS_TOKEN "
+            "via `ticktick-sdk auth` and redeploy. get_project_with_data won't work "
+            "until then."
+        )
+    else:
+        parts.append(
+            "BOTH V1 and V2 are failing right now — check credentials in the hosting "
+            "env (Railway) and redeploy."
+        )
+
+    if not device_id_valid:
+        parts.append(
+            "Also: TICKTICK_DEVICE_ID is not a valid 24-char hex value, which can "
+            "break the password login — set it to a valid hex id."
+        )
+    elif device_id_ephemeral:
+        parts.append(
+            "Also: TICKTICK_DEVICE_ID isn't set (auto-generated per deploy) — set a "
+            "stable 24-char hex id to look like one consistent device."
+        )
+    return " ".join(parts)
+
+
+@mcp.tool(
+    name="ticktick_auth_status",
+    annotations={
+        "title": "Check TickTick Auth Status",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def ticktick_auth_status(ctx: Context, response_format: ResponseFormat = ResponseFormat.MARKDOWN) -> str:
+    """
+    Diagnose TickTick authentication health (live check) without exposing secrets.
+
+    Performs lightweight read pings to test whether the V1 (OAuth) and V2
+    (session) connections are valid RIGHT NOW — so it catches a token or cookie
+    that expired after the server started. Use this when TickTick tools start
+    failing with auth errors, to understand what's wrong and how to fix it.
+
+    The result NEVER contains credential values (password, cookies, tokens) —
+    only booleans, a masked device id, and a plain-English verdict that the
+    person hosting the server can act on.
+
+    Returns:
+        A status report with a verdict and the exact env var to fix, if any.
+    """
+    try:
+        client = get_client(ctx)
+        settings = get_settings()
+        status = await client.get_auth_status()
+
+        v2_cookies_configured = settings.get_v2_cookies() is not None
+        device_id_valid = settings.device_id_looks_valid
+        device_id_ephemeral = settings.device_id_is_ephemeral
+
+        verdict = _build_auth_verdict(
+            v1_ok=status["v1_ok"],
+            v2_ok=status["v2_ok"],
+            v2_auth_method=status["v2_auth_method"],
+            v2_cookies_configured=v2_cookies_configured,
+            v2_reason=status["v2_unavailable_reason"],
+            v2_error=status["v2_error"],
+            device_id_valid=device_id_valid,
+            device_id_ephemeral=device_id_ephemeral,
+        )
+
+        report = {
+            "v1": {
+                "configured": status["v1_has_credentials"],
+                "ok": status["v1_ok"],
+            },
+            "v2": {
+                "configured": settings.has_v2_credentials or v2_cookies_configured,
+                "has_session": status["v2_has_session"],
+                "ok": status["v2_ok"],
+                "auth_method": status["v2_auth_method"],
+                "cookie_fallback_configured": v2_cookies_configured,
+                "unavailable_reason": status["v2_unavailable_reason"],
+                "cooldown_until": status["v2_cooldown_until"],
+            },
+            "device_id": {
+                "configured": not device_id_ephemeral,
+                "valid_24char_hex": device_id_valid,
+                "length": len(settings.device_id),
+                "masked": _mask_secret(settings.device_id),
+            },
+            "degraded_mode": not (status["v1_ok"] and status["v2_ok"]),
+            "verdict": verdict,
+        }
+
+        if response_format == ResponseFormat.MARKDOWN:
+            v2 = report["v2"]
+            lines = [
+                "## TickTick Auth Status",
+                "",
+                f"**Verdict:** {verdict}",
+                "",
+                f"- **V1 (OAuth, tasks/projects):** {'✅ OK' if report['v1']['ok'] else '❌ failing'}"
+                f" (configured: {report['v1']['configured']})",
+                f"- **V2 (session, tags/folders/habits/etc.):** {'✅ OK' if v2['ok'] else '❌ failing'}"
+                f" (auth method: {v2['auth_method'] or 'none'}; cookie fallback configured: "
+                f"{v2['cookie_fallback_configured']})",
+                f"- **Degraded mode:** {report['degraded_mode']}",
+                f"- **Device ID:** valid 24-char hex: {report['device_id']['valid_24char_hex']} "
+                f"(length {report['device_id']['length']}, value {report['device_id']['masked']}, "
+                f"configured: {report['device_id']['configured']})",
+            ]
+            if v2["cooldown_until"]:
+                lines.append(f"- **V2 cooldown until:** {v2['cooldown_until']} (redeploy bypasses it)")
+            if v2["unavailable_reason"]:
+                lines.append(f"- **Last V2 failure reason:** {v2['unavailable_reason']}")
+            lines.append("")
+            lines.append(
+                "_No credential values are shown. Fixes require the server host's "
+                "Railway access, not this chat._"
+            )
+            return "\n".join(lines)
+        else:
+            return json.dumps(report, indent=2)
+
+    except Exception as e:
+        return handle_error(e, "auth_status")
 
 
 @mcp.tool(

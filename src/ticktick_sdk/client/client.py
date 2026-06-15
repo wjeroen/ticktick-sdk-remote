@@ -163,6 +163,10 @@ class TickTickClient:
         """Check if connected."""
         return self._initialized
 
+    async def get_auth_status(self) -> dict[str, Any]:
+        """Live auth health snapshot for diagnostics (no secrets)."""
+        return await self._api.get_auth_status()
+
     @property
     def inbox_id(self) -> str | None:
         """Get the inbox project ID."""

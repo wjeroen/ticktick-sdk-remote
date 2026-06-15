@@ -153,6 +153,18 @@ class TickTickSettings(BaseSettings):
         """
         return "device_id" not in self.model_fields_set
 
+    @property
+    def device_id_looks_valid(self) -> bool:
+        """True when device_id is a 24-char lowercase-hex ObjectId.
+
+        TickTick expects the device id (sent in the X-Device header) to look
+        like a MongoDB ObjectId. A malformed value — wrong length, non-hex
+        chars, stray whitespace/quotes — can make V2 sign-on fail with
+        misleading errors (e.g. username_password_not_match).
+        """
+        did = self.device_id
+        return len(did) == 24 and all(c in "0123456789abcdef" for c in did.lower())
+
     # =========================================================================
     # Validation
     # =========================================================================
