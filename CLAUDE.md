@@ -9,12 +9,6 @@ The user is a coding noob. ELI5 (Explain Like I'm 5) frequently when discussing 
 ## Pull Requests
 **Do NOT subscribe to / watch PRs for activity.** The user does not want PR-activity subscriptions (CI babysitting, auto-fixing failures, watching review comments). Create the PR and keep its description current, but never call `subscribe_pr_activity` and don't offer to watch the PR — unless the user explicitly asks you to in a specific case.
 
-**Keep the open pull request's description current.** As you push commits that add or change features, refresh the PR description so it reflects the whole branch — don't leave it describing only the first commit. Treat it like the README and TODO.md: keeping it up to date is part of finishing a change.
-
-## Flag Sloppy Code (Don't Silently Fix It)
-
-While working, if you come across code that looks messy, buggy, sloppy, or just off — **even if it has nothing to do with the task you're currently on** — bring it to the user's attention. Briefly say what you noticed and why it looks wrong, and **offer** to fix or improve it. Do NOT silently fix unrelated code yourself; let the user decide. Any sloppiness you notice should be surfaced rather than ignored.
-
 ## User's Working Environment
 The user primarily works on **mobile** and deploys via Railway, so they **do not have access to browser developer tools**. When debugging:
 - Add `console.log()` statements to backend code - these show up in Railway logs
@@ -42,6 +36,10 @@ Ex. When Solving a Bug or Implementing a Feature
 
 **Why this order matters:** Grepping without context leads to local fixes that miss the big picture and create new bugs. README.md is your map - use it!
 
+## Flag Sloppy Code (Don't Silently Fix It)
+
+While working, if you come across code that looks messy, buggy, sloppy, or just off — **even if it has nothing to do with the task you're currently on** — bring it to the user's attention. Briefly say what you noticed and why it looks wrong, and **offer** to fix or improve it. Do NOT silently fix unrelated code yourself; let the user decide. Any sloppiness you notice should be surfaced rather than ignored.
+
 ## After Making Changes
 Update README.md if you changed:
    - File structure or added new files
@@ -49,6 +47,8 @@ Update README.md if you changed:
    - Environment variables
    - Processing flows
    - API endpoints
+
+**Keep the open pull request's description current.** As you push commits that add or change features, refresh the PR description so it reflects the whole branch — don't leave it describing only the first commit. Treat it like the README and TODO.md: keeping it up to date is part of finishing a change.
 
 ## Task Management: TODO.md vs TodoWrite Tool
 
