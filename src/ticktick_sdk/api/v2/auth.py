@@ -270,6 +270,78 @@ class SessionHandler:
         logger.info("Successfully authenticated user: %s", username)
         return self._session
 
+    async def authenticate_2fa(
+        self,
+        auth_id: str,
+        totp_code: str,
+    ) -> SessionToken:
+        """
+        Complete 2FA authentication.
+
+        Scaffolding for the planned 2FA support (see TODO.md) — not yet wired
+        into the sign-on flow. Holds the reverse-engineered MFA endpoint +
+        payload so a future TOTP path doesn't have to rederive them.
+
+        Args:
+            auth_id: The authId from the initial sign-on response
+            totp_code: The TOTP code from the authenticator app
+
+        Returns:
+            SessionToken with authentication credentials
+
+        Raises:
+            TickTickSessionError: If 2FA verification fails
+        """
+        url = f"{get_api_base_v2()}/user/sign/mfa/code/verify"
+        payload = {
+            "code": totp_code,
+            "method": "app",
+        }
+        headers = self._get_headers()
+        headers["x-verify-id"] = auth_id
+
+        logger.debug("Completing 2FA authentication")
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                )
+            except httpx.RequestError as e:
+                raise TickTickSessionError(
+                    f"2FA verification request failed: {e}",
+                ) from e
+
+            if not response.is_success:
+                self._handle_auth_error(response)
+
+            data = response.json()
+
+        # Extract cookies
+        cookies: dict[str, str] = {}
+        for cookie in response.cookies.jar:
+            cookies[cookie.name] = cookie.value
+
+        if "t" not in cookies and "token" in data:
+            cookies["t"] = data["token"]
+
+        self._session = SessionToken(
+            token=data["token"],
+            user_id=str(data.get("userId", "")),
+            username=data.get("username", ""),
+            inbox_id=data.get("inboxId", ""),
+            user_code=data.get("userCode"),
+            is_pro=data.get("pro", False),
+            pro_start_date=data.get("proStartDate"),
+            pro_end_date=data.get("proEndDate"),
+            cookies=cookies,
+        )
+
+        logger.info("Successfully completed 2FA authentication")
+        return self._session
+
     def set_session(self, session: SessionToken) -> None:
         """Set an existing session directly."""
         self._session = session

@@ -223,6 +223,30 @@ class TickTickV2Client(BaseTickTickClient):
         """
         return await self._session_handler.authenticate(username, password)
 
+    async def authenticate_2fa(
+        self,
+        auth_id: str,
+        totp_code: str,
+    ) -> SessionToken:
+        """
+        Complete 2FA authentication with a TOTP code.
+
+        Scaffolding for the planned 2FA support (see TODO.md) — implemented but
+        NOT yet wired into the sign-on flow. For a headless deployment a real
+        TOTP path would also need a way to obtain the code (e.g. a
+        TICKTICK_TOTP_SECRET env var to generate it); note that the
+        TICKTICK_V2_COOKIES fallback already sidesteps 2FA by reusing a
+        browser session.
+
+        Args:
+            auth_id: Auth ID from the initial sign-on response
+            totp_code: TOTP code from the authenticator app
+
+        Returns:
+            SessionToken with authentication credentials
+        """
+        return await self._session_handler.authenticate_2fa(auth_id, totp_code)
+
     def set_session(self, session: SessionToken) -> None:
         """Set an existing session directly."""
         self._session_handler.set_session(session)
