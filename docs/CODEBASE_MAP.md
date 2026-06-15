@@ -135,6 +135,14 @@ ticktick-mcp/
 
 ### 2.3 Routing Strategy (router.py)
 
+> ⚠️ **Aspirational, not enforced.** This table (and the one in Part 7.2)
+> describes *intended* routing. The `OPERATION_ROUTING` table and its helper
+> methods in `router.py` are **dead code** — nothing calls them. Real routing
+> is decided inline in `unified/api.py` via `has_v2` / `has_v1` checks, and a
+> "Fallback" column here does **not** guarantee one exists. Notably, task
+> creation and the batch task operations the MCP server uses hard-require V2
+> (no V1 fallback). See Part 7.2.
+
 | Resource | Primary API | Fallback | Reason |
 |----------|-------------|----------|--------|
 | Tasks | V2 | V1 | V2 has more fields (tags, subtasks) |
@@ -638,6 +646,16 @@ V1_PRIMARY = auto() # Try V1 first, fallback to V2
 
 ### 7.2 Operation Routing Table
 
+> ⚠️ **This table is descriptive, not the live decision path.** The
+> `OPERATION_ROUTING` dict and the `get_routing` / `can_execute` /
+> `get_primary_client` / `get_fallback_client` methods are defined in
+> `router.py` but **never called** — actual routing is hand-written inline in
+> each `unified/api.py` method. Where the code disagrees with this table, the
+> code wins. Known mismatches: `create_task` is **V2-only in practice** (raises
+> if V2 is down, despite the "V2_PRIMARY" label below), and every batch task
+> operation (`batch_create_tasks`, `batch_update_tasks`, …) hard-requires V2
+> with no V1 fallback.
+
 | Operation | Routing | Reason |
 |-----------|---------|--------|
 | **Tasks** | | |
@@ -1015,7 +1033,13 @@ ticktick-sdk = "ticktick_sdk.cli:cli_main"
 
 1. **Feature Completeness:** V1 API lacks tags, habits, focus tracking
 2. **Unified Interface:** Single model set regardless of API version
-3. **Fallback Safety:** Can fall back to V1 for certain operations
+3. **Limited fallback (reality check):** A *few* single-task ops genuinely fall
+   back to V1 (`update_task`, `delete_task`, `complete_task`). But task
+   creation and **all** batch task operations — which is what the MCP server
+   actually calls — hard-require V2 and raise `TickTickAPIUnavailableError`
+   when V2 is down. So "degraded mode" (V1-only) can read/write far less than
+   the design implies; in practice the server is close to non-functional
+   without V2.
 4. **Future-Proof:** V2 features automatically available
 
 ### 15.2 Unified Model Strategy

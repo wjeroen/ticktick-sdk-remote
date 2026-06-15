@@ -1,11 +1,23 @@
 """
 API Router for TickTick Unified API.
 
-This module provides the routing logic that decides which API version
-to use for each operation. It handles:
-- Primary API selection (usually V2 for richer features)
-- Fallback logic when primary fails
-- V1-only and V2-only operation routing
+The live, in-use surface of ``APIRouter`` is its availability helpers
+(``has_v1`` / ``has_v2`` / ``is_fully_configured`` / ``verify_clients`` /
+``get_status``). ``UnifiedTickTickAPI`` calls those and decides routing
+*inline* at each method (``if self._router.has_v2: ... elif
+self._router.has_v1: ...``).
+
+WARNING: The ``OPERATION_ROUTING`` table and the ``get_routing`` /
+``can_execute`` / ``get_primary_client`` / ``get_fallback_client`` helpers
+below are **descriptive, not load-bearing** — nothing in the codebase calls
+them today (grep before relying on them). They document the *intended*
+routing, but the real behavior lives in ``unified/api.py`` and does not
+always match it. In particular, task creation (``create_task`` and the batch
+task operations the MCP server exposes, e.g. ``batch_create_tasks`` /
+``batch_update_tasks``) **hard-requires V2** and raises
+``TickTickAPIUnavailableError`` when V2 is down — there is NO V1 fallback,
+despite what a "V2_PRIMARY" row might suggest. Keep this table in sync with
+the code (or wire it up); do not trust it as a guarantee.
 """
 
 from __future__ import annotations
@@ -43,8 +55,10 @@ class OperationConfig:
 OPERATION_ROUTING: dict[str, OperationConfig] = {
     # Tasks
     "create_task": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 supports tags, parent_id, and more fields",
+        # NOTE: code actually hard-requires V2 (single + batch create raise
+        # when V2 is down). This is V2_ONLY in practice, not a real fallback.
+        APIPreference.V2_ONLY,
+        "Requires V2 (tags, parent_id); no working V1 fallback in api.py",
     ),
     "get_task": OperationConfig(
         APIPreference.V2_PRIMARY,
