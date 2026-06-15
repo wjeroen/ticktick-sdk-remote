@@ -1,8 +1,7 @@
 """
 TickTick SDK Constants and Enumerations.
 
-This module defines all constants, enumerations, and type aliases
-used throughout the TickTick SDK.
+This module defines the constants and enumerations used throughout the SDK.
 """
 
 from __future__ import annotations
@@ -61,17 +60,10 @@ def get_oauth_base(host: TickTickHost | None = None) -> str:
 
 
 # =============================================================================
-# API Configuration (Legacy - for backwards compatibility)
+# API Configuration
 # =============================================================================
 
-# These are now dynamic based on TICKTICK_HOST environment variable.
-# Use get_api_base_v1(), get_api_base_v2(), get_oauth_base() for current values.
-# These constants reflect the DEFAULT host and should only be used for reference.
-TICKTICK_API_BASE_V1 = "https://api.ticktick.com/open/v1"
-TICKTICK_API_BASE_V2 = "https://api.ticktick.com/api/v2"
-TICKTICK_OAUTH_BASE = "https://ticktick.com/oauth"
-
-# Default timeout in seconds
+# Default request timeout in seconds
 DEFAULT_TIMEOUT = 30.0
 
 # OAuth2 scopes
@@ -134,14 +126,6 @@ class TaskKind(StrEnum):
     CHECKLIST = "CHECKLIST"  # Checklist task
 
 
-class RepeatFrom(IntEnum):
-    """Recurrence calculation base."""
-
-    DUE_DATE = 0  # Calculate next from due date
-    COMPLETED_DATE = 1  # Calculate next from completion date
-    UNKNOWN = 2
-
-
 # =============================================================================
 # Project Enumerations
 # =============================================================================
@@ -162,31 +146,6 @@ class ViewMode(StrEnum):
     TIMELINE = "timeline"
 
 
-class Permission(StrEnum):
-    """Project permission levels."""
-
-    READ = "read"
-    WRITE = "write"
-    COMMENT = "comment"
-
-
-# =============================================================================
-# Sorting Enumerations
-# =============================================================================
-
-
-class SortOption(StrEnum):
-    """Sorting options for tasks and lists."""
-
-    SORT_ORDER = "sortOrder"  # Manual sort order
-    DUE_DATE = "dueDate"
-    TAG = "tag"
-    PRIORITY = "priority"
-    PROJECT = "project"
-    TITLE = "title"
-    NONE = "none"
-
-
 # =============================================================================
 # Subtask Status
 # =============================================================================
@@ -200,77 +159,31 @@ class SubtaskStatus(IntEnum):
 
 
 # =============================================================================
-# Type Aliases
-# =============================================================================
-
-# Object ID types (24 hex characters for MongoDB-style IDs)
-ObjectId = str
-ETag = str  # 8-character lowercase alphanumeric version identifier
-InboxId = str  # Format: inbox{user_id}
-
-# Tag identifiers
-TagLabel = str  # Display name (no special chars/whitespace)
-TagName = str  # Lowercase identifier
-
-# Time-related
-TimeZoneName = str  # IANA timezone, e.g., "America/Los_Angeles"
-ICalTrigger = str  # RFC 5545 reminder trigger format
-RRule = str  # iCalendar RRULE + TickTick extensions
-
-# Color format
-HexColor = str  # Format: #rrggbb (lowercase, 7 chars)
-
-# Date format literals
-DateFormat = Literal["iso", "ticktick_v1", "ticktick_v2"]
-
-
-# =============================================================================
 # Date/Time Formats
 # =============================================================================
 
-# ISO 8601 with milliseconds (V2 task dates)
+# ISO 8601 with milliseconds and hardcoded +0000 (V2 task dates)
 DATETIME_FORMAT_V2 = "%Y-%m-%dT%H:%M:%S.000+0000"
 
-# ISO 8601 without milliseconds (V1)
+# ISO 8601 with timezone offset (V1)
 DATETIME_FORMAT_V1 = "%Y-%m-%dT%H:%M:%S%z"
-
-# Query parameter format for V2 closed tasks
-DATETIME_FORMAT_V2_QUERY = "%Y-%m-%d %H:%M:%S"
-
-# Date-only format for statistics
-DATE_FORMAT_STATS = "%Y%m%d"
 
 
 # =============================================================================
 # HTTP Headers
 # =============================================================================
 
-# Simple User-Agent that works with V2 API (based on pyticktick)
+# User-Agent that works with the V2 API (based on pyticktick)
 V2_USER_AGENT = "Mozilla/5.0 (rv:145.0) Firefox/145.0"
 
-# V2 X-Device version that works
+# X-Device "version" value the V2 API accepts
 V2_DEVICE_VERSION = 6430
 
-# Legacy - kept for backwards compatibility but not recommended
-# Use V2_USER_AGENT instead
+# Default User-Agent for the base HTTP client (V2 client overrides with V2_USER_AGENT)
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:95.0) "
     "Gecko/20100101 Firefox/95.0"
 )
-
-# Legacy - kept for backwards compatibility but not recommended
-# Use minimal X-Device with only: platform, version, id
-X_DEVICE_TEMPLATE = {
-    "platform": "web",
-    "os": "OS X",
-    "device": "Firefox 95.0",
-    "name": "",
-    "version": 5303,
-    "id": "",  # Will be set dynamically
-    "channel": "website",
-    "campaign": "",
-    "websocket": "",
-}
 
 
 # =============================================================================
@@ -283,10 +196,3 @@ class APIVersion(StrEnum):
 
     V1 = "v1"
     V2 = "v2"
-
-    @property
-    def base_url(self) -> str:
-        """Get the base URL for this API version (uses configured host)."""
-        if self == APIVersion.V1:
-            return get_api_base_v1()
-        return get_api_base_v2()
