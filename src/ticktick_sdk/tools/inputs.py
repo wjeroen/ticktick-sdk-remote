@@ -1198,19 +1198,3 @@ class HabitCheckinsInput(BaseMCPInput):
         default=ResponseFormat.JSON,
         description="Output format (JSON recommended for habit data)",
     )
-
-
-# =============================================================================
-# Backward Compatibility Aliases (Deprecated - will be removed in v0.5.0)
-# =============================================================================
-
-# These maintain compatibility with existing code that uses old names
-TaskCreateInput = CreateTasksInput  # Alias for migration
-TaskUpdateInput = UpdateTasksInput  # Alias for migration
-TaskCompleteInput = CompleteTasksInput  # Alias for migration
-TaskDeleteInput = DeleteTasksInput  # Alias for migration
-TaskMoveInput = MoveTasksInput  # Alias for migration
-TaskParentInput = SetTaskParentsInput  # Alias for migration
-TaskUnparentInput = UnparentTasksInput  # Alias for migration
-TaskPinInput = PinTasksInput  # Alias for migration
-HabitCheckinInput = CheckinHabitsInput  # Alias for migration
