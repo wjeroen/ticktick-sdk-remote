@@ -47,28 +47,6 @@ class Column(TickTickModel):
         """Create from V2 API response."""
         return cls.model_validate(data)
 
-    def to_v2_create_dict(self) -> dict[str, Any]:
-        """Convert to V2 API create format."""
-        data: dict[str, Any] = {
-            "projectId": self.project_id,
-            "name": self.name,
-        }
-        if self.sort_order is not None:
-            data["sortOrder"] = self.sort_order
-        return data
-
-    def to_v2_update_dict(self) -> dict[str, Any]:
-        """Convert to V2 API update format."""
-        data: dict[str, Any] = {
-            "id": self.id,
-            "projectId": self.project_id,
-        }
-        if self.name is not None:
-            data["name"] = self.name
-        if self.sort_order is not None:
-            data["sortOrder"] = self.sort_order
-        return data
-
 
 class ProjectGroup(TickTickModel):
     """
@@ -99,21 +77,6 @@ class ProjectGroup(TickTickModel):
     def from_v2(cls, data: dict[str, Any]) -> Self:
         """Create from V2 API response."""
         return cls.model_validate(data)
-
-    def to_v2_create_dict(self) -> dict[str, Any]:
-        """Convert to V2 API create format."""
-        return {
-            "name": self.name,
-            "listType": "group",
-        }
-
-    def to_v2_update_dict(self) -> dict[str, Any]:
-        """Convert to V2 API update format."""
-        return {
-            "id": self.id,
-            "name": self.name,
-            "listType": "group",
-        }
 
 
 class Project(TickTickModel):
@@ -166,36 +129,6 @@ class Project(TickTickModel):
     def parse_datetime_field(cls, v: Any) -> datetime | None:
         return cls.parse_datetime(v)
 
-    @property
-    def is_inbox(self) -> bool:
-        """Check if this is the inbox project."""
-        return self.id.startswith("inbox")
-
-    @property
-    def is_closed(self) -> bool:
-        """Check if the project is closed/archived."""
-        return self.closed is True
-
-    @property
-    def is_note_project(self) -> bool:
-        """Check if this is a notes project."""
-        return self.kind == ProjectKind.NOTE
-
-    @property
-    def is_task_project(self) -> bool:
-        """Check if this is a tasks project."""
-        return self.kind == ProjectKind.TASK
-
-    @property
-    def view_mode_enum(self) -> ViewMode:
-        """Get view mode as enum."""
-        if self.view_mode:
-            try:
-                return ViewMode(self.view_mode)
-            except ValueError:
-                pass
-        return ViewMode.LIST
-
     # V1/V2 conversion methods
     @classmethod
     def from_v1(cls, data: dict[str, Any]) -> Self:
@@ -206,54 +139,6 @@ class Project(TickTickModel):
     def from_v2(cls, data: dict[str, Any]) -> Self:
         """Create from V2 API response."""
         return cls.model_validate(data)
-
-    def to_v1_dict(self) -> dict[str, Any]:
-        """Convert to V1 API format for requests."""
-        data: dict[str, Any] = {}
-
-        if self.name is not None:
-            data["name"] = self.name
-        if self.color is not None:
-            data["color"] = self.color
-        if self.sort_order is not None:
-            data["sortOrder"] = self.sort_order
-        if self.view_mode is not None:
-            data["viewMode"] = self.view_mode
-        if self.kind is not None:
-            data["kind"] = self.kind
-
-        return data
-
-    def to_v2_create_dict(self) -> dict[str, Any]:
-        """Convert to V2 API create format."""
-        data: dict[str, Any] = {"name": self.name}
-
-        if self.color is not None:
-            data["color"] = self.color
-        if self.kind is not None:
-            data["kind"] = self.kind
-        if self.view_mode is not None:
-            data["viewMode"] = self.view_mode
-        if self.group_id is not None:
-            data["groupId"] = self.group_id
-        if self.sort_order is not None:
-            data["sortOrder"] = self.sort_order
-
-        return data
-
-    def to_v2_update_dict(self) -> dict[str, Any]:
-        """Convert to V2 API update format."""
-        data: dict[str, Any] = {
-            "id": self.id,
-            "name": self.name,
-        }
-
-        if self.color is not None:
-            data["color"] = self.color
-        if self.group_id is not None:
-            data["groupId"] = self.group_id
-
-        return data
 
 
 class ProjectData(TickTickModel):

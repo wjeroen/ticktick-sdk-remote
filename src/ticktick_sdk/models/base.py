@@ -91,14 +91,6 @@ class TickTickModel(BaseModel):
         # "18:00.000+0000" and TickTick would read it as 20:00 Brussels.
         return value.astimezone(timezone.utc).strftime(DATETIME_FORMAT_V2)
 
-    def to_v1_dict(self) -> dict[str, Any]:
-        """Convert to V1 API format dictionary."""
-        return self.model_dump(by_alias=True, exclude_none=True)
-
-    def to_v2_dict(self) -> dict[str, Any]:
-        """Convert to V2 API format dictionary."""
-        return self.model_dump(by_alias=True, exclude_none=True)
-
     @classmethod
     def from_v1(cls, data: dict[str, Any]) -> Self:
         """Create from V1 API response."""

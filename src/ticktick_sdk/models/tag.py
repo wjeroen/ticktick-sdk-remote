@@ -42,11 +42,6 @@ class Tag(TickTickModel):
     # Other
     type: int | None = None
 
-    @property
-    def is_nested(self) -> bool:
-        """Check if this tag is nested under another tag."""
-        return self.parent is not None
-
     @classmethod
     def create(
         cls,
@@ -67,40 +62,3 @@ class Tag(TickTickModel):
     def from_v2(cls, data: dict[str, Any]) -> Self:
         """Create from V2 API response."""
         return cls.model_validate(data)
-
-    def to_v2_create_dict(self) -> dict[str, Any]:
-        """Convert to V2 API create format."""
-        data: dict[str, Any] = {
-            "label": self.label,
-            "name": self.name,
-        }
-
-        if self.color is not None:
-            data["color"] = self.color
-        if self.parent is not None:
-            data["parent"] = self.parent
-        if self.sort_type is not None:
-            data["sortType"] = self.sort_type
-        if self.sort_order is not None:
-            data["sortOrder"] = self.sort_order
-
-        return data
-
-    def to_v2_update_dict(self) -> dict[str, Any]:
-        """Convert to V2 API update format."""
-        data: dict[str, Any] = {
-            "name": self.name,
-            "label": self.label,
-            "rawName": self.name,
-        }
-
-        if self.color is not None:
-            data["color"] = self.color
-        if self.parent is not None:
-            data["parent"] = self.parent
-        if self.sort_type is not None:
-            data["sortType"] = self.sort_type
-        if self.sort_order is not None:
-            data["sortOrder"] = self.sort_order
-
-        return data

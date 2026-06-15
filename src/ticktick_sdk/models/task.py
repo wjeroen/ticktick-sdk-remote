@@ -27,15 +27,6 @@ class TaskReminder(TickTickModel):
     id: str | None = None
     trigger: str  # ICalTrigger format, e.g., "TRIGGER:-PT30M"
 
-    @classmethod
-    def from_v1_string(cls, trigger: str) -> TaskReminder:
-        """Create from V1 reminder string."""
-        return cls(trigger=trigger)
-
-    def to_v1_string(self) -> str:
-        """Convert to V1 reminder string."""
-        return self.trigger
-
 
 class ChecklistItem(TickTickModel):
     """Subtask/checklist item model."""
@@ -200,39 +191,6 @@ class Task(TickTickModel):
         return TaskStatus.is_completed(self.status)
 
     @property
-    def is_closed(self) -> bool:
-        """Check if the task is closed (completed or abandoned)."""
-        return TaskStatus.is_closed(self.status)
-
-    @property
-    def is_abandoned(self) -> bool:
-        """Check if the task is abandoned."""
-        return self.status == TaskStatus.ABANDONED
-
-    @property
-    def is_active(self) -> bool:
-        """Check if the task is active."""
-        return self.status == TaskStatus.ACTIVE
-
-    @property
-    def is_subtask(self) -> bool:
-        """Check if this task is a subtask."""
-        return self.parent_id is not None
-
-    @property
-    def has_subtasks(self) -> bool:
-        """Check if this task has subtasks."""
-        return bool(self.child_ids)
-
-    @property
-    def priority_label(self) -> str:
-        """Get human-readable priority label."""
-        try:
-            return TaskPriority(self.priority).to_string()
-        except ValueError:
-            return "none"
-
-    @property
     def is_pinned(self) -> bool:
         """Check if the task is pinned."""
         return self.pinned_time is not None
@@ -247,43 +205,6 @@ class Task(TickTickModel):
     def from_v2(cls, data: dict[str, Any]) -> Self:
         """Create from V2 API response."""
         return cls.model_validate(data)
-
-    def to_v1_dict(self) -> dict[str, Any]:
-        """Convert to V1 API format for requests."""
-        data: dict[str, Any] = {
-            "id": self.id,
-            "projectId": self.project_id,
-        }
-
-        if self.title is not None:
-            data["title"] = self.title
-        if self.content is not None:
-            data["content"] = self.content
-        if self.desc is not None:
-            data["desc"] = self.desc
-        if self.is_all_day is not None:
-            data["isAllDay"] = self.is_all_day
-        if self.start_date is not None:
-            data["startDate"] = self.format_datetime(self.start_date, "v1")
-        if self.due_date is not None:
-            data["dueDate"] = self.format_datetime(self.due_date, "v1")
-        if self.time_zone is not None:
-            data["timeZone"] = self.time_zone
-        if self.reminders:
-            data["reminders"] = [r.to_v1_string() for r in self.reminders]
-        if self.repeat_flag is not None:
-            data["repeatFlag"] = self.repeat_flag
-        if self.priority is not None:
-            data["priority"] = self.priority
-        if self.sort_order is not None:
-            data["sortOrder"] = self.sort_order
-        if self.items:
-            data["items"] = [
-                item.model_dump(by_alias=True, exclude_none=True)
-                for item in self.items
-            ]
-
-        return data
 
     def to_v2_dict(self, for_update: bool = False) -> dict[str, Any]:
         """Convert to V2 API format for requests.

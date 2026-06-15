@@ -428,9 +428,10 @@ unknown API fields). It provides the shared helpers:
   would serialize as `18:00.000+0000` and TickTick would read it as 20:00. Naive
   datetimes are assumed UTC. (This is the fix behind the README's "no longer
   drifts by +N hours" bug note.)
-- `to_v1_dict()` / `to_v2_dict()` / `from_v1()` / `from_v2()` — base
-  implementations use `model_dump(by_alias=True, exclude_none=True)` /
-  `model_validate`; the richer models override them.
+- `from_v1(data)` / `from_v2(data)` — thin `model_validate` wrappers; the richer
+  models override them. (Serializing *back* to the wire isn't in the base —
+  `Task.to_v2_dict()` handles tasks; other resources' V2 payloads are built
+  inline in `unified/api.py`.)
 
 ### Wire-format cheat sheet
 
@@ -470,8 +471,7 @@ more, so there are no V1-only fields. Highlights:
   `completed_user_id`, `comment_count`, `attachments`, `focus_summaries`,
   `pomodoro_summaries`.
 
-Useful computed properties: `is_completed`, `is_closed`, `is_abandoned`,
-`is_active`, `is_subtask`, `has_subtasks`, `priority_label`, `is_pinned`.
+Computed properties: `is_completed`, `is_pinned`.
 
 **`to_v2_dict(for_update=False)`** is where the tricky write behavior lives:
 
@@ -488,9 +488,6 @@ Useful computed properties: `is_completed`, `is_closed`, `is_abandoned`,
   when a recurring task's due date is moved. (README bug note: "preserves
   recurrence-anchor fields".)
 
-`to_v1_dict()` is the V1 subset — note V1 reminders are plain strings and there
-is no `tags`/`parentId`.
-
 **`ChecklistItem`** (`items`): `id`, `title`, `status` (uses `SubtaskStatus` —
 `0`=normal, `1`=completed, which is **different** from `TaskStatus.COMPLETED`=2),
 `completed_time`, `start_date`, `time_zone`, `is_all_day`, `sort_order`.
@@ -504,16 +501,13 @@ is no `tags`/`parentId`.
   default `list`), `sort_option`/`sort_order`/`sort_type`, `modified_time`,
   `is_owner`/`user_count` (V2), `closed` (archived), `muted`, `permission`
   (a plain string — `read`/`write`/`comment`; there is no `Permission` enum),
-  and V2 team fields (`team_id`, `open_to_team`). Properties: `is_inbox` (id
-  starts with `"inbox"`), `is_closed`, `is_note_project`, `is_task_project`,
-  `view_mode_enum`. Conversions: `to_v1_dict`, `to_v2_create_dict`,
-  `to_v2_update_dict` (use `groupId: "NONE"` to remove from a folder).
+  and V2 team fields (`team_id`, `open_to_team`). (To remove a project from its
+  folder, `unified/api.py` sends `groupId: "NONE"` in the update payload.)
 - **`ProjectGroup`** (folder, **V2-only**) — `id`, `etag`, `name`, view/sort
-  fields, `deleted`, `show_all`, team fields. `to_v2_*_dict()` always send
-  `listType: "group"`.
+  fields, `deleted`, `show_all`, team fields. (V2 folder payloads carry
+  `listType: "group"`, built inline in `unified/api.py`.)
 - **`Column`** (kanban) — `id`, `project_id`, `name`, `sort_order`,
-  `created_time`/`modified_time` (V2), `etag`. `to_v2_create_dict` /
-  `to_v2_update_dict`.
+  `created_time`/`modified_time` (V2), `etag`.
 - **`ProjectData`** — container for the V1 `get_project_with_data` response:
   `project: Project`, `tasks: list[Task]`, `columns: list[Column]`. `from_v1()`
   parses all three; `from_v2()` builds it from a project + task list (V2 supplies
@@ -525,9 +519,9 @@ is no `tags`/`parentId`.
 
 `name` (lowercase identifier used in API calls), `label` (display name, may have
 spaces), `raw_name`, `etag`, `color`, `parent` (parent tag *name* for nesting),
-sort fields, `type`. `is_nested` property. `Tag.create(label, ...)` auto-derives
-`name = label.lower().replace(" ", "")`. `to_v2_create_dict` / `to_v2_update_dict`
-(the update form also sends `rawName`).
+sort fields, `type`. `Tag.create(label, ...)` auto-derives
+`name = label.lower().replace(" ", "")` (the lowercased identifier used in API
+calls).
 
 ### Habit models (`models/habit.py`, **V2-only**, plain `BaseModel`)
 
@@ -538,9 +532,8 @@ sort fields, `type`. `is_nested` property. `Tag.create(label, ...)` auto-derives
   (1.0 for boolean), `step`, `unit`, `etag`, `repeat_rule` (RRULE), `reminders`
   (HH:MM strings), `record_enable`, `section_id`, `target_days`,
   `target_start_date` (YYYYMMDD int), `completed_cycles`, `ex_dates`,
-  `current_streak`, `style`. Properties: `is_boolean`, `is_numeric`, `is_active`,
-  `is_archived`. (There is **no** `best_streak` field.) `to_v2_dict(for_update)`
-  always stamps `modifiedTime` and adds `createdTime` on create.
+  `current_streak`, `style`. Properties: `is_numeric`, `is_active`,
+  `is_archived`. (There is **no** `best_streak` field.)
 - **`HabitSection`** — `id`, `name` (`_morning`/`_afternoon`/`_night`),
   `sort_order`, timestamps, `etag`; `display_name` property maps the underscore
   names to "Morning"/"Afternoon"/"Night".

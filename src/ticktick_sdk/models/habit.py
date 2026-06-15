@@ -113,11 +113,6 @@ class Habit(BaseModel):
     style: int = Field(default=1, description="Display style")
 
     @property
-    def is_boolean(self) -> bool:
-        """Check if this is a boolean (yes/no) habit."""
-        return self.habit_type == "Boolean"
-
-    @property
     def is_numeric(self) -> bool:
         """Check if this is a numeric (count/measure) habit."""
         return self.habit_type == "Real"
@@ -163,57 +158,6 @@ class Habit(BaseModel):
             current_streak=data.get("currentStreak") or 0,
             style=data.get("style") or 1,
         )
-
-    def to_v2_dict(self, for_update: bool = False) -> dict[str, Any]:
-        """
-        Convert to V2 API dictionary format.
-
-        Args:
-            for_update: If True, include only fields needed for update
-
-        Returns:
-            Dictionary suitable for V2 API
-        """
-        data: dict[str, Any] = {
-            "id": self.id,
-            "name": self.name,
-            "iconRes": self.icon,
-            "color": self.color,
-            "sortOrder": self.sort_order,
-            "status": self.status,
-            "encouragement": self.encouragement,
-            "totalCheckIns": self.total_checkins,
-            "type": self.habit_type,
-            "goal": self.goal,
-            "step": self.step,
-            "unit": self.unit,
-            "reminders": self.reminders,
-            "recordEnable": self.record_enable,
-            "targetDays": self.target_days,
-            "completedCycles": self.completed_cycles,
-            "exDates": self.ex_dates,
-            "currentStreak": self.current_streak,
-            "style": self.style,
-        }
-
-        if self.etag:
-            data["etag"] = self.etag
-        if self.repeat_rule:
-            data["repeatRule"] = self.repeat_rule
-        if self.section_id:
-            data["sectionId"] = self.section_id
-        if self.target_start_date:
-            data["targetStartDate"] = self.target_start_date
-
-        # Add timestamps for creation
-        if not for_update:
-            now = datetime.now()
-            data["createdTime"] = now.strftime("%Y-%m-%dT%H:%M:%S.000+0000")
-            data["modifiedTime"] = now.strftime("%Y-%m-%dT%H:%M:%S.000+0000")
-        else:
-            data["modifiedTime"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000+0000")
-
-        return data
 
     @staticmethod
     def _parse_datetime(value: str | None) -> datetime | None:
