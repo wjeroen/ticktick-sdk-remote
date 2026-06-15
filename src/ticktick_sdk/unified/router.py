@@ -1,31 +1,26 @@
 """
 API Router for TickTick Unified API.
 
-The live, in-use surface of ``APIRouter`` is its availability helpers
-(``has_v1`` / ``has_v2`` / ``is_fully_configured`` / ``verify_clients`` /
-``get_status``). ``UnifiedTickTickAPI`` calls those and decides routing
-*inline* at each method (``if self._router.has_v2: ... elif
-self._router.has_v1: ...``).
+``APIRouter`` bundles the V1 and V2 clients and exposes lightweight
+availability/verification helpers (``has_v1`` / ``has_v2`` /
+``is_fully_configured`` / ``verify_clients`` / ``get_status``).
 
-WARNING: The ``OPERATION_ROUTING`` table and the ``get_routing`` /
-``can_execute`` / ``get_primary_client`` / ``get_fallback_client`` helpers
-below are **descriptive, not load-bearing** — nothing in the codebase calls
-them today (grep before relying on them). They document the *intended*
-routing, but the real behavior lives in ``unified/api.py`` and does not
-always match it. In particular, task creation (``create_task`` and the batch
-task operations the MCP server exposes, e.g. ``batch_create_tasks`` /
-``batch_update_tasks``) **hard-requires V2** and raises
-``TickTickAPIUnavailableError`` when V2 is down — there is NO V1 fallback,
-despite what a "V2_PRIMARY" row might suggest. Keep this table in sync with
-the code (or wire it up); do not trust it as a guarantee.
+These are what ``UnifiedTickTickAPI`` actually uses: routing is decided
+*inline* in each ``unified/api.py`` method via ``if self._router.has_v2: ...
+elif self._router.has_v1: ...``. There is intentionally no declarative
+routing table here. An earlier ``OPERATION_ROUTING`` table plus
+``get_routing`` / ``can_execute`` / ``get_primary_client`` /
+``get_fallback_client`` helpers were never called and had drifted out of sync
+with the real behavior (e.g. they implied a V1 fallback for task creation
+that does not actually exist), so they were removed. If declarative routing
+is wanted later, build it fresh against the real ``api.py`` behavior.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from enum import StrEnum, auto
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ticktick_sdk.api.v1 import TickTickV1Client
@@ -34,181 +29,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class APIPreference(StrEnum):
-    """API preference for an operation."""
-
-    V1_ONLY = auto()  # Only available in V1
-    V2_ONLY = auto()  # Only available in V2
-    V2_PRIMARY = auto()  # Prefer V2, fallback to V1
-    V1_PRIMARY = auto()  # Prefer V1, fallback to V2
-
-
-@dataclass
-class OperationConfig:
-    """Configuration for an operation."""
-
-    preference: APIPreference
-    description: str = ""
-
-
-# Operation routing table
-OPERATION_ROUTING: dict[str, OperationConfig] = {
-    # Tasks
-    "create_task": OperationConfig(
-        # NOTE: code actually hard-requires V2 (single + batch create raise
-        # when V2 is down). This is V2_ONLY in practice, not a real fallback.
-        APIPreference.V2_ONLY,
-        "Requires V2 (tags, parent_id); no working V1 fallback in api.py",
-    ),
-    "get_task": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 doesn't require project_id",
-    ),
-    "update_task": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 has richer update options",
-    ),
-    "delete_task": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 supports batch operations",
-    ),
-    "complete_task": OperationConfig(
-        APIPreference.V1_PRIMARY,
-        "V1 has dedicated endpoint, simpler",
-    ),
-    "list_all_tasks": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V1 can only list per-project",
-    ),
-    "list_completed_tasks": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "list_deleted_tasks": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature (trash)",
-    ),
-    "move_task": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "set_task_parent": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature (subtasks)",
-    ),
-    # Projects
-    "create_project": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 supports more options",
-    ),
-    "get_project": OperationConfig(
-        APIPreference.V1_PRIMARY,
-        "V1 has dedicated endpoint",
-    ),
-    "get_project_with_data": OperationConfig(
-        APIPreference.V1_ONLY,
-        "V1-only feature (includes tasks + columns)",
-    ),
-    "update_project": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 supports batch operations",
-    ),
-    "delete_project": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 supports batch operations",
-    ),
-    "list_projects": OperationConfig(
-        APIPreference.V2_PRIMARY,
-        "V2 returns more metadata",
-    ),
-    # Project Groups
-    "create_project_group": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "update_project_group": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "delete_project_group": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "list_project_groups": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    # Tags
-    "create_tag": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "update_tag": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "rename_tag": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "delete_tag": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "merge_tags": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "list_tags": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    # User
-    "get_user_profile": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "get_user_status": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "get_user_statistics": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "get_user_settings": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    # Focus/Pomodoro
-    "get_focus_heatmap": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    "get_focus_by_tag": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    # Habits
-    "get_habit_checkins": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-    # Sync
-    "sync_all": OperationConfig(
-        APIPreference.V2_ONLY,
-        "V2-only feature",
-    ),
-}
-
-
 @dataclass
 class APIRouter:
     """
-    Routes API operations to the appropriate client.
+    Holds the V1 and V2 clients and reports their availability.
 
-    This class manages both V1 and V2 clients and decides which
-    to use for each operation based on the routing table.
+    Despite the name, this does not contain a routing table — each
+    ``UnifiedTickTickAPI`` method decides V1 vs V2 inline using the
+    ``has_v1`` / ``has_v2`` properties below.
     """
 
     v1_client: TickTickV1Client | None = None
@@ -232,70 +60,6 @@ class APIRouter:
     def is_fully_configured(self) -> bool:
         """Check if both APIs are available."""
         return self.has_v1 and self.has_v2
-
-    def get_routing(self, operation: str) -> OperationConfig:
-        """Get the routing configuration for an operation."""
-        return OPERATION_ROUTING.get(
-            operation,
-            OperationConfig(APIPreference.V2_PRIMARY, "Default to V2"),
-        )
-
-    def can_execute(self, operation: str) -> bool:
-        """Check if an operation can be executed with available clients."""
-        config = self.get_routing(operation)
-
-        if config.preference == APIPreference.V1_ONLY:
-            return self.has_v1
-        elif config.preference == APIPreference.V2_ONLY:
-            return self.has_v2
-        elif config.preference == APIPreference.V1_PRIMARY:
-            return self.has_v1 or self.has_v2
-        else:  # V2_PRIMARY
-            return self.has_v2 or self.has_v1
-
-    def get_primary_client(self, operation: str) -> tuple[str, object | None]:
-        """
-        Get the primary client for an operation.
-
-        Returns:
-            Tuple of (api_version, client) where api_version is 'v1' or 'v2'
-        """
-        config = self.get_routing(operation)
-
-        if config.preference == APIPreference.V1_ONLY:
-            return ("v1", self.v1_client)
-        elif config.preference == APIPreference.V2_ONLY:
-            return ("v2", self.v2_client)
-        elif config.preference == APIPreference.V1_PRIMARY:
-            if self.has_v1:
-                return ("v1", self.v1_client)
-            return ("v2", self.v2_client)
-        else:  # V2_PRIMARY
-            if self.has_v2:
-                return ("v2", self.v2_client)
-            return ("v1", self.v1_client)
-
-    def get_fallback_client(self, operation: str) -> tuple[str, object | None]:
-        """
-        Get the fallback client for an operation.
-
-        Returns:
-            Tuple of (api_version, client) or (None, None) if no fallback
-        """
-        config = self.get_routing(operation)
-
-        # V1_ONLY and V2_ONLY have no fallback
-        if config.preference in (APIPreference.V1_ONLY, APIPreference.V2_ONLY):
-            return (None, None)  # type: ignore
-
-        if config.preference == APIPreference.V1_PRIMARY:
-            if self.has_v2:
-                return ("v2", self.v2_client)
-        else:  # V2_PRIMARY
-            if self.has_v1:
-                return ("v1", self.v1_client)
-
-        return (None, None)  # type: ignore
 
     async def verify_clients(self) -> dict[str, bool]:
         """
@@ -324,7 +88,7 @@ class APIRouter:
 
         return results
 
-    def get_status(self) -> dict[str, any]:
+    def get_status(self) -> dict[str, Any]:
         """Get the current status of the router."""
         return {
             "v1_available": self.has_v1,

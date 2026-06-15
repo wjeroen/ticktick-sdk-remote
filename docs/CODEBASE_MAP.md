@@ -40,7 +40,7 @@ ticktick-mcp/
 │   │   └── client.py             # TickTickClient main class (1368 lines)
 │   ├── unified/                   # API routing & unification
 │   │   ├── api.py                # UnifiedTickTickAPI (2797 lines)
-│   │   └── router.py             # APIRouter with operation routing table (321 lines)
+│   │   └── router.py             # APIRouter: V1/V2 availability + verify helpers (99 lines)
 │   ├── models/                    # Unified Pydantic data models
 │   │   ├── base.py               # TickTickModel base class
 │   │   ├── task.py               # Task & ChecklistItem (352 lines)
@@ -135,13 +135,14 @@ ticktick-mcp/
 
 ### 2.3 Routing Strategy (router.py)
 
-> ⚠️ **Aspirational, not enforced.** This table (and the one in Part 7.2)
-> describes *intended* routing. The `OPERATION_ROUTING` table and its helper
-> methods in `router.py` are **dead code** — nothing calls them. Real routing
-> is decided inline in `unified/api.py` via `has_v2` / `has_v1` checks, and a
-> "Fallback" column here does **not** guarantee one exists. Notably, task
-> creation and the batch task operations the MCP server uses hard-require V2
-> (no V1 fallback). See Part 7.2.
+> ⚠️ **Historical — the `router.py` routing table was removed (2026-06-15).**
+> This table (and the one in Part 7.2) described *intended* routing, but the
+> `OPERATION_ROUTING` table and its helper methods were **dead code that
+> nothing called**, so they were deleted. Real routing is decided inline in
+> `unified/api.py` via `has_v2` / `has_v1` checks, and a "Fallback" column here
+> does **not** guarantee one exists. Notably, task creation and the batch task
+> operations the MCP server uses hard-require V2 (no V1 fallback). Kept below
+> only as a rough description; trust the code.
 
 | Resource | Primary API | Fallback | Reason |
 |----------|-------------|----------|--------|
@@ -632,12 +633,17 @@ Helper Function: `_check_batch_response_errors()`
 
 ## Part 7: API Routing Logic
 
-**Location:** `unified/router.py` (321 lines)
+**Location:** `unified/router.py` (99 lines)
 
 ### 7.1 APIRouter Class
 
-**APIPreference Enum:**
+`APIRouter` holds the V1/V2 clients and exposes availability/verification
+helpers only: `has_v1`, `has_v2`, `is_fully_configured`, `verify_clients`,
+`get_status`. It contains **no** routing table.
+
+**~~APIPreference Enum~~ (removed 2026-06-15 — was dead code):**
 ```python
+# Deleted from router.py. Routing is decided inline in api.py via has_v2/has_v1.
 V1_ONLY = auto()    # Only in V1
 V2_ONLY = auto()    # Only in V2
 V2_PRIMARY = auto() # Try V2 first, fallback to V1
@@ -646,15 +652,16 @@ V1_PRIMARY = auto() # Try V1 first, fallback to V2
 
 ### 7.2 Operation Routing Table
 
-> ⚠️ **This table is descriptive, not the live decision path.** The
+> ⚠️ **Historical — removed from the code (2026-06-15).** The
 > `OPERATION_ROUTING` dict and the `get_routing` / `can_execute` /
-> `get_primary_client` / `get_fallback_client` methods are defined in
-> `router.py` but **never called** — actual routing is hand-written inline in
-> each `unified/api.py` method. Where the code disagrees with this table, the
-> code wins. Known mismatches: `create_task` is **V2-only in practice** (raises
-> if V2 is down, despite the "V2_PRIMARY" label below), and every batch task
-> operation (`batch_create_tasks`, `batch_update_tasks`, …) hard-requires V2
-> with no V1 fallback.
+> `get_primary_client` / `get_fallback_client` methods were defined in
+> `router.py` but **never called**, so they were deleted. Actual routing is
+> hand-written inline in each `unified/api.py` method via `has_v2` / `has_v1`.
+> Where this table disagreed with the code, the code wins — `create_task` is
+> **V2-only in practice** (raises if V2 is down, despite the "V2_PRIMARY" label
+> below), and every batch task operation (`batch_create_tasks`,
+> `batch_update_tasks`, …) hard-requires V2 with no V1 fallback. Kept below as
+> a rough sketch of intent only.
 
 | Operation | Routing | Reason |
 |-----------|---------|--------|
@@ -1095,7 +1102,7 @@ The SDK handles these known API quirks:
 | api/base.py | 469 | Base HTTP client |
 | cli.py | 454 | Command-line interface with tool filtering |
 | models/task.py | 352 | Task model |
-| unified/router.py | 321 | Operation routing table |
+| unified/router.py | 99 | APIRouter availability helpers (no routing table) |
 | models/project.py | 308 | Project models |
 | constants.py | 292 | Enums, URLs, host configuration |
 | models/habit.py | 285 | Habit models |

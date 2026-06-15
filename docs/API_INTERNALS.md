@@ -76,7 +76,7 @@ The unofficial V2 API provides full access to TickTick's features but requires r
 | `api/v2/auth.py` | 366 | Session authentication |
 | `api/v2/types.py` | 850 | V2 TypedDict definitions |
 | `unified/api.py` | 2797 | Unified API layer with batch operations |
-| `unified/router.py` | 321 | Routing logic |
+| `unified/router.py` | 99 | V1/V2 client availability helpers |
 | `constants.py` | 292 | Enums, URLs, host configuration |
 
 ---
@@ -1910,6 +1910,17 @@ class SyncTaskBeanV2(TypedDict):
 ## Section 8: API Routing (APIRouter)
 
 **File**: `/src/ticktick_sdk/unified/router.py`
+
+> ⚠️ **Historical (removed 2026-06-15).** The `OPERATION_ROUTING` table and the
+> `APIPreference` / `OperationConfig` / `get_routing` / `can_execute` /
+> `get_primary_client` / `get_fallback_client` helpers documented in this
+> section were **deleted from `router.py`** — they were never called and
+> contradicted the real behavior. Routing is decided **inline** in
+> `unified/api.py` via `has_v2` / `has_v1` checks. `APIRouter` now exposes only
+> `has_v1` / `has_v2` / `is_fully_configured` / `verify_clients` / `get_status`.
+> Treat the table and helper methods below as historical; trust the code. In
+> particular, task creation and all batch task ops hard-require V2 (no V1
+> fallback).
 
 ### 8.1 APIPreference Enum
 

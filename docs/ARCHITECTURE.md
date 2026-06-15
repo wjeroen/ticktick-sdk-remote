@@ -214,10 +214,20 @@ To provide comprehensive functionality, this SDK reverse-engineers the **unoffic
 
 ### How the SDK Decides Which API to Use
 
-The SDK uses an **APIRouter** (`src/ticktick_sdk/unified/router.py`) with a routing table that defines preferences for each operation:
+> ⚠️ **Historical (table removed 2026-06-15).** The declarative
+> `OPERATION_ROUTING` table and the `APIPreference` / `OperationConfig` /
+> `get_routing` / `can_execute` / `get_primary_client` / `get_fallback_client`
+> helpers shown in this section were **deleted from `router.py`** — they were
+> never called and had drifted out of sync with reality. Routing is decided
+> **inline** in `unified/api.py` via `self._router.has_v2` / `has_v1` checks.
+> The table below is kept only as a rough sketch of *intended* routing — trust
+> the code. Reality: task creation and **all** batch task ops hard-require V2
+> (no V1 fallback), despite the "V2_PRIMARY" labels here.
+
+The SDK historically used an **APIRouter** (`src/ticktick_sdk/unified/router.py`) routing table to define preferences for each operation:
 
 ```python
-# From router.py - APIPreference enum
+# REMOVED 2026-06-15 (dead code) - router.py APIPreference enum
 class APIPreference(StrEnum):
     V1_ONLY = auto()    # Only available in V1
     V2_ONLY = auto()    # Only available in V2
@@ -614,9 +624,13 @@ async def initialize(self) -> None:
 
 ### The APIRouter Component
 
-**File**: `src/ticktick_sdk/unified/router.py` (321 lines)
+**File**: `src/ticktick_sdk/unified/router.py`
 
-The `APIRouter` class manages routing decisions:
+The `APIRouter` holds the V1/V2 clients and reports their availability. It does
+**not** contain a routing table — the `get_routing` / `can_execute` /
+`get_primary_client` / `get_fallback_client` helpers were removed (2026-06-15)
+as unused dead code; each `api.py` method decides V1 vs V2 inline. The live
+surface:
 
 ```python
 @dataclass
@@ -641,22 +655,13 @@ class APIRouter:
         """Check if both APIs are available."""
         return self.has_v1 and self.has_v2
 
-    def get_routing(self, operation: str) -> OperationConfig:
-        """Get the routing configuration for an operation."""
-        return OPERATION_ROUTING.get(
-            operation,
-            OperationConfig(APIPreference.V2_PRIMARY, "Default to V2"),
-        )
+    async def verify_clients(self) -> dict[str, bool]:
+        """Ping each client's auth; cache + return {'v1': bool, 'v2': bool}."""
+        ...
 
-    def can_execute(self, operation: str) -> bool:
-        """Check if an operation can be executed."""
-        config = self.get_routing(operation)
-        if config.preference == APIPreference.V1_ONLY:
-            return self.has_v1
-        elif config.preference == APIPreference.V2_ONLY:
-            return self.has_v2
-        else:  # PRIMARY preferences
-            return self.has_v2 or self.has_v1
+    def get_status(self) -> dict[str, Any]:
+        """Report v1/v2 availability + verification flags (no secrets)."""
+        ...
 ```
 
 ### Model Conversion
@@ -2279,7 +2284,7 @@ except TickTickNotFoundError as e:
 | `src/ticktick_sdk/__init__.py` | 154 | Public API surface, exports |
 | `src/ticktick_sdk/client/client.py` | 1,070 | High-level TickTickClient |
 | `src/ticktick_sdk/unified/api.py` | 1,968 | UnifiedTickTickAPI routing |
-| `src/ticktick_sdk/unified/router.py` | 321 | APIRouter routing table |
+| `src/ticktick_sdk/unified/router.py` | 99 | APIRouter (V1/V2 availability helpers) |
 | `src/ticktick_sdk/api/base.py` | 469 | BaseTickTickClient abstract |
 | `src/ticktick_sdk/api/v1/client.py` | 531 | TickTickV1Client |
 | `src/ticktick_sdk/api/v1/auth.py` | 342 | OAuth2Handler, OAuth2Token |
