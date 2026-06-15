@@ -160,6 +160,32 @@ class BaseTickTickClient(ABC):
         "incorrect_password_too_many_times",
     })
 
+    def _auth_error_message(self, raw_message: str, endpoint: str) -> str:
+        """Build an actionable auth-failure message for the MCP consumer.
+
+        This text is surfaced all the way up to whoever is *using* the MCP
+        (a model or a person), so it must explain what broke and how to fix
+        it WITHOUT requiring access to the server's repo or logs.
+        """
+        if self.api_version == APIVersion.V1:
+            return (
+                f"TickTick V1 (OAuth) authentication failed at {endpoint} — the "
+                "TICKTICK_ACCESS_TOKEN has likely expired or been revoked. The "
+                "person hosting this server needs to mint a new token "
+                "(`ticktick-sdk auth`), update TICKTICK_ACCESS_TOKEN in the "
+                "hosting environment (e.g. Railway), and redeploy. If you are "
+                "not the host, relay this to whoever is. "
+                f"(TickTick said: {raw_message})"
+            )
+        return (
+            f"TickTick V2 (session) authentication failed at {endpoint} — the "
+            "session has expired or been invalidated. The person hosting this "
+            "server needs to refresh the TICKTICK_V2_COOKIES env var from a "
+            "logged-in TickTick browser tab (see the README section 'Grabbing "
+            "TICKTICK_V2_COOKIES') and redeploy. If you are not the host, relay "
+            f"this to whoever is. (TickTick said: {raw_message})"
+        )
+
     def _handle_error_response(
         self,
         response: httpx.Response,
@@ -200,31 +226,31 @@ class BaseTickTickClient(ABC):
                     api_version=self.api_version.value,
                 )
             elif error_code in self._AUTH_ERROR_CODES:
+                logger.error(
+                    "%s auth failure at %s (errorCode=%s): %s",
+                    self.api_version.value, endpoint, error_code, error_message,
+                )
                 raise TickTickAuthenticationError(
-                    f"Authentication failed: {error_message}",
-                    details={"endpoint": endpoint, "response": error_body, "error_code": error_code},
+                    self._auth_error_message(error_message, endpoint),
+                    details={
+                        "endpoint": endpoint,
+                        "response": error_body,
+                        "error_code": error_code,
+                        "api_version": self.api_version.value,
+                    },
                 )
 
         # Fall back to HTTP status code based handling
         if status_code == 401:
-            # A 401 on V1 almost always means the OAuth access token has
-            # expired or been revoked. Log a screamy hint so the operator
-            # doesn't waste a morning hunting for the cause.
-            if self.api_version == APIVersion.V1:
-                logger.error(
-                    "V1 OAuth request to %s returned 401. Your "
-                    "TICKTICK_ACCESS_TOKEN is probably expired or revoked. "
-                    "Mint a new one with `ticktick-sdk auth` and update the "
-                    "env var in Railway, then redeploy.",
-                    endpoint,
-                )
-                raise TickTickAuthenticationError(
-                    f"V1 OAuth token expired or invalid (HTTP 401 from {endpoint}). "
-                    f"Refresh TICKTICK_ACCESS_TOKEN — see Railway logs for guidance.",
-                    details={"endpoint": endpoint, "response": error_body, "api_version": "v1"},
-                )
+            # 401 mid-session means the token/session expired or was revoked.
+            # Log for the operator AND return an actionable message to the
+            # MCP consumer (who may not have repo/log access).
+            logger.error(
+                "%s auth failure (HTTP 401) at %s: %s",
+                self.api_version.value, endpoint, error_message,
+            )
             raise TickTickAuthenticationError(
-                f"Authentication failed: {error_message}",
+                self._auth_error_message(error_message, endpoint),
                 details={"endpoint": endpoint, "response": error_body, "api_version": self.api_version.value},
             )
         elif status_code == 403:
@@ -321,10 +347,12 @@ class BaseTickTickClient(ABC):
             if self.api_version == APIVersion.V2:
                 raise TickTickAuthenticationError(
                     "TickTick V2 is unavailable — sign-on failed (captcha / "
-                    "anti-bot throttle, bad device id, or expired session) so the "
-                    "server is running in V1-only degraded mode. Set "
-                    "TICKTICK_V2_TOKEN + TICKTICK_V2_COOKIES to bypass V2 sign-on "
-                    "(see README), or redeploy to retry.",
+                    "anti-bot throttle, an invalid TICKTICK_DEVICE_ID, or an "
+                    "expired session) so the server is running in V1-only "
+                    "degraded mode. The person hosting this server can set "
+                    "TICKTICK_V2_COOKIES (from a logged-in browser, see README) "
+                    "to bypass V2 sign-on, or redeploy to retry. If you are not "
+                    "the host, relay this to whoever is.",
                     details={"endpoint": endpoint, "api_version": "v2", "degraded": True},
                 )
             raise TickTickAuthenticationError(

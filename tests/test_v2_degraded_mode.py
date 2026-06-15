@@ -163,6 +163,33 @@ async def test_initialize_falls_back_to_session_token_when_password_fails(patche
     assert api.inbox_id == "inbox123"
 
 
+def test_auth_error_message_v2_tells_consumer_to_refresh_cookies():
+    """A V2 auth failure must explain the fix (refresh cookies) to the MCP user."""
+    from ticktick_sdk.api.v2.client import TickTickV2Client
+
+    c = TickTickV2Client(device_id="a" * 24)
+    msg = c._auth_error_message("token expired", "/batch/check/0")
+    assert "TICKTICK_V2_COOKIES" in msg
+    assert "/batch/check/0" in msg
+    assert "token expired" in msg  # raw TickTick detail preserved
+    assert "redeploy" in msg.lower()
+
+
+def test_auth_error_message_v1_tells_consumer_to_refresh_access_token():
+    """A V1 auth failure must point at the OAuth token refresh."""
+    from ticktick_sdk.api.v1.client import TickTickV1Client
+
+    c = TickTickV1Client(
+        client_id="x",
+        client_secret="y",
+        redirect_uri="http://localhost:8080/callback",
+        access_token="z",
+    )
+    msg = c._auth_error_message("unauthorized", "/project")
+    assert "TICKTICK_ACCESS_TOKEN" in msg
+    assert "ticktick-sdk auth" in msg
+
+
 async def test_initialize_falls_back_with_cookies_only_extracting_t(patched_clients):
     """Only TICKTICK_V2_COOKIES set (no explicit token) → `t` is auto-extracted."""
     v1, v2 = patched_clients
