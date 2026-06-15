@@ -302,7 +302,11 @@ class TestUserCombinations:
 
 
 def _sample_stats() -> UserStatistics:
-    """A UserStatistics with per-day/week history for formatter tests."""
+    """A UserStatistics with per-day/week/month history for formatter tests.
+
+    Uses TickTick's real ``YYYYMMDD`` key format so the tests also exercise the
+    `_pretty_date` conversion (``YYYYMMDD`` -> ``YYYY-MM-DD`` / ``YYYY-MM``).
+    """
     return UserStatistics(
         score=1200,
         level=6,
@@ -310,12 +314,13 @@ def _sample_stats() -> UserStatistics:
         yesterday_completed=6,
         total_completed=900,
         task_by_day={
-            "2026-06-13": TaskCount(complete_count=3, not_complete_count=1),
-            "2026-06-14": TaskCount(complete_count=6, not_complete_count=2),
-            "2026-06-15": TaskCount(complete_count=4, not_complete_count=0),
+            "20260613": TaskCount(complete_count=3, not_complete_count=1),
+            "20260614": TaskCount(complete_count=6, not_complete_count=2),
+            "20260615": TaskCount(complete_count=4, not_complete_count=0),
         },
-        task_by_week={"2026-W24": TaskCount(complete_count=13, not_complete_count=3)},
-        score_by_day={"2026-06-14": 1150, "2026-06-15": 1200},
+        task_by_week={"20260608": TaskCount(complete_count=13, not_complete_count=3)},
+        task_by_month={"20260601": TaskCount(complete_count=136, not_complete_count=20)},
+        score_by_day={"20260614": 1150, "20260615": 1200},
         today_pomo_count=2,
         total_pomo_count=120,
         total_pomo_duration=720000,
@@ -333,6 +338,9 @@ class TestStatisticsFormatting:
         assert "**Total**: 13" in md  # 3 + 6 + 4
         assert "**Avg/day**: 4.33" in md  # 13 / 3
         assert "Completion rate" in md
+        # YYYYMMDD keys are prettified for display
+        assert "2026-06-08: 13" in md  # weekly rollup -> YYYY-MM-DD
+        assert "2026-06: 136" in md  # monthly rollup -> YYYY-MM
         assert "Focus/Pomodoro" not in md  # completions section only
 
     def test_completions_json_window(self):

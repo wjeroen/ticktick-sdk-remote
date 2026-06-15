@@ -3,6 +3,9 @@
 ## TL;DR
 The user is a coding noob. ELI5 (Explain Like I'm 5) frequently when discussing technical concepts, code changes, and tradeoffs. Always make sure to update the README.md and TODO.md when making changes. Always consider at least 3 possible causes when something isn't working.
 
+## Context Compaction
+If the conversation was just compacted/summarized — i.e. you're resuming from a condensed summary of earlier context rather than the full transcript — **say so at the very top of your next message** (a quick "⚠️ heads-up: context was just compacted") so the user knows some earlier detail may have been condensed or lost.
+
 ## How to Ask the User Questions
 **Do NOT use the AskUserQuestion poll/multiple-choice UI — the user dislikes it.** When you need to clarify requirements or have the user choose between approaches, ask in **regular chat text** instead. Lay out the options and tradeoffs in prose (ELI5) and let the user reply normally. Asking questions is encouraged — just do it conversationally, not through the poll widget.
 

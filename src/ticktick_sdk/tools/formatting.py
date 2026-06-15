@@ -976,6 +976,19 @@ def format_user_status_markdown(status: UserStatus) -> str:
     return "\n".join(lines)
 
 
+def _pretty_date(key: str, granularity: str = "day") -> str:
+    """Format a TickTick ``YYYYMMDD`` statistics key for display.
+
+    granularity ``"day"``/``"week"`` → ``YYYY-MM-DD``; ``"month"`` → ``YYYY-MM``.
+    Returns the key unchanged if it isn't an 8-digit date.
+    """
+    if len(key) == 8 and key.isdigit():
+        if granularity == "month":
+            return f"{key[:4]}-{key[4:6]}"
+        return f"{key[:4]}-{key[4:6]}-{key[6:8]}"
+    return key
+
+
 def _completion_window(stats: UserStatistics) -> dict[str, Any] | None:
     """Summarize the per-day completion window TickTick returns in task_by_day.
 
@@ -985,19 +998,19 @@ def _completion_window(stats: UserStatistics) -> dict[str, Any] | None:
     """
     if not stats.task_by_day:
         return None
-    days = sorted(stats.task_by_day.items())
+    days = sorted(stats.task_by_day.items())  # sort on raw YYYYMMDD keys (chronological)
     completed = sum(tc.complete_count for _, tc in days)
     scheduled = sum(tc.total for _, tc in days)
     n = len(days)
     return {
-        "from": days[0][0],
-        "to": days[-1][0],
+        "from": _pretty_date(days[0][0]),
+        "to": _pretty_date(days[-1][0]),
         "days": n,
         "total_completed": completed,
         "avg_per_day": round(completed / n, 2) if n else 0,
         "completion_rate_pct": round(completed / scheduled * 100, 1) if scheduled else None,
         # most-recent-first for display
-        "per_day": {d: tc.complete_count for d, tc in reversed(days)},
+        "per_day": {_pretty_date(d): tc.complete_count for d, tc in reversed(days)},
     }
 
 
@@ -1017,7 +1030,7 @@ def format_statistics_markdown(stats: UserStatistics, section: str = "all") -> s
             lines.append("")
             lines.append("## Score by day")
             for day, sc in reversed(sorted(stats.score_by_day.items())):
-                lines.append(f"- {day}: {sc}")
+                lines.append(f"- {_pretty_date(day)}: {sc}")
         lines.append("")
 
     if show_all or section == "completions":
@@ -1045,12 +1058,12 @@ def format_statistics_markdown(stats: UserStatistics, section: str = "all") -> s
         if stats.task_by_week:
             lines.append("### Completed by week")
             for wk, tc in reversed(sorted(stats.task_by_week.items())):
-                lines.append(f"- {wk}: {tc.complete_count}")
+                lines.append(f"- {_pretty_date(wk, 'week')}: {tc.complete_count}")
             lines.append("")
         if stats.task_by_month:
             lines.append("### Completed by month")
             for mo, tc in reversed(sorted(stats.task_by_month.items())):
-                lines.append(f"- {mo}: {tc.complete_count}")
+                lines.append(f"- {_pretty_date(mo, 'month')}: {tc.complete_count}")
             lines.append("")
 
     if show_all or section == "pomodoros":
@@ -1078,15 +1091,24 @@ def format_statistics_json(stats: UserStatistics, section: str = "all") -> dict[
         out["level"] = stats.level
         out["score"] = stats.score
         if section == "score":
-            out["score_by_day"] = stats.score_by_day
+            out["score_by_day"] = {
+                _pretty_date(d): sc
+                for d, sc in reversed(sorted(stats.score_by_day.items()))
+            }
     if section in ("all", "completions"):
         out["completions"] = {
             "today": stats.today_completed,
             "yesterday": stats.yesterday_completed,
             "total": stats.total_completed,
             "window": _completion_window(stats),
-            "by_week": {w: tc.complete_count for w, tc in sorted(stats.task_by_week.items())},
-            "by_month": {m: tc.complete_count for m, tc in sorted(stats.task_by_month.items())},
+            "by_week": {
+                _pretty_date(w, "week"): tc.complete_count
+                for w, tc in sorted(stats.task_by_week.items())
+            },
+            "by_month": {
+                _pretty_date(m, "month"): tc.complete_count
+                for m, tc in sorted(stats.task_by_month.items())
+            },
         }
     if section in ("all", "pomodoros"):
         pomo: dict[str, Any] = {
@@ -1099,9 +1121,9 @@ def format_statistics_json(stats: UserStatistics, section: str = "all") -> dict[
             "pomo_duration_goal": stats.pomo_duration_goal,
         }
         if section == "pomodoros":
-            pomo["by_day"] = stats.pomo_by_day
-            pomo["by_week"] = stats.pomo_by_week
-            pomo["by_month"] = stats.pomo_by_month
+            pomo["by_day"] = {_pretty_date(k): v for k, v in stats.pomo_by_day.items()}
+            pomo["by_week"] = {_pretty_date(k, "week"): v for k, v in stats.pomo_by_week.items()}
+            pomo["by_month"] = {_pretty_date(k, "month"): v for k, v in stats.pomo_by_month.items()}
         out["pomodoros"] = pomo
     return out
 
