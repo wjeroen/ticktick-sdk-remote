@@ -104,6 +104,23 @@ class TickTickSettings(BaseSettings):
         default=SecretStr(""),
         description="TickTick account password",
     )
+    v2_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Optional pre-obtained V2 session token (the value of the `t` cookie / "
+            "Bearer token from a logged-in TickTick browser session). Used as a "
+            "fallback when password sign-on fails (e.g. captcha-walled). Set "
+            "alongside TICKTICK_V2_COOKIES."
+        ),
+    )
+    v2_cookies: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Optional full Cookie header string from a logged-in TickTick browser "
+            "session (e.g. 't=...; AWSALB=...; ...'). Used together with "
+            "TICKTICK_V2_TOKEN as a fallback when password sign-on fails."
+        ),
+    )
 
     # =========================================================================
     # General Settings
@@ -123,6 +140,17 @@ class TickTickSettings(BaseSettings):
         default_factory=_generate_object_id,
         description="Unique device identifier for V2 API (MongoDB-style ObjectId)",
     )
+
+    @property
+    def device_id_is_ephemeral(self) -> bool:
+        """True when device_id was auto-generated rather than env-provided.
+
+        An ephemeral (per-process) device id makes every Railway redeploy look
+        like a brand-new device logging in with the user's password, which is
+        exactly the pattern that triggers TickTick's anti-bot captcha wall.
+        Callers can check this to warn the user to set TICKTICK_DEVICE_ID.
+        """
+        return "device_id" not in self.model_fields_set
 
     # =========================================================================
     # Validation
@@ -247,6 +275,20 @@ class TickTickSettings(BaseSettings):
     def get_v2_password(self) -> str:
         """Get the V2 password value."""
         return self.password.get_secret_value()
+
+    def get_v2_token(self) -> str | None:
+        """Get the optional pre-obtained V2 session token, if set."""
+        if self.v2_token:
+            value = self.v2_token.get_secret_value()
+            return value or None
+        return None
+
+    def get_v2_cookies(self) -> str | None:
+        """Get the optional V2 cookie header string, if set."""
+        if self.v2_cookies:
+            value = self.v2_cookies.get_secret_value()
+            return value or None
+        return None
 
 
 # Global settings instance (lazy initialization)
