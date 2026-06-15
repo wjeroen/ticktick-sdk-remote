@@ -59,7 +59,7 @@ Architecture:
 See the README for full documentation.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.4.3"
 __author__ = "dev-mirzabicer"
 
 # Main client - primary entry point for library usage

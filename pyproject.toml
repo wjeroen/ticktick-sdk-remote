@@ -62,10 +62,10 @@ dev = [
 ticktick-sdk = "ticktick_sdk.cli:cli_main"
 
 [project.urls]
-Homepage = "https://github.com/dev-mirzabicer/ticktick-sdk"
-Repository = "https://github.com/dev-mirzabicer/ticktick-sdk"
-Documentation = "https://github.com/dev-mirzabicer/ticktick-sdk#readme"
-Issues = "https://github.com/dev-mirzabicer/ticktick-sdk/issues"
+Homepage = "https://github.com/wjeroen/ticktick-sdk-remote"
+Repository = "https://github.com/wjeroen/ticktick-sdk-remote"
+Documentation = "https://github.com/wjeroen/ticktick-sdk-remote#readme"
+Issues = "https://github.com/wjeroen/ticktick-sdk-remote/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ticktick_sdk"]
