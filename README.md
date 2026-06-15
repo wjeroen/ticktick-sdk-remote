@@ -64,9 +64,13 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 | `TICKTICK_TIMEZONE` | **Recommended** | Your local timezone for correct date display (default: `UTC`). Without this, all-day tasks may show the wrong date — see note below. |
 | `TICKTICK_HOST` | No | API host: `ticktick.com` (default) or `dida365.com` (Chinese version) |
 | `TICKTICK_TIMEOUT` | No | Request timeout in seconds (default: `30`) |
-| `TICKTICK_DEVICE_ID` | No | Device ID for V2 API (auto-generated if not set) |
+| `TICKTICK_DEVICE_ID` | **Strongly recommended** | Stable device id for V2 API (24-char hex). If unset, a fresh random id is generated every redeploy — see note below. |
+| `TICKTICK_V2_TOKEN` | No (fallback) | Pre-obtained V2 session token. Only used if the username+password login fails (e.g. captcha-walled). See "If V2 sign-on gets captcha-walled" below. |
+| `TICKTICK_V2_COOKIES` | No (fallback) | Cookie header string from a logged-in TickTick browser tab, used together with `TICKTICK_V2_TOKEN`. |
 | `MCP_BEARER_TOKEN` | No | Bearer token for server authentication — see note below |
 | `PORT` | No | Server port (default: `8000`, Railway sets this automatically) |
+
+> **`TICKTICK_DEVICE_ID`:** TickTick tracks the devices logging into your account. Without this env var, every Railway redeploy invents a new random device id, so each redeploy looks like *"a stranger on a new device just logged in with your password"* — which can trigger TickTick's anti-bot CAPTCHA wall (`need_captcha`) and break V2 sign-on. Pick any stable 24-character hex string (e.g. the value printed in your first deploy's logs as `TICKTICK_DEVICE_ID is not set... auto-generated: <value>`) and paste it into Railway.
 
 > **Timezone:** TickTick stores all-day task dates as midnight in your local timezone, expressed as UTC. Without `TICKTICK_TIMEZONE`, a task due March 14 in Brussels appears as March 13. Set this to your [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) — the "TZ identifier" column on that page. Common examples: `Europe/Brussels`, `Europe/London`, `America/New_York`, `America/Chicago`, `America/Los_Angeles`, `Asia/Tokyo`, `Asia/Shanghai`, `Australia/Sydney`.
 
@@ -121,6 +125,12 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 - [x] Bearer token authentication for the HTTP transport
 - [x] `/health` endpoint for platform monitoring
 - [x] Railway deployment files (Procfile, Dockerfile)
+
+**Auth resilience**
+- [x] Graceful V2 degradation — server keeps V1 working (degraded mode) instead of crash-looping when V2 sign-on fails (e.g. `need_captcha`); V2-only tools return a friendly "V2 unavailable" error
+- [x] Pre-obtained V2 session token fallback (`TICKTICK_V2_TOKEN` + `TICKTICK_V2_COOKIES`) — automatically used when password sign-on fails; bypasses `/user/signon` entirely
+- [x] Loud startup warning when `TICKTICK_DEVICE_ID` isn't set (prevents redeploys looking like new devices)
+- [x] V1 OAuth 401 → specific log + error message pointing at `ticktick-sdk auth` token refresh, instead of generic "Authentication failed"
 
 **Task filtering** (all on `ticktick_list_tasks`)
 - [x] `due_before` filter — active tasks due on or before a date
@@ -841,6 +851,45 @@ async with TickTickClient.from_settings() as client:
 ### "V2 initialization failed"
 - Your password may contain special characters — try changing it
 - Check for 2FA/MFA (not currently supported)
+
+### `need_captcha` from `/api/v2/user/signon` (V2 anti-bot wall)
+
+If you see this in Railway logs:
+
+```
+V2 password sign-on failed: Authentication failed: {"errorCode":"need_captcha", ...}
+V2 will be unavailable until ~<timestamp> UTC (6h cooldown).
+```
+
+TickTick's anti-bot system has flagged your password login (usually because too many login attempts came from your Railway datacenter IP in a short window — e.g. a crash loop, or many redeploys in a row). The server keeps running in **V1-only degraded mode** — task/project tools still work, but tags/folders/habits/focus/subtasks return a "V2 unavailable" error.
+
+**What to do, in order of "least techy" → "most reliable":**
+
+1. **Wait it out + set `TICKTICK_DEVICE_ID`.** Stop redeploying for several hours (the flag usually clears on its own). Then set `TICKTICK_DEVICE_ID` to a stable 24-char hex string in Railway so future redeploys don't look like new devices, and redeploy once.
+
+2. **If it still won't lift: use the V2 session token fallback** (`TICKTICK_V2_TOKEN` + `TICKTICK_V2_COOKIES`). This makes the server skip `/user/signon` entirely and reuse a session you've already established in your browser. It can't trigger `need_captcha` because no login happens. See the next section for how to grab the values.
+
+### Grabbing `TICKTICK_V2_TOKEN` and `TICKTICK_V2_COOKIES` from a browser
+
+You only need to do this if `need_captcha` is blocking the normal password login. The values are sensitive — treat them like your password (paste only into Railway env vars, never into screenshots or chats).
+
+**On a desktop browser (Chrome / Edge / Firefox):**
+
+1. Open https://ticktick.com and sign in normally.
+2. Open the browser **DevTools** (F12, or right-click → *Inspect*).
+3. Go to the **Network** tab. In the filter box type `batch/check` (this is the V2 sync endpoint the app polls).
+4. Click around in TickTick (e.g. switch to "Today") so a request appears.
+5. Click any `batch/check/0` (or similar V2) request. In the right pane, look at **Request Headers**.
+6. Find the `Cookie:` header. Copy its **full value** — it'll look like `t=abcd1234...; AWSALB=xyz...; ...; tt_distid=...`. That entire string is your `TICKTICK_V2_COOKIES`.
+7. Inside that same cookie string, find the `t=...` part. Copy **just the value after `t=`** (up to the next `;`). That's your `TICKTICK_V2_TOKEN`.
+8. In Railway, set both env vars and redeploy. Logs should show `V2 authenticated via pre-obtained session token (fallback)`.
+
+The token typically lasts months. If you ever see `V2 token fallback also failed` in the logs, the token has gone stale — repeat the steps above to get a fresh one.
+
+### "V1 OAuth token expired or invalid"
+- Your `TICKTICK_ACCESS_TOKEN` has expired (TickTick OAuth tokens last ~6 months) or been revoked
+- Run `ticktick-sdk auth` again to mint a fresh token (same Step 2 from setup)
+- Update `TICKTICK_ACCESS_TOKEN` in Railway and redeploy
 
 ### "Configuration incomplete"
 - Make sure all 5 required environment variables are set in Railway
