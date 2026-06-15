@@ -264,65 +264,6 @@ class OAuth2Handler:
         logger.info("Successfully obtained access token")
         return self._token
 
-    async def refresh_access_token(self) -> OAuth2Token:
-        """
-        Refresh the access token using the refresh token.
-
-        Returns:
-            OAuth2Token with the new access token
-
-        Raises:
-            TickTickOAuthError: If refresh fails or no refresh token available
-        """
-        if self._token is None or self._token.refresh_token is None:
-            raise TickTickOAuthError(
-                "No refresh token available",
-                oauth_error="invalid_grant",
-            )
-
-        token_url = f"{get_oauth_base()}/token"
-
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": self._token.refresh_token,
-            "scope": " ".join(self.scopes),
-        }
-
-        headers = {
-            "Authorization": self._get_basic_auth_header(),
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-
-        logger.debug("Refreshing access token")
-
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                response = await client.post(
-                    token_url,
-                    data=data,
-                    headers=headers,
-                )
-            except httpx.RequestError as e:
-                raise TickTickOAuthError(
-                    f"Token refresh request failed: {e}",
-                ) from e
-
-            if not response.is_success:
-                self._handle_token_error(response)
-
-            token_data = response.json()
-
-        self._token = OAuth2Token(
-            access_token=token_data["access_token"],
-            token_type=token_data.get("token_type", "Bearer"),
-            expires_in=token_data.get("expires_in"),
-            refresh_token=token_data.get("refresh_token", self._token.refresh_token),
-            scope=token_data.get("scope"),
-        )
-
-        logger.info("Successfully refreshed access token")
-        return self._token
-
     def _handle_token_error(self, response: httpx.Response) -> None:
         """Handle error response from token endpoint."""
         try:

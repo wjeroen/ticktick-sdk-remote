@@ -223,23 +223,6 @@ class TickTickV2Client(BaseTickTickClient):
         """
         return await self._session_handler.authenticate(username, password)
 
-    async def authenticate_2fa(
-        self,
-        auth_id: str,
-        totp_code: str,
-    ) -> SessionToken:
-        """
-        Complete 2FA authentication.
-
-        Args:
-            auth_id: Auth ID from initial sign-on
-            totp_code: TOTP code from authenticator
-
-        Returns:
-            SessionToken with authentication credentials
-        """
-        return await self._session_handler.authenticate_2fa(auth_id, totp_code)
-
     def set_session(self, session: SessionToken) -> None:
         """Set an existing session directly."""
         self._session_handler.set_session(session)

@@ -55,23 +55,13 @@ class TickTickV1Client(BaseTickTickClient):
     for all V1 API endpoints.
 
     Usage:
-        # With OAuth2 flow
         client = TickTickV1Client(
             client_id="your_client_id",
             client_secret="your_client_secret",
             redirect_uri="http://localhost:8080/callback",
         )
-
-        # Get auth URL and exchange code
-        auth_url, state = client.get_authorization_url()
-        # ... user authorizes ...
-        await client.authenticate_with_code(code, state)
-
-        # Or with pre-obtained token
-        client = TickTickV1Client(...)
         client.set_access_token("your_access_token")
 
-        # Use the client
         async with client:
             projects = await client.get_projects()
             task = await client.create_task(title="Test", project_id=projects[0]["id"])
@@ -140,32 +130,6 @@ class TickTickV1Client(BaseTickTickClient):
             Tuple of (authorization_url, state)
         """
         return self._oauth.get_authorization_url(state)
-
-    async def authenticate_with_code(
-        self,
-        code: str,
-        state: str | None = None,
-    ) -> OAuth2Token:
-        """
-        Authenticate by exchanging an authorization code for a token.
-
-        Args:
-            code: Authorization code from callback
-            state: State parameter for verification
-
-        Returns:
-            OAuth2Token with access credentials
-        """
-        return await self._oauth.exchange_code(code, state)
-
-    async def refresh_token(self) -> OAuth2Token:
-        """
-        Refresh the access token.
-
-        Returns:
-            OAuth2Token with new credentials
-        """
-        return await self._oauth.refresh_access_token()
 
     def set_access_token(self, access_token: str) -> None:
         """
