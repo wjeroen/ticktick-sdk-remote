@@ -21,12 +21,14 @@ Ex. When Solving a Bug or Implementing a Feature
 
 **CRITICAL WORKFLOW - FOLLOW THIS ORDER:**
 
-1. **Check README.md Quick Reference first** (lines 44-59)
-   - This table tells you EXACTLY which file handles what functionality
-   - **DO NOT GREP until you've checked this table**
+1. **Check the codebase map first** — `docs/ARCHITECTURE.md` §2 ("Codebase map")
+   - It tells you EXACTLY which file handles what functionality
+   - **DO NOT GREP until you've checked it**
 
-2. **Read the relevant service/component descriptions in README.md**
-   - This gives you the BIG PICTURE before diving into code
+2. **Read the relevant section of `docs/ARCHITECTURE.md`** (architecture, auth,
+   routing, data models, API internals, quirks) for the BIG PICTURE before diving
+   into code. Also check `README.md` when the task touches setup/deploy/env-vars
+   or user-facing tool behavior.
 
 3. **Only THEN read the actual files**
    - Now that you know where to look, read the specific files IN THEIR ENTIRETY, not just a few lines
@@ -35,7 +37,7 @@ Ex. When Solving a Bug or Implementing a Feature
 5. **Briefly explain the tradeoffs** of each (ELI5)
 6. **Ask the user which approach they prefer** before writing code
 
-**Why this order matters:** Grepping without context leads to local fixes that miss the big picture and create new bugs. README.md is your map - use it!
+**Why this order matters:** Grepping without context leads to local fixes that miss the big picture and create new bugs. `docs/ARCHITECTURE.md` is your map - use it!
 
 ## Flag Sloppy Code (Don't Silently Fix It)
 
@@ -50,14 +52,18 @@ When you find dead/unused code, classify it **before** removing:
 When you're unsure which bucket something falls in, flag it and ask rather than deleting.
 
 ## After Making Changes
-Update README.md if you changed:
-   - File structure or added new files
-   - Database schema
-   - Environment variables
-   - Processing flows
-   - API endpoints
+Keep the docs current — that's part of finishing a change, not an optional extra:
 
-**Keep the open pull request's description current.** As you push commits that add or change features, refresh the PR description so it reflects the whole branch — don't leave it describing only the first commit. Treat it like the README and TODO.md: keeping it up to date is part of finishing a change.
+- **`README.md`** (the user/operator guide) — update if you changed setup/deploy
+  steps, environment variables, the available tools, or other user-facing behavior.
+- **`docs/ARCHITECTURE.md`** (the developer/internals reference) — update if you
+  changed the codebase structure (new/removed/renamed files), the data models,
+  V1/V2 routing or API behavior, the auth/resilience flow, or the MCP
+  server/formatting internals.
+- **`TODO.md`** — mark items done and add newly-discovered work (see the TODO
+  section below).
+- **The open PR description** — refresh it so it reflects the whole branch, not
+  just the first commit.
 
 ## Task Management: TODO.md vs TodoWrite Tool
 
