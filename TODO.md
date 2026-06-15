@@ -6,9 +6,17 @@
 
 > **Priority Key:** 1 = Highest priority (do first, saves money!), 2 = High priority, 3 = Medium priority, 4+ = Lower priority (do later)
 
+### High Priority — V2 login broken with `need_captcha` (1)
+- [ ] **Root cause (2026-06-15):** TickTick's `POST /api/v2/user/signon` returns HTTP 500 `errorCode: need_captcha` — an anti-bot **captcha wall on the password login**. V1 (OAuth) still returns 200, so the *account* isn't banned; only the password-login path is blocked. It's worsened by a **crash→retry storm**: when V2 auth fails, `initialize()` raises → `lifespan` crashes → every incoming MCP request re-runs lifespan and re-attempts signon (logs show bursts every few seconds), which keeps the captcha flag hot. NOT 2FA (`requires_2fa: False`), NOT 6-month expiry (server is ~2 months old).
+- [ ] **Fix 1 (safe, helps everyone): stop the signon storm.** Cache the V2 session so signon runs once, not per request; on failure, back off with a cooldown and fail gracefully instead of crash-looping. This is the corrected version of the originally-approved "B" (a blind relogin-on-401 would *add* signon attempts and make captcha worse).
+- [ ] **Fix 2 (A): set a stable `TICKTICK_DEVICE_ID`** env var so every login looks like the same device instead of a fresh random one each redeploy.
+- [ ] **Fix 3 (opt-in, most reliable): inject a pre-obtained V2 session token + cookies** via env var so the server skips `/user/signon` entirely → can't hit `need_captcha`. Keep password login as the default so other users aren't forced into the browser-token flow.
+- [ ] **Graceful degradation:** run V1-only when V2 is captcha-blocked instead of crashing the whole server.
+- [ ] **2FA handling (for other users):** detect TickTick two-step verification at signon and surface a clear message / support a TOTP or token path. (This user has no 2FA, but others might.)
+- [ ] **Persistent session cache (C):** optionally persist the V2 session across restarts (e.g. Railway Volume) so signon happens ~twice a year instead of on every redeploy. Document the cross-user setup implications.
+
 ### Features to Implement
-- [ ] Test deployment on Railway and verify Claude.ai connector works
-- [ ] Monitor for TickTick session expiry issues in production
+- [ ] Test deployment on Railway and verify Claude.ai connector works (⚠️ do NOT redeploy until the signon-storm fix lands — see High Priority above)
 
 ## Completed Recently ✅
 
