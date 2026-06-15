@@ -41,6 +41,14 @@ Ex. When Solving a Bug or Implementing a Feature
 
 While working, if you come across code that looks messy, buggy, sloppy, or just off — **even if it has nothing to do with the task you're currently on** — bring it to the user's attention. Briefly say what you noticed and why it looks wrong, and **offer** to fix or improve it. Do NOT silently fix unrelated code yourself; let the user decide. Any sloppiness you notice should be surfaced rather than ignored.
 
+## Before Deleting Code, Preserve Promising WIP
+
+When you find dead/unused code, classify it **before** removing:
+- **Complete but unused** (it works; nothing just calls it) — safe to delete; it's trivially recoverable from git history.
+- **Broken or half-built but promising** — code that could be *genuinely useful if it were finished/fixed* (e.g. scaffolding for a planned feature, like the 2FA `authenticate_2fa` method). Do **NOT** delete it. Leave it in place with a clear `# WIP:` comment saying what it's for and what's still missing, so it isn't mistaken for dead weight later.
+
+When you're unsure which bucket something falls in, flag it and ask rather than deleting.
+
 ## After Making Changes
 Update README.md if you changed:
    - File structure or added new files
