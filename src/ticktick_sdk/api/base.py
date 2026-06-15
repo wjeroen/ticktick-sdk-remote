@@ -207,9 +207,25 @@ class BaseTickTickClient(ABC):
 
         # Fall back to HTTP status code based handling
         if status_code == 401:
+            # A 401 on V1 almost always means the OAuth access token has
+            # expired or been revoked. Log a screamy hint so the operator
+            # doesn't waste a morning hunting for the cause.
+            if self.api_version == APIVersion.V1:
+                logger.error(
+                    "V1 OAuth request to %s returned 401. Your "
+                    "TICKTICK_ACCESS_TOKEN is probably expired or revoked. "
+                    "Mint a new one with `ticktick-sdk auth` and update the "
+                    "env var in Railway, then redeploy.",
+                    endpoint,
+                )
+                raise TickTickAuthenticationError(
+                    f"V1 OAuth token expired or invalid (HTTP 401 from {endpoint}). "
+                    f"Refresh TICKTICK_ACCESS_TOKEN — see Railway logs for guidance.",
+                    details={"endpoint": endpoint, "response": error_body, "api_version": "v1"},
+                )
             raise TickTickAuthenticationError(
                 f"Authentication failed: {error_message}",
-                details={"endpoint": endpoint, "response": error_body},
+                details={"endpoint": endpoint, "response": error_body, "api_version": self.api_version.value},
             )
         elif status_code == 403:
             raise TickTickForbiddenError(
