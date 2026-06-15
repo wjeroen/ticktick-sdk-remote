@@ -15,6 +15,8 @@ The user primarily works on **mobile** and deploys via Railway, so they **do not
 - Prefer backend logging over frontend console debugging
 - Railway logs are the primary debugging tool
 
+**Live TickTick MCP tools (great for testing):** Claude Code sessions — including remote/web sessions — usually have this project's own TickTick MCP connected as live tools (`mcp__TickTick__*`). You can call them directly to test changes end-to-end against a real TickTick account, no extra setup needed. **Caveat:** those tools run against whatever is *deployed*, and the branch you're working on may not be set up for deployment yet. Once a branch is set up it often **autodeploys** on push — but the user may also turn autodeploy off — so don't assume your in-progress branch code is what the live tools are executing. Check with the user what's actually deployed before trusting the live tools to verify your branch's changes.
+
 ## After Every Prompt, Before Making Any Changes
 Ex. When Solving a Bug or Implementing a Feature
 
