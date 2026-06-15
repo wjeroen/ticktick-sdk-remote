@@ -68,7 +68,10 @@ V2 (Session) - Required for most operations:
 Optional:
     TICKTICK_REDIRECT_URI   - OAuth2 redirect URI (default: http://localhost:8080/callback)
     TICKTICK_TIMEOUT        - Request timeout in seconds (default: 30)
-    TICKTICK_DEVICE_ID      - Device identifier (auto-generated if not set)
+    TICKTICK_DEVICE_ID      - Device identifier. STRONGLY RECOMMENDED to set
+                              this. If unset, a fresh random id is generated
+                              every redeploy, which makes each redeploy look
+                              like a new device to TickTick's anti-bot.
 
 === RESPONSE FORMATS ===
 
@@ -302,8 +305,23 @@ async def lifespan(mcp: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """
     logger.info("Initializing TickTick MCP Server...")
 
+    # Warn early if device_id is ephemeral — every Railway redeploy will look
+    # like a brand-new device to TickTick, which can trigger captcha walls.
+    settings = get_settings()
+    if settings.device_id_is_ephemeral:
+        logger.warning(
+            "TICKTICK_DEVICE_ID is not set. A new device id was auto-generated "
+            "for this process: %s — every redeploy will produce a different id, "
+            "which makes TickTick's anti-bot system more likely to flag your "
+            "logins. Set TICKTICK_DEVICE_ID in Railway to this value (or any "
+            "stable 24-char hex string) to make logins look like a single "
+            "consistent device.",
+            settings.device_id,
+        )
+
+    client: TickTickClient | None = None
     try:
-        client = TickTickClient.from_settings()
+        client = TickTickClient.from_settings(settings)
         await client.connect()
         logger.info("TickTick client connected successfully")
         yield {"client": client}
@@ -311,7 +329,7 @@ async def lifespan(mcp: FastMCP) -> AsyncIterator[dict[str, Any]]:
         logger.error("Failed to initialize TickTick client: %s", e)
         raise
     finally:
-        if "client" in locals():
+        if client is not None:
             await client.disconnect()
             logger.info("TickTick client disconnected")
 
