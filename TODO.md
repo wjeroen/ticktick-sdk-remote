@@ -20,6 +20,7 @@
 
 ### Features to Implement
 - [ ] Test deployment on Railway and verify Claude.ai connector works (⚠️ do NOT redeploy until the signon-storm fix lands — see High Priority above)
+- [ ] **Investigate moving habits + focus off V2 onto V1 OAuth (2026-06-15 finding).** The live Open API V1 docs (developer.ticktick.com/docs#/openapi) now document **habit** endpoints (GET/POST `/open/v1/habit`, GET/POST `/open/v1/habit/{id}`, POST `/open/v1/habit/{id}/checkin`, GET `/open/v1/habit/checkins`) and **focus** endpoints (GET `/open/v1/focus`, GET/DELETE `/open/v1/focus/{id}`), plus new task endpoints (`/open/v1/task/move`, `/open/v1/task/completed`, `/open/v1/task/filter`). If OAuth can reach them, habits + focus could keep working even when V2 is captcha-walled. ⚠️ **Unverified:** docs still list only `tasks:read` / `tasks:write` scopes — no habit/focus scope — so an OAuth token may 403 on these. **NEXT STEP:** call `GET /open/v1/habit` with a real OAuth token to see if it 200s or 403s. **Still V2-only (no V1 endpoint):** tag management (create/rename/delete/merge), folder/project-group management, kanban column management, parent/child subtasks — so V2 can't be dropped entirely.
 
 ## Completed Recently ✅
 

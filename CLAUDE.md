@@ -100,18 +100,18 @@ A **temporary** task tracker for the current conversation only.
 
 Use checkbox format with clear, actionable descriptions:
 ```markdown
-- [ ] Fix speed toggle UI inconsistency (buttons don't show current speed)
-- [ ] Add bulk podcast subscription import (OPML format)
+- [ ] Fix recurring task series dying when due date is moved via batch_update_tasks
+- [ ] Add due_after filter to ticktick_list_tasks (combine with due_before for ranges)
 ```
 
 When completed, add date:
 ```markdown
-- [x] Fix podcast subscription multi-user bug (2026-01-23)
+- [x] Fix timezone: all-day tasks no longer off by one day (2026-03-13)
 ```
 
 ### Best Practices
 
-1. **Be specific**: "Fix audio player size on mobile" not "Fix UI issues"
+1. **Be specific**: "Fix priority labels not showing in markdown list view" not "Fix UI issues"
 2. **Include context**: Add parenthetical notes for clarity
 3. **Keep it fresh**: Move old completed items to archive periodically
 4. **No duplicates**: If a task is already listed, don't add it again
@@ -121,8 +121,8 @@ When completed, add date:
 
 Don't clutter TODO.md with:
 - Implementation details (those go in README.md or code comments)
-- API specifications (those go in wallabag-api.md)
-- Wallabag sync design docs (those go in wallabag-api.md)
+- API specifications / endpoint details (those go in `docs/API_INTERNALS.md` or the `docs/api-analysis/` notes)
+- Architecture & design docs (those go in `docs/ARCHITECTURE.md` or the README)
 - Long-term vision/roadmap (use "Future Ideas" sparingly)
 
 TODO.md is for **actionable tasks**, not documentation.
