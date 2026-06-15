@@ -26,6 +26,8 @@ import httpx
 
 from ticktick_sdk.constants import (
     DEFAULT_TIMEOUT,
+    V2_DEVICE_VERSION,
+    V2_USER_AGENT,
     get_api_base_v2,
 )
 from ticktick_sdk.exceptions import TickTickSessionError
@@ -124,10 +126,6 @@ class SessionHandler:
         cookies = session.cookies
     """
 
-    # Minimal headers that work (based on pyticktick)
-    # Keep it simple - don't over-engineer with browser-exact headers
-    DEFAULT_USER_AGENT = "Mozilla/5.0 (rv:145.0) Firefox/145.0"
-
     def __init__(
         self,
         device_id: str | None = None,
@@ -178,7 +176,7 @@ class SessionHandler:
 
         return json.dumps({
             "platform": "web",
-            "version": 6430,
+            "version": V2_DEVICE_VERSION,
             "id": self.device_id,
         })
 
@@ -190,7 +188,7 @@ class SessionHandler:
         Content-Type is added automatically by httpx when using json=.
         """
         return {
-            "User-Agent": self.DEFAULT_USER_AGENT,
+            "User-Agent": V2_USER_AGENT,
             "X-Device": self._get_x_device_header(),
         }
 

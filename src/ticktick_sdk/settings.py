@@ -17,7 +17,7 @@ from typing import Any
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from ticktick_sdk.constants import DEFAULT_TIMEOUT, OAUTH_SCOPES
+from ticktick_sdk.constants import DEFAULT_TIMEOUT, OAUTH_SCOPES, V2_DEVICE_VERSION
 
 
 def _generate_object_id() -> str:
@@ -275,7 +275,7 @@ class TickTickSettings(BaseSettings):
         """
         return {
             "platform": "web",
-            "version": 6430,
+            "version": V2_DEVICE_VERSION,
             "id": self.device_id,
         }
 

@@ -106,6 +106,8 @@ from ticktick_sdk.api.v2.types import (
 from ticktick_sdk.constants import (
     APIVersion,
     DEFAULT_TIMEOUT,
+    V2_DEVICE_VERSION,
+    V2_USER_AGENT,
     get_api_base_v2,
 )
 from ticktick_sdk.exceptions import TickTickAuthenticationError
@@ -171,12 +173,9 @@ class TickTickV2Client(BaseTickTickClient):
         """
         return json.dumps({
             "platform": "web",
-            "version": 6430,
+            "version": V2_DEVICE_VERSION,
             "id": self._session_handler.device_id,
         })
-
-    # Simple User-Agent that works (based on pyticktick)
-    V2_USER_AGENT = "Mozilla/5.0 (rv:145.0) Firefox/145.0"
 
     def _get_auth_headers(self) -> dict[str, str]:
         """Get V2 authentication headers.
@@ -189,7 +188,7 @@ class TickTickV2Client(BaseTickTickClient):
             session = self._session_handler.session
 
             # Override with simple User-Agent for V2 API
-            headers["User-Agent"] = self.V2_USER_AGENT
+            headers["User-Agent"] = V2_USER_AGENT
             headers["X-Device"] = self._get_x_device_header()
 
             # Cookie is the primary auth mechanism for V2
