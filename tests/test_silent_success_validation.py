@@ -1,20 +1,27 @@
 """
-Regression tests for the reparent "silent-success trap".
+Regression tests for V2 "silent-success traps".
 
-V2's ``set_parent`` endpoint silently "succeeds" (returns an etag, no error)
-when the child OR the parent task no longer exists. That means attaching a
-subtask to a parent that was deleted out from under us *looks* like success but
-does nothing — the child ends up orphaned. (This is what happened to the real
-"BlueDot" subtasks: a duplicate parent was deleted by TickTick's app-side
-de-duplication, and a later run cheerfully re-attached children to the dead ID.)
+Several V2 batch endpoints silently "succeed" (return an etag, no error) when a
+referenced task no longer exists — so an operation against a deleted task *looks*
+like success but does nothing. The unified layer guards against this by fetching
+each referenced task first, turning a vanished task into a clean
+``TickTickNotFoundError`` (404).
 
-``UnifiedTickTickAPI.set_task_parent`` / ``.batch_set_task_parents`` guard
-against this by verifying every referenced child AND parent exists first,
-raising ``TickTickNotFoundError`` (a clean 404) when one is missing.
+Two families are covered here:
 
-These tests pin that behavior against the REAL ``UnifiedTickTickAPI`` (wired to
-a mocked V2 client), plus the public ``client.set_task_parents`` path through
-the mock API.
+1. **Reparenting.** ``set_parent`` no-ops against a deleted *parent*, orphaning
+   the child. (This is what happened to the real "BlueDot" subtasks: a duplicate
+   parent was deleted by TickTick's app-side de-duplication, and a later run
+   cheerfully re-attached children to the dead ID.) ``set_task_parent`` /
+   ``batch_set_task_parents`` verify both the child AND the parent exist first.
+
+2. **Batch complete / delete / move.** Their *singular* siblings already do a
+   ``get_task`` existence check, but the batch versions skipped it.
+   ``batch_complete_tasks`` / ``batch_delete_tasks`` / ``batch_move_tasks`` now
+   verify every (deduped) task exists first.
+
+These tests pin the behavior against the REAL ``UnifiedTickTickAPI`` (wired to a
+mocked V2 client), plus the public ``client.*`` paths through the mock API.
 """
 
 from __future__ import annotations
@@ -41,8 +48,9 @@ def _make_api(existing_ids: set[str]) -> tuple[UnifiedTickTickAPI, MagicMock]:
 
     The mocked V2 client's ``get_task`` raises ``TickTickNotFoundError`` for any
     id not in ``existing_ids`` (mirroring a real 404) and returns a minimal task
-    dict otherwise. ``set_task_parent`` just records the call and returns an
-    etag dict, so we can assert whether reparenting was actually attempted.
+    dict otherwise. The mutation calls (``set_task_parent``, ``batch_tasks``,
+    ``move_tasks``) just record and return an etag dict, so we can assert whether
+    the actual mutation was attempted.
     """
     v2 = MagicMock()
     v2.is_authenticated = True  # so APIRouter.has_v2 is True
@@ -54,6 +62,8 @@ def _make_api(existing_ids: set[str]) -> tuple[UnifiedTickTickAPI, MagicMock]:
 
     v2.get_task = AsyncMock(side_effect=_get_task)
     v2.set_task_parent = AsyncMock(return_value={"id2etag": {}, "id2error": {}})
+    v2.batch_tasks = AsyncMock(return_value={"id2etag": {}, "id2error": {}})
+    v2.move_tasks = AsyncMock(return_value={"id2etag": {}, "id2error": {}})
 
     api = UnifiedTickTickAPI(
         client_id="cid",
@@ -203,3 +213,91 @@ class TestClientReparentValidation:
 
         refreshed = await client.get_task(child.id)
         assert refreshed.parent_id == parent.id
+
+
+# =============================================================================
+# Batch complete / delete / move existence checks
+# =============================================================================
+
+
+class TestBatchExistenceValidation:
+    """``batch_complete_tasks`` / ``batch_delete_tasks`` / ``batch_move_tasks``
+    must not silently "succeed" on a task that no longer exists."""
+
+    async def test_complete_raises_on_dead_task(self):
+        api, v2 = _make_api(existing_ids={"alive"})
+        with pytest.raises(TickTickNotFoundError):
+            await api.batch_complete_tasks([("alive", "proj"), ("dead", "proj")])
+        v2.batch_tasks.assert_not_called()  # nothing applied
+
+    async def test_complete_succeeds_when_all_exist(self):
+        api, v2 = _make_api(existing_ids={"a", "b"})
+        await api.batch_complete_tasks([("a", "proj"), ("b", "proj")])
+        v2.batch_tasks.assert_awaited_once()
+
+    async def test_delete_raises_on_dead_task(self):
+        api, v2 = _make_api(existing_ids={"alive"})
+        with pytest.raises(TickTickNotFoundError):
+            await api.batch_delete_tasks([("alive", "proj"), ("dead", "proj")])
+        v2.batch_tasks.assert_not_called()
+
+    async def test_delete_succeeds_when_all_exist(self):
+        api, v2 = _make_api(existing_ids={"a"})
+        await api.batch_delete_tasks([("a", "proj")])
+        v2.batch_tasks.assert_awaited_once()
+
+    async def test_move_raises_on_dead_task(self):
+        api, v2 = _make_api(existing_ids={"alive"})
+        moves = [
+            {"task_id": "alive", "from_project_id": "p1", "to_project_id": "p2"},
+            {"task_id": "dead", "from_project_id": "p1", "to_project_id": "p2"},
+        ]
+        with pytest.raises(TickTickNotFoundError):
+            await api.batch_move_tasks(moves)
+        v2.move_tasks.assert_not_called()
+
+    async def test_move_succeeds_when_all_exist(self):
+        api, v2 = _make_api(existing_ids={"a"})
+        moves = [{"task_id": "a", "from_project_id": "p1", "to_project_id": "p2"}]
+        await api.batch_move_tasks(moves)
+        v2.move_tasks.assert_awaited_once()
+
+    async def test_existence_checks_are_deduped(self):
+        # the same id repeated -> fetched once, not N times
+        api, v2 = _make_api(existing_ids={"a", "b"})
+        await api.batch_delete_tasks([("a", "proj"), ("a", "proj"), ("b", "proj")])
+        fetched = sorted(c.args[0] for c in v2.get_task.await_args_list)
+        assert fetched == ["a", "b"]
+
+
+class TestClientBatchValidation:
+    """Public ``client.complete_tasks`` / ``delete_tasks`` / ``move_tasks``
+    paths (through the mock API)."""
+
+    async def test_complete_tasks_raises_on_dead_task(self, client, mock_api):
+        alive = await client.create_task(title="alive")
+        with pytest.raises(TickTickNotFoundError):
+            await client.complete_tasks([
+                (alive.id, alive.project_id),
+                ("deadtask", "proj"),
+            ])
+
+    async def test_delete_tasks_raises_on_dead_task(self, client, mock_api):
+        alive = await client.create_task(title="alive")
+        with pytest.raises(TickTickNotFoundError):
+            await client.delete_tasks([
+                (alive.id, alive.project_id),
+                ("deadtask", "proj"),
+            ])
+
+    async def test_move_tasks_raises_on_dead_task(self, client, mock_api):
+        alive = await client.create_task(title="alive")
+        with pytest.raises(TickTickNotFoundError):
+            await client.move_tasks([
+                {
+                    "task_id": alive.id,
+                    "from_project_id": alive.project_id,
+                    "to_project_id": "p2",
+                },
+                {"task_id": "deadtask", "from_project_id": "p1", "to_project_id": "p2"},
+            ])

@@ -805,6 +805,67 @@ class MockUnifiedAPI:
         if task_id not in parent.child_ids:
             parent.child_ids.append(task_id)
 
+    async def batch_complete_tasks(
+        self,
+        task_ids: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        """Mock batch complete tasks (mirrors production existence check).
+
+        Verifies every (deduped) task exists before applying, so completing a
+        task that no longer exists raises TickTickNotFoundError instead of a
+        silent success.
+        """
+        self._record_call("batch_complete_tasks", (task_ids,), {})
+        self._check_failure("batch_complete_tasks")
+
+        from ticktick_sdk.exceptions import TickTickNotFoundError
+
+        for task_id in {tid for tid, _ in task_ids}:
+            if task_id not in self.tasks:
+                raise TickTickNotFoundError(f"Task not found: {task_id}")
+
+        for task_id, _project_id in task_ids:
+            task = self.tasks[task_id]
+            task.status = TaskStatus.COMPLETED
+            task.completed_time = utc_now()
+        return {"id2etag": {}, "id2error": {}}
+
+    async def batch_delete_tasks(
+        self,
+        task_ids: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        """Mock batch delete tasks (mirrors production existence check)."""
+        self._record_call("batch_delete_tasks", (task_ids,), {})
+        self._check_failure("batch_delete_tasks")
+
+        from ticktick_sdk.exceptions import TickTickNotFoundError
+
+        for task_id in {tid for tid, _ in task_ids}:
+            if task_id not in self.tasks:
+                raise TickTickNotFoundError(f"Task not found: {task_id}")
+
+        for task_id, _project_id in task_ids:
+            self.tasks[task_id].deleted = 1  # soft delete (matches delete_task)
+        return {"id2etag": {}, "id2error": {}}
+
+    async def batch_move_tasks(
+        self,
+        moves: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        """Mock batch move tasks (mirrors production existence check)."""
+        self._record_call("batch_move_tasks", (moves,), {})
+        self._check_failure("batch_move_tasks")
+
+        from ticktick_sdk.exceptions import TickTickNotFoundError
+
+        for task_id in {m["task_id"] for m in moves}:
+            if task_id not in self.tasks:
+                raise TickTickNotFoundError(f"Task not found: {task_id}")
+
+        for move in moves:
+            self.tasks[move["task_id"]].project_id = move["to_project_id"]
+        return {"id2etag": {}, "id2error": {}}
+
     async def batch_set_task_parents(
         self,
         assignments: list[dict[str, str]],

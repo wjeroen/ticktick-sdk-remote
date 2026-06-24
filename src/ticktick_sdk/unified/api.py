@@ -1033,6 +1033,20 @@ class UnifiedTickTickAPI:
         await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if missing
         await self._v2_client.move_task(task_id, from_project_id, to_project_id)  # type: ignore
 
+    async def _verify_tasks_exist(self, task_ids: set[str]) -> None:
+        """Verify each (deduped) task exists, raising ``TickTickNotFoundError`` if not.
+
+        V2 batch complete/delete/move silently no-op against tasks that no longer
+        exist (empty result, no error), so we fetch each unique id first to turn a
+        vanished task into a real 404 — the same guard the singular
+        ``complete_task`` / ``delete_task`` / ``move_task`` already apply.
+
+        Raises:
+            TickTickNotFoundError: If any task does not exist.
+        """
+        for task_id in task_ids:
+            await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if missing
+
     async def _verify_parent_exists(self, parent_id: str) -> None:
         """Verify a reparent target (the parent task) still exists.
 
@@ -1432,6 +1446,7 @@ class UnifiedTickTickAPI:
 
         Raises:
             TickTickAPIUnavailableError: If V2 API is not available
+            TickTickNotFoundError: If any task does not exist
         """
         self._ensure_initialized()
 
@@ -1440,6 +1455,10 @@ class UnifiedTickTickAPI:
                 "V2 API is required for batch_delete_tasks",
                 operation="batch_delete_tasks",
             )
+
+        # V2 batch delete silently ignores tasks that no longer exist. Verify
+        # first so a wrong/stale id surfaces as a 404 (matches delete_task).
+        await self._verify_tasks_exist({tid for tid, _ in task_ids})
 
         deletes = [{"taskId": tid, "projectId": pid} for tid, pid in task_ids]
         response = await self._v2_client.batch_tasks(delete=deletes)  # type: ignore
@@ -1462,6 +1481,7 @@ class UnifiedTickTickAPI:
 
         Raises:
             TickTickAPIUnavailableError: If V2 API is not available
+            TickTickNotFoundError: If any task does not exist
         """
         self._ensure_initialized()
 
@@ -1470,6 +1490,11 @@ class UnifiedTickTickAPI:
                 "V2 API is required for batch_complete_tasks",
                 operation="batch_complete_tasks",
             )
+
+        # V2 batch update silently accepts completes for tasks that no longer
+        # exist (empty etag, no id2error), so _check_batch_response_errors can't
+        # see them. Verify first to surface a real 404 (matches complete_task).
+        await self._verify_tasks_exist({tid for tid, _ in task_ids})
 
         updates = [{
             "id": tid,
@@ -1502,6 +1527,7 @@ class UnifiedTickTickAPI:
 
         Raises:
             TickTickAPIUnavailableError: If V2 API is not available
+            TickTickNotFoundError: If any task does not exist
         """
         self._ensure_initialized()
 
@@ -1510,6 +1536,10 @@ class UnifiedTickTickAPI:
                 "V2 API is required for batch_move_tasks",
                 operation="batch_move_tasks",
             )
+
+        # V2 batch move silently ignores tasks that no longer exist. Verify
+        # first so a wrong/stale id surfaces as a 404 (matches move_task).
+        await self._verify_tasks_exist({m["task_id"] for m in moves})
 
         v2_moves = [{
             "taskId": m["task_id"],
@@ -1558,8 +1588,7 @@ class UnifiedTickTickAPI:
         # surfaces as a clear 404 instead of a silent no-op.
         child_ids = {a["task_id"] for a in assignments}
         parent_ids = {a["parent_id"] for a in assignments}
-        for task_id in child_ids:
-            await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if child missing
+        await self._verify_tasks_exist(child_ids)
         for parent_id in parent_ids - child_ids:
             await self._verify_parent_exists(parent_id)
 
