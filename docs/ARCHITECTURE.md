@@ -681,8 +681,20 @@ must paper over:
    doesn't serialize it.
 
    V2 batch operations also **silently ignore** nonexistent resources on some
-   paths, so a few single-item ops (e.g. `complete_task`) first do a
-   `get_task()` existence check to produce a real `TickTickNotFoundError`.
+   paths (an empty result, no `id2error`), so the unified layer fetches each
+   referenced task first to produce a real `TickTickNotFoundError`:
+   - **Single-item ops** — `complete_task` / `delete_task` / `move_task` /
+     `unset_task_parent` each `get_task()` before mutating.
+   - **Batch ops** — `batch_complete_tasks` / `batch_delete_tasks` /
+     `batch_move_tasks` verify every (deduped) task via `_verify_tasks_exist`;
+     `batch_update_tasks` / `batch_pin_tasks` / `batch_unparent_tasks` get this
+     for free (they already fetch each task). The naive batches that *skip* the
+     check are the ones to watch — they "succeed" against dead tasks.
+   - **Reparenting is the subtle one:** `set_parent` silently "succeeds" against
+     a deleted *parent*, so `set_task_parent` / `batch_set_task_parents` verify
+     both the child (`_verify_tasks_exist`) **and** the parent
+     (`_verify_parent_exists`) first — otherwise a subtask attached to a
+     since-deleted parent looks like success but is silently orphaned.
 
 ---
 
@@ -699,7 +711,9 @@ short operator-facing version).
 2. **`parent_id` is ignored on create.** Setting a parent during task creation
    does nothing. You must call the parent endpoint afterward — the unified
    `create_task` does this for you (creates, then `set_task_parent`); the MCP
-   tool is `ticktick_set_task_parents`.
+   tool is `ticktick_set_task_parents`. That endpoint also **silently no-ops
+   against a deleted parent** (returns an etag, orphans the child), so the
+   unified layer verifies the parent exists first — see §7.
 
 3. **Soft delete.** Deleting a task moves it to trash (`deleted=1`); it's still
    fetchable. Listing trash is `GET /project/all/trash/pagination`.

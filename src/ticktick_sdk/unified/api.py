@@ -1033,6 +1033,41 @@ class UnifiedTickTickAPI:
         await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if missing
         await self._v2_client.move_task(task_id, from_project_id, to_project_id)  # type: ignore
 
+    async def _verify_tasks_exist(self, task_ids: set[str]) -> None:
+        """Verify each (deduped) task exists, raising ``TickTickNotFoundError`` if not.
+
+        V2 batch complete/delete/move silently no-op against tasks that no longer
+        exist (empty result, no error), so we fetch each unique id first to turn a
+        vanished task into a real 404 — the same guard the singular
+        ``complete_task`` / ``delete_task`` / ``move_task`` already apply.
+
+        Raises:
+            TickTickNotFoundError: If any task does not exist.
+        """
+        for task_id in task_ids:
+            await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if missing
+
+    async def _verify_parent_exists(self, parent_id: str) -> None:
+        """Verify a reparent target (the parent task) still exists.
+
+        V2's ``set_parent`` silently accepts a deleted ``parent_id`` and does
+        nothing, which leaves the would-be subtask orphaned. Fetching the parent
+        forces a clear 404 that names the *parent* (so callers know which side
+        vanished) instead of a silent no-op.
+
+        Raises:
+            TickTickNotFoundError: If the parent task does not exist.
+        """
+        try:
+            await self._v2_client.get_task(parent_id)  # type: ignore  # Raises NotFoundError if missing
+        except TickTickNotFoundError as exc:
+            raise TickTickNotFoundError(
+                f"Parent task {parent_id} not found — it may have been deleted. "
+                "Subtasks cannot be attached to a nonexistent parent.",
+                resource_type="task",
+                resource_id=parent_id,
+            ) from exc
+
     async def set_task_parent(
         self,
         task_id: str,
@@ -1044,8 +1079,9 @@ class UnifiedTickTickAPI:
 
         V2-only operation.
 
-        Note: V2 set_parent operation silently ignores nonexistent tasks,
-        so we verify the task exists first to provide proper error handling.
+        Note: V2 set_parent operation silently ignores nonexistent tasks, so we
+        verify BOTH the child and the parent exist first. Attaching to a deleted
+        parent otherwise looks like success but silently orphans the child.
 
         Args:
             task_id: Task to make a subtask
@@ -1053,11 +1089,13 @@ class UnifiedTickTickAPI:
             parent_id: Parent task ID
 
         Raises:
-            TickTickNotFoundError: If the task does not exist
+            TickTickNotFoundError: If the child task or the parent task does not exist
         """
         self._ensure_initialized()
-        # V2 set_parent silently ignores nonexistent tasks. Verify first.
-        await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if missing
+        # V2 set_parent silently ignores nonexistent tasks. Verify the child
+        # exists, then the parent (see _verify_parent_exists).
+        await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if child missing
+        await self._verify_parent_exists(parent_id)
         await self._v2_client.set_task_parent(task_id, project_id, parent_id)  # type: ignore
 
     async def unset_task_parent(
@@ -1408,6 +1446,7 @@ class UnifiedTickTickAPI:
 
         Raises:
             TickTickAPIUnavailableError: If V2 API is not available
+            TickTickNotFoundError: If any task does not exist
         """
         self._ensure_initialized()
 
@@ -1416,6 +1455,10 @@ class UnifiedTickTickAPI:
                 "V2 API is required for batch_delete_tasks",
                 operation="batch_delete_tasks",
             )
+
+        # V2 batch delete silently ignores tasks that no longer exist. Verify
+        # first so a wrong/stale id surfaces as a 404 (matches delete_task).
+        await self._verify_tasks_exist({tid for tid, _ in task_ids})
 
         deletes = [{"taskId": tid, "projectId": pid} for tid, pid in task_ids]
         response = await self._v2_client.batch_tasks(delete=deletes)  # type: ignore
@@ -1438,6 +1481,7 @@ class UnifiedTickTickAPI:
 
         Raises:
             TickTickAPIUnavailableError: If V2 API is not available
+            TickTickNotFoundError: If any task does not exist
         """
         self._ensure_initialized()
 
@@ -1446,6 +1490,11 @@ class UnifiedTickTickAPI:
                 "V2 API is required for batch_complete_tasks",
                 operation="batch_complete_tasks",
             )
+
+        # V2 batch update silently accepts completes for tasks that no longer
+        # exist (empty etag, no id2error), so _check_batch_response_errors can't
+        # see them. Verify first to surface a real 404 (matches complete_task).
+        await self._verify_tasks_exist({tid for tid, _ in task_ids})
 
         updates = [{
             "id": tid,
@@ -1478,6 +1527,7 @@ class UnifiedTickTickAPI:
 
         Raises:
             TickTickAPIUnavailableError: If V2 API is not available
+            TickTickNotFoundError: If any task does not exist
         """
         self._ensure_initialized()
 
@@ -1486,6 +1536,10 @@ class UnifiedTickTickAPI:
                 "V2 API is required for batch_move_tasks",
                 operation="batch_move_tasks",
             )
+
+        # V2 batch move silently ignores tasks that no longer exist. Verify
+        # first so a wrong/stale id surfaces as a 404 (matches move_task).
+        await self._verify_tasks_exist({m["task_id"] for m in moves})
 
         v2_moves = [{
             "taskId": m["task_id"],
@@ -1515,6 +1569,7 @@ class UnifiedTickTickAPI:
 
         Raises:
             TickTickAPIUnavailableError: If V2 API is not available
+            TickTickNotFoundError: If any child or parent task does not exist
         """
         self._ensure_initialized()
 
@@ -1523,6 +1578,19 @@ class UnifiedTickTickAPI:
                 "V2 API is required for batch_set_task_parents",
                 operation="batch_set_task_parents",
             )
+
+        # V2 set_parent silently "succeeds" against deleted tasks/parents
+        # (returns an etag, never an error). Attaching a subtask to a parent
+        # that was deleted out from under us therefore looks like success but
+        # does nothing — the child ends up orphaned (the failure that motivated
+        # this check). Verify every referenced child AND parent exists first,
+        # deduped so a shared parent is only fetched once, so a vanished task
+        # surfaces as a clear 404 instead of a silent no-op.
+        child_ids = {a["task_id"] for a in assignments}
+        parent_ids = {a["parent_id"] for a in assignments}
+        await self._verify_tasks_exist(child_ids)
+        for parent_id in parent_ids - child_ids:
+            await self._verify_parent_exists(parent_id)
 
         results: list[dict[str, Any]] = []
         for assignment in assignments:
