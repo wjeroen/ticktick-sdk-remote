@@ -782,20 +782,65 @@ class MockUnifiedAPI:
         project_id: str,
         parent_id: str,
     ) -> None:
-        """Mock set task parent."""
+        """Mock set task parent.
+
+        Mirrors production: V2 set_parent silently no-ops against deleted
+        tasks/parents, so the real client verifies BOTH the child and the
+        parent exist first. We do the same here so the mock can't hide the
+        "attach to a deleted parent" silent-success trap.
+        """
         self._record_call("set_task_parent", (task_id, project_id, parent_id), {})
         self._check_failure("set_task_parent")
 
+        from ticktick_sdk.exceptions import TickTickNotFoundError
+
         if task_id not in self.tasks:
-            from ticktick_sdk.exceptions import TickTickNotFoundError
             raise TickTickNotFoundError(f"Task not found: {task_id}")
+        if parent_id not in self.tasks:
+            raise TickTickNotFoundError(f"Parent task not found: {parent_id}")
 
         self.tasks[task_id].parent_id = parent_id
 
-        if parent_id in self.tasks:
+        parent = self.tasks[parent_id]
+        if task_id not in parent.child_ids:
+            parent.child_ids.append(task_id)
+
+    async def batch_set_task_parents(
+        self,
+        assignments: list[dict[str, str]],
+    ) -> list[dict[str, Any]]:
+        """Mock batch set task parents (mirrors production validation).
+
+        Verifies every child and parent exists up front (so a deleted parent
+        surfaces as TickTickNotFoundError instead of a silent success), then
+        applies each assignment. Fails fast with no partial application, just
+        like the real UnifiedTickTickAPI.batch_set_task_parents.
+        """
+        self._record_call("batch_set_task_parents", (assignments,), {})
+        self._check_failure("batch_set_task_parents")
+
+        from ticktick_sdk.exceptions import TickTickNotFoundError
+
+        # Verify all children and parents exist BEFORE applying anything.
+        child_ids = {a["task_id"] for a in assignments}
+        parent_ids = {a["parent_id"] for a in assignments}
+        for task_id in child_ids:
+            if task_id not in self.tasks:
+                raise TickTickNotFoundError(f"Task not found: {task_id}")
+        for parent_id in parent_ids:
+            if parent_id not in self.tasks:
+                raise TickTickNotFoundError(f"Parent task not found: {parent_id}")
+
+        results: list[dict[str, Any]] = []
+        for assignment in assignments:
+            task_id = assignment["task_id"]
+            parent_id = assignment["parent_id"]
+            self.tasks[task_id].parent_id = parent_id
             parent = self.tasks[parent_id]
             if task_id not in parent.child_ids:
                 parent.child_ids.append(task_id)
+            results.append({"id2etag": {}, "id2error": {}})
+        return results
 
     async def unset_task_parent(
         self,

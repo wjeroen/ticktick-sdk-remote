@@ -1033,6 +1033,27 @@ class UnifiedTickTickAPI:
         await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if missing
         await self._v2_client.move_task(task_id, from_project_id, to_project_id)  # type: ignore
 
+    async def _verify_parent_exists(self, parent_id: str) -> None:
+        """Verify a reparent target (the parent task) still exists.
+
+        V2's ``set_parent`` silently accepts a deleted ``parent_id`` and does
+        nothing, which leaves the would-be subtask orphaned. Fetching the parent
+        forces a clear 404 that names the *parent* (so callers know which side
+        vanished) instead of a silent no-op.
+
+        Raises:
+            TickTickNotFoundError: If the parent task does not exist.
+        """
+        try:
+            await self._v2_client.get_task(parent_id)  # type: ignore  # Raises NotFoundError if missing
+        except TickTickNotFoundError as exc:
+            raise TickTickNotFoundError(
+                f"Parent task {parent_id} not found — it may have been deleted. "
+                "Subtasks cannot be attached to a nonexistent parent.",
+                resource_type="task",
+                resource_id=parent_id,
+            ) from exc
+
     async def set_task_parent(
         self,
         task_id: str,
@@ -1044,8 +1065,9 @@ class UnifiedTickTickAPI:
 
         V2-only operation.
 
-        Note: V2 set_parent operation silently ignores nonexistent tasks,
-        so we verify the task exists first to provide proper error handling.
+        Note: V2 set_parent operation silently ignores nonexistent tasks, so we
+        verify BOTH the child and the parent exist first. Attaching to a deleted
+        parent otherwise looks like success but silently orphans the child.
 
         Args:
             task_id: Task to make a subtask
@@ -1053,11 +1075,13 @@ class UnifiedTickTickAPI:
             parent_id: Parent task ID
 
         Raises:
-            TickTickNotFoundError: If the task does not exist
+            TickTickNotFoundError: If the child task or the parent task does not exist
         """
         self._ensure_initialized()
-        # V2 set_parent silently ignores nonexistent tasks. Verify first.
-        await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if missing
+        # V2 set_parent silently ignores nonexistent tasks. Verify the child
+        # exists, then the parent (see _verify_parent_exists).
+        await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if child missing
+        await self._verify_parent_exists(parent_id)
         await self._v2_client.set_task_parent(task_id, project_id, parent_id)  # type: ignore
 
     async def unset_task_parent(
@@ -1515,6 +1539,7 @@ class UnifiedTickTickAPI:
 
         Raises:
             TickTickAPIUnavailableError: If V2 API is not available
+            TickTickNotFoundError: If any child or parent task does not exist
         """
         self._ensure_initialized()
 
@@ -1523,6 +1548,20 @@ class UnifiedTickTickAPI:
                 "V2 API is required for batch_set_task_parents",
                 operation="batch_set_task_parents",
             )
+
+        # V2 set_parent silently "succeeds" against deleted tasks/parents
+        # (returns an etag, never an error). Attaching a subtask to a parent
+        # that was deleted out from under us therefore looks like success but
+        # does nothing — the child ends up orphaned (the failure that motivated
+        # this check). Verify every referenced child AND parent exists first,
+        # deduped so a shared parent is only fetched once, so a vanished task
+        # surfaces as a clear 404 instead of a silent no-op.
+        child_ids = {a["task_id"] for a in assignments}
+        parent_ids = {a["parent_id"] for a in assignments}
+        for task_id in child_ids:
+            await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if child missing
+        for parent_id in parent_ids - child_ids:
+            await self._verify_parent_exists(parent_id)
 
         results: list[dict[str, Any]] = []
         for assignment in assignments:
