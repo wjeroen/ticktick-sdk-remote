@@ -312,11 +312,14 @@ class UnifiedTickTickAPI:
         self._initialized = False
         self._inbox_id: str | None = None
 
-        # V2 degraded-mode tracking. When V2 sign-on fails (e.g. need_captcha),
-        # we record a cooldown timestamp so logs and future code can see when
-        # it's reasonable to retry. The server only attempts sign-on at startup
-        # today; the cooldown is primarily informational + a guard against any
-        # future re-auth path. A redeploy always bypasses the cooldown.
+        # V2 degraded-mode tracking. If we fall back to password sign-on and it
+        # fails, we stamp a *self-imposed* backoff timestamp here (now +
+        # _V2_PASSWORD_COOLDOWN). IMPORTANT: this is OUR marker so we don't
+        # immediately re-poke /user/signon; it is NOT TickTick's actual throttle
+        # window, which is unknown and can be shorter or much longer. It does not
+        # predict when access returns. With cookie-first auth we usually never
+        # reach the password path, so this is often left as None. A redeploy
+        # resets it.
         self._v2_unavailable_until: datetime | None = None
         self._v2_unavailable_reason: str | None = None
         # Which path produced the current V2 session: "password", "cookie",
@@ -327,10 +330,12 @@ class UnifiedTickTickAPI:
     # Initialization & Lifecycle
     # =========================================================================
 
-    # Cooldown after a failed V2 password sign-on. Long enough that we won't
-    # keep poking at TickTick (and re-triggering need_captcha) on incidental
-    # retries, but a Railway redeploy always resets in-memory state so the
-    # user can manually retry sooner.
+    # Self-imposed backoff after a failed V2 *password* sign-on, so we don't keep
+    # poking /user/signon (and re-triggering the anti-bot) on incidental retries.
+    # This is NOT how long TickTick will actually throttle us; that real window is
+    # unknown and unrelated to this number. It's purely our own "don't retry the
+    # password before this" marker, surfaced as `cooldown_until` for visibility,
+    # and a redeploy resets it. Cookie-first means we usually never get here.
     _V2_PASSWORD_COOLDOWN = timedelta(hours=6)
 
     async def initialize(self) -> None:
@@ -614,12 +619,13 @@ class UnifiedTickTickAPI:
             self._v2_unavailable_until = cooldown_until
             logger.error("V2 password sign-on failed: %s", e)
             logger.error(
-                "V2 will be unavailable until ~%s UTC (6h cooldown). You can "
-                "REDEPLOY at any time to retry sooner — the cooldown is in-memory "
-                "only and resets on restart. If this keeps happening, TickTick is "
-                "anti-bot flagging your password login (need_captcha / 429). Best "
-                "fix: set TICKTICK_V2_COOKIES from a logged-in browser so the "
-                "server skips /user/signon entirely (it's tried first now).",
+                "V2 password sign-on failed; putting it on a self-imposed backoff "
+                "until ~%s UTC so we don't keep hammering /user/signon. NOTE: that "
+                "is OUR timer, NOT TickTick's actual throttle window (which is "
+                "unknown and may be shorter or much longer); it does not predict "
+                "when access returns. Best fix: set TICKTICK_V2_COOKIES from a "
+                "logged-in browser so the server skips /user/signon entirely "
+                "(it's tried first). A redeploy resets this backoff.",
                 cooldown_until.isoformat(timespec="seconds"),
             )
             return False, reason
