@@ -397,6 +397,39 @@ raised on **every** V2 call while degraded states the specific cause (e.g.
 device-id / expired session)" list. This is what an MCP consumer (Claude) sees
 when it calls a V2-routed tool in degraded mode.
 
+### Debugging checklist (when V2 is down)
+
+Read this before theorizing. It would have saved two debugging sessions:
+
+1. **Get the Railway logs first.** The operator is usually on mobile with no
+   devtools, so logs are the primary tool and the fastest path. Ask by name for
+   the **deploy/app logs** (the `ticktick_sdk.*` lines, sign-on attempts,
+   429/500s) and the **service config** (`sleepApplication`, `numReplicas`,
+   `restartPolicyType`).
+2. **`ticktick_auth_status` first.** It's the one tool that works in V1-only
+   degraded mode (tagged `[API: diagnostic]`); its verdict already classifies the
+   cases below.
+3. **`429` is not `401`.** `429`/"rate limit" is a *throttle* (wait it out, do
+   **not** refresh the cookie); `401`/"expired"/"stale" is a genuinely dead
+   cookie (refresh `TICKTICK_V2_COOKIES`). Classified by `_is_rate_limit_error()`.
+4. **Watch for a *mutating* error code.** `need_captcha` →
+   `username_password_not_match` → `429` across runs is TickTick's **anti-bot**,
+   not your credentials. `username_password_not_match` does **not** mean the
+   password is wrong, the cookie working on the same account proves the account is
+   fine. Password sign-on from a datacenter IP is unreliable by design; the cookie
+   is the real auth path.
+5. **Repeated "Initializing TickTick MCP Server" with no new "Starting
+   Container" = the lifespan runs per MCP session, not per process.** So the
+   client is rebuilt and V2 auth re-runs on every connection. That multiplier
+   turned a flaky login into a ban. (Fix tracked in `TODO.md`.)
+6. **`cooldown_until` is our self-imposed `now + 6h` marker, not TickTick's real
+   throttle window.** Never quote it as "access returns at X"; the real window is
+   unknown.
+7. **Railway facts:** the live `mcp__TickTick__*` tools run the **deployed**
+   branch (confirm which branch + whether autodeploy is on); every redeploy
+   re-runs startup; `sleepApplication: false` + `numReplicas: 1` means it is not
+   sleeping or scaling to zero, so repeated re-inits are per-connection.
+
 ---
 
 ## 5. How the code picks V1 vs V2
