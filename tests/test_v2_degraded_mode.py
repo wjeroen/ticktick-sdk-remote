@@ -135,7 +135,7 @@ async def test_initialize_raises_only_when_both_apis_dead(patched_clients):
 
 
 async def test_initialize_falls_back_to_session_token_when_password_fails(patched_clients):
-    """Password sign-on fails → token+cookie env vars → V2 recovers."""
+    """Cookie-first: token+cookie env vars bring V2 up (password never needed)."""
     v1, v2 = patched_clients
     v2.authenticate.side_effect = TickTickSessionError("need_captcha")
     # After set_session is called, treat the V2 client as authenticated so
@@ -346,7 +346,7 @@ async def test_initialize_cookies_without_t_fails_gracefully(patched_clients):
 
 
 async def test_initialize_token_fallback_failure_keeps_v2_unavailable(patched_clients):
-    """Password fails AND token fallback fails → V2 stays unavailable, server still starts on V1."""
+    """Stale cookie AND password sign-on fails → V2 stays unavailable, server still starts on V1."""
     v1, v2 = patched_clients
     v2.authenticate.side_effect = TickTickSessionError("need_captcha")
     v2.get_user_status.side_effect = TickTickSessionError("token stale (401)")
@@ -368,4 +368,78 @@ async def test_initialize_token_fallback_failure_keeps_v2_unavailable(patched_cl
 
     assert api._router.has_v1 is True
     assert v2._session_handler.clear_session.called
-    assert "token fallback failed" in (api._v2_unavailable_reason or "")
+    # Cookie-first: a stale (401) cookie falls through to password sign-on, and
+    # the combined reason names both failures.
+    reason = api._v2_unavailable_reason or ""
+    assert "cookie fallback failed" in reason
+    assert "password sign-on failed" in reason
+
+
+async def test_cookie_is_tried_before_password_and_password_is_skipped(patched_clients):
+    """Cookie-first: when the cookie works, /user/signon is never called."""
+    v1, v2 = patched_clients
+    # If password sign-on were attempted it would "succeed" here — prove it
+    # isn't called at all because the cookie path wins first.
+    v2.authenticate = AsyncMock(side_effect=AssertionError("password must not be tried"))
+
+    def _mark_authed(_session):
+        v2.is_authenticated = True
+        v2.verify_authentication = AsyncMock(return_value=True)
+    v2.set_session.side_effect = _mark_authed
+
+    api = UnifiedTickTickAPI(
+        client_id="cid",
+        client_secret="sec",
+        v1_access_token="v1tok",
+        username="user@example.com",
+        password="pw",
+        v2_cookies="t=GOOD_TOKEN; AWSALB=z",
+    )
+
+    await api.initialize()
+
+    assert api._router.has_v2 is True
+    assert api._v2_auth_method == "cookie"
+    v2.authenticate.assert_not_called()  # password sign-on skipped entirely
+
+
+async def test_cookie_rate_limited_does_not_trigger_password_signon(patched_clients):
+    """A 429 verifying the cookie must NOT fall through to /user/signon.
+
+    Otherwise we pour more failed logins onto the throttle that's already
+    blocking us. V2 stays degraded with a rate-limit reason, password untouched.
+    """
+    from ticktick_sdk.exceptions import TickTickRateLimitError
+
+    v1, v2 = patched_clients
+    v2.authenticate = AsyncMock(side_effect=AssertionError("password must not be tried"))
+    v2.get_user_status.side_effect = TickTickRateLimitError(
+        "Rate limit exceeded", details={"api_version": "v2", "endpoint": "/user/status"}
+    )
+
+    # set_session marks the client authed; clear_session (called when the 429
+    # fails verification) must flip it back, like the real session handler does.
+    def _mark_authed(_session):
+        v2.is_authenticated = True
+    v2.set_session.side_effect = _mark_authed
+
+    def _clear():
+        v2.is_authenticated = False
+    v2._session_handler.clear_session.side_effect = _clear
+
+    api = UnifiedTickTickAPI(
+        client_id="cid",
+        client_secret="sec",
+        v1_access_token="v1tok",
+        username="user@example.com",
+        password="pw",
+        v2_cookies="t=MAYBE_FINE; AWSALB=z",
+    )
+
+    await api.initialize()
+
+    assert api._router.has_v1 is True
+    assert api._router.has_v2 is False
+    v2.authenticate.assert_not_called()  # the whole point: no signon fuel
+    reason = (api._v2_unavailable_reason or "").lower()
+    assert "rate-limited" in reason or "429" in reason

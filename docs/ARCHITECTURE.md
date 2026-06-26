@@ -313,43 +313,54 @@ fallback below, which sidesteps 2FA entirely.
 
 `UnifiedTickTickAPI._authenticate_v2()` is built to **never crash the server**.
 It records a reason/cooldown and returns; `initialize()` then decides the run
-mode. The chain:
+mode. The chain is **cookie-first**: the cookie path makes no login call so it
+can't trip the anti-bot, whereas password sign-on from a datacenter IP is the
+fragile, anti-bot-prone path and is only a fallback.
 
-1. **Password sign-on** (Step 1). If `TICKTICK_USERNAME` + `TICKTICK_PASSWORD`
-   are set, try `signon`. On success, cache `inbox_id`, mark
-   `_v2_auth_method = "password"`, done.
-   On *any* failure (captcha, wrong password, 2FA, network), record the reason,
-   set `_v2_unavailable_until = now + 6h` (`_V2_PASSWORD_COOLDOWN`), and log an
-   actionable error naming `need_captcha`, `TICKTICK_DEVICE_ID`, and the cookie
-   fallback. The cooldown is **in-memory only and informational** — a redeploy
-   always resets it; the server only attempts sign-on at startup today.
+1. **Cookie / pre-obtained session** (`_try_v2_cookie`, Step 1). If
+   `TICKTICK_V2_COOKIES` (and/or `TICKTICK_V2_TOKEN`) is set, build a
+   `SessionToken` from it instead of logging in. The cookie header is parsed with
+   `_parse_cookie_header()` (tolerant of whitespace, trailing `;`, bare names);
+   the session token is the `t` cookie by default (`TICKTICK_V2_TOKEN` overrides
+   it) and is also force-set as the `t` cookie. Verify by hitting
+   `GET /user/status`, which both proves the session is live and recovers the
+   real `inbox_id` / `user_id`. On success, mark `_v2_auth_method = "cookie"` and
+   we're done **without ever calling `/user/signon`**. On failure, clear the
+   partial session and classify (`_is_rate_limit_error()`):
+   - **`429` (rate-limited):** a throttle, *not* proof of a bad cookie. Record a
+     rate-limit reason and **do NOT fall through to password sign-on** (that would
+     only add more failed logins to the throttle). Stay degraded until it clears.
+   - **`401` / other (stale or unusable cookie):** fall through to password.
+   - **no `t` cookie in the header:** record that and fall through to password.
 
-2. **Pre-obtained session token fallback** (Step 2). If `TICKTICK_V2_COOKIES`
-   (and/or `TICKTICK_V2_TOKEN`) is set, build a `SessionToken` from it instead
-   of logging in — so it **cannot** trigger `need_captcha` (no login happens).
-   The cookie header is parsed with `_parse_cookie_header()` (tolerant of
-   whitespace, trailing `;`, bare names). The session token is the `t` cookie by
-   default; `TICKTICK_V2_TOKEN` only overrides it. The token is also force-set as
-   the `t` cookie. The fallback is then **verified by hitting `GET /user/status`**,
-   which both proves the session is live and recovers the real `inbox_id` /
-   `user_id` (the hand-built `SessionToken` didn't have them). On success, mark
-   `_v2_auth_method = "cookie"`. If the verification fails, clear the partial
-   session (so `router.has_v2` is false) and record the reason. **The reason is
-   classified, not assumed:** a `401` means the cookie is genuinely stale
-   ("refresh it"), but a `429` means TickTick is **rate-limiting** the request
-   (`_is_rate_limit_error()`), which is a throttle, *not* proof of a bad cookie.
-   The two get different log lines, a different `_v2_unavailable_reason`, and a
-   different `auth_status` verdict, because the operator action is opposite:
-   refresh-the-cookie for 401, but stop-restarting-and-wait for 429 (refreshing
-   the cookie does nothing while throttled). The most common 429 cause is a
-   sign-on storm: the server re-runs password sign-on on **every** restart (no
-   session persistence yet, see TODO), so frequent restarts (Railway
-   app-sleeping, a crash loop, repeated redeploys) hammer `/user/signon` and trip
-   the anti-bot throttle, which then also blocks the cookie's `/user/status`
-   verification.
+2. **Password sign-on** (`_try_v2_password`, Step 2). Reached only when no cookie
+   is configured, or the cookie was stale/unusable (and not rate-limited). If
+   `TICKTICK_USERNAME` + `TICKTICK_PASSWORD` are set, try `signon`. On success,
+   cache `inbox_id`, mark `_v2_auth_method = "password"`. On *any* failure
+   (captcha, wrong password, 2FA, 429, network), record the reason and set
+   `_v2_unavailable_until = now + 6h` (`_V2_PASSWORD_COOLDOWN`, in-memory and
+   informational; a redeploy resets it).
 
-3. **No fallback configured** → record the password-failure reason and bail (V2
-   stays unavailable).
+3. **Both failed / nothing configured** → record a combined reason and bail (V2
+   stays unavailable; the server runs V1-only).
+
+The `auth_status` verdict and the per-call degraded error both classify `429`
+(rate-limited: "stop restarting and wait, do not refresh the cookie") vs `401`
+(stale: "refresh `TICKTICK_V2_COOKIES`"), because the operator action is
+opposite.
+
+> **Why cookie-first matters (2026-06-26 incident).** Password sign-on from
+> Railway is rejected by TickTick's anti-bot (it returned `need_captcha`,
+> then `username_password_not_match`, then `429` at different times). Worse, the
+> server re-runs `_authenticate_v2()` **on every new MCP session** — the
+> streamable-http session manager enters the server lifespan per session, not
+> once per process (visible in logs as repeated "Initializing TickTick MCP
+> Server" with no new container start). So a busy day meant dozens of failed
+> logins, which escalated TickTick to a `429` that *also* blocked the cookie's
+> `/user/status` check. Cookie-first stops the bleeding: when the cookie is
+> valid, `/user/signon` is never called, so the anti-bot is never provoked. The
+> remaining multiplier (per-session re-init) is tracked in TODO as the "build the
+> client once per process" fix.
 
 `initialize()` then checks the router:
 
@@ -836,6 +847,18 @@ map of module name → tool names, with eight modules: `tasks`, `projects`,
 var (a comma-separated allowlist). At startup the server registers everything,
 then **removes** the tools not in the allowlist (via the FastMCP tool manager).
 So filtering is post-registration removal, driven by that env var.
+
+### Tool API tags
+
+`_annotate_tool_apis()` (called from `main()` before filtering) appends an `[API:
+…]` tag to each tool's description so an MCP client can tell, **before calling**,
+whether a tool needs V2 or also works in V1-only degraded mode. Three buckets,
+matching the [§5](#5-how-the-code-picks-v1-vs-v2) routing: `V1+V2` (the three
+read tools with a V1 path — `list_projects`, `get_project`, `get_task`), the
+`diagnostic` `auth_status`, and `V2-only` (the other 40). It mutates
+`mcp._tool_manager` tool descriptions in place and is idempotent (skips a tool
+already carrying an `[API:` tag). Keep `_V1_CAPABLE_TOOLS` in sync with the
+routing if you add V1 fallbacks.
 
 ### Bearer auth (optional)
 

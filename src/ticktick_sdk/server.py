@@ -3265,6 +3265,46 @@ async def ticktick_habit_checkins(params: HabitCheckinsInput, ctx: Context) -> s
 # =============================================================================
 
 
+# Tools that have a V1 (OAuth) path and therefore still work when V2 (session
+# auth) is degraded. Everything else is V2-only. Keep this in sync with the
+# routing in unified/api.py (see ARCHITECTURE.md §5).
+_V1_CAPABLE_TOOLS = frozenset({
+    "ticktick_list_projects",
+    "ticktick_get_project",
+    "ticktick_get_task",  # V1 path works only when a project_id is supplied
+})
+# Diagnostic tool that is meant to work even while everything else is degraded.
+_ALWAYS_AVAILABLE_TOOLS = frozenset({
+    "ticktick_auth_status",
+})
+
+
+def _annotate_tool_apis() -> None:
+    """Tag each tool's description with which API backs it.
+
+    Lets an MCP client (e.g. Claude) tell *before calling* whether a tool needs
+    V2 (session) auth, or whether it also works in V1-only degraded mode. The
+    classification mirrors the routing in ``unified/api.py`` (ARCHITECTURE.md §5).
+    Idempotent: re-running won't double-tag.
+    """
+    try:
+        tools = mcp._tool_manager.list_tools()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Could not annotate tool APIs: %s", e)
+        return
+
+    for tool in tools:
+        if tool.description and "[API:" in tool.description:
+            continue  # already tagged
+        if tool.name in _ALWAYS_AVAILABLE_TOOLS:
+            tag = "[API: diagnostic, always available]"
+        elif tool.name in _V1_CAPABLE_TOOLS:
+            tag = "[API: V1+V2, works even in V1-only degraded mode]"
+        else:
+            tag = "[API: V2-only, unavailable in V1-only degraded mode]"
+        tool.description = f"{tool.description.rstrip()}\n\n{tag}" if tool.description else tag
+
+
 def _apply_tool_filtering():
     """
     Apply tool filtering based on TICKTICK_ENABLED_TOOLS environment variable.
@@ -3305,6 +3345,7 @@ def _apply_tool_filtering():
 
 def main():
     """Main entry point for the TickTick MCP server."""
+    _annotate_tool_apis()
     _apply_tool_filtering()
 
     bearer_token = os.environ.get("MCP_BEARER_TOKEN")

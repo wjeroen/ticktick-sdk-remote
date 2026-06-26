@@ -64,7 +64,7 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 | `TICKTICK_HOST` | No | API host: `ticktick.com` (default) or `dida365.com` (Chinese version) |
 | `TICKTICK_TIMEOUT` | No | Request timeout in seconds (default: `30`) |
 | `TICKTICK_DEVICE_ID` | **Strongly recommended** | Stable device id for V2 API (24-char hex). If unset, a fresh random id is generated every redeploy — see note below. |
-| `TICKTICK_V2_COOKIES` | No (fallback) | Full Cookie header string from a logged-in TickTick browser tab. Only used if the username+password login fails (e.g. captcha-walled). The session token (`t` cookie) is extracted from it automatically. See "If V2 sign-on gets captcha-walled" below. |
+| `TICKTICK_V2_COOKIES` | Recommended | Full Cookie header string from a logged-in TickTick browser tab. **Tried first** (before password sign-on) because it makes no login call and so can't trip TickTick's anti-bot. Strongly recommended on a server; password sign-on from a datacenter IP is unreliable. The session token (`t` cookie) is extracted from it automatically. See "If V2 sign-on gets captcha-walled" below. |
 | `TICKTICK_V2_TOKEN` | No | Optional override for the session token — normally unnecessary, it's auto-extracted from the `t` cookie in `TICKTICK_V2_COOKIES`. |
 | `MCP_BEARER_TOKEN` | No | Bearer token for server authentication — see note below |
 | `PORT` | No | Server port (default: `8000`, Railway sets this automatically) |
@@ -313,7 +313,7 @@ TickTick's anti-bot system has flagged your password login (usually because too 
 
 1. **Wait it out + set `TICKTICK_DEVICE_ID`.** Stop redeploying for several hours (the flag usually clears on its own). Then set `TICKTICK_DEVICE_ID` to a stable 24-char hex string in Railway so future redeploys don't look like new devices, and redeploy once.
 
-2. **If it still won't lift: use the V2 session cookie fallback** (`TICKTICK_V2_COOKIES`). This makes the server skip `/user/signon` entirely and reuse a session you've already established in your browser. It can't trigger `need_captcha` because no login happens. See the next section for how to grab it.
+2. **Best fix: set the V2 session cookie** (`TICKTICK_V2_COOKIES`). The server tries this **first**, before any password login, so when it's set and valid the server skips `/user/signon` entirely and reuses a session you've already established in your browser. It can't trigger `need_captcha` or a 429 because no login happens. See the next section for how to grab it.
 
 ### Grabbing `TICKTICK_V2_COOKIES` from a browser
 
