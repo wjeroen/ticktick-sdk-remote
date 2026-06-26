@@ -333,8 +333,20 @@ mode. The chain:
    the `t` cookie. The fallback is then **verified by hitting `GET /user/status`**,
    which both proves the session is live and recovers the real `inbox_id` /
    `user_id` (the hand-built `SessionToken` didn't have them). On success, mark
-   `_v2_auth_method = "cookie"`. If `/user/status` 401s, the cookie is stale —
-   clear the partial session (so `router.has_v2` is false) and record the reason.
+   `_v2_auth_method = "cookie"`. If the verification fails, clear the partial
+   session (so `router.has_v2` is false) and record the reason. **The reason is
+   classified, not assumed:** a `401` means the cookie is genuinely stale
+   ("refresh it"), but a `429` means TickTick is **rate-limiting** the request
+   (`_is_rate_limit_error()`), which is a throttle, *not* proof of a bad cookie.
+   The two get different log lines, a different `_v2_unavailable_reason`, and a
+   different `auth_status` verdict, because the operator action is opposite:
+   refresh-the-cookie for 401, but stop-restarting-and-wait for 429 (refreshing
+   the cookie does nothing while throttled). The most common 429 cause is a
+   sign-on storm: the server re-runs password sign-on on **every** restart (no
+   session persistence yet, see TODO), so frequent restarts (Railway
+   app-sleeping, a crash loop, repeated redeploys) hammer `/user/signon` and trip
+   the anti-bot throttle, which then also blocks the cookie's `/user/status`
+   verification.
 
 3. **No fallback configured** → record the password-failure reason and bail (V2
    stays unavailable).
@@ -362,7 +374,17 @@ It returns booleans + derived facts only — `v1_ok`, `v2_ok`, `v2_auth_method`
 (`"password"`/`"cookie"`/`None`), `v2_unavailable_reason`, `v2_cooldown_until`,
 plus the error strings. It exposes **no** secret values. The tool layer adds
 device-id validity flags and a masked device id, and writes a plain-English
-verdict with the exact env var to fix.
+verdict with the exact env var to fix. The verdict **distinguishes a 429
+(rate-limit) from a stale cookie**: when the reason looks rate-limited it tells
+the operator to stop restarting and wait (and explicitly *not* to refresh the
+cookie yet), rather than the default "refresh `TICKTICK_V2_COOKIES`" advice.
+
+The same recorded reason is also copied onto the V2 client as
+`client.degraded_reason` in `initialize()`, so the `TickTickAuthenticationError`
+raised on **every** V2 call while degraded states the specific cause (e.g.
+"rate-limited (HTTP 429)") instead of the old generic "sign-on failed (captcha /
+device-id / expired session)" list. This is what an MCP consumer (Claude) sees
+when it calls a V2-routed tool in degraded mode.
 
 ---
 

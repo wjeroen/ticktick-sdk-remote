@@ -305,6 +305,8 @@ V2 will be unavailable until ~<timestamp> UTC (6h cooldown).
 
 TickTick's anti-bot system has flagged your password login (usually because too many login attempts came from your Railway datacenter IP in a short window — e.g. a crash loop, or many redeploys in a row). The server keeps running in **V1-only degraded mode** — task/project tools still work, but tags/folders/habits/focus/subtasks return a "V2 unavailable" error.
 
+> **Note:** the same anti-bot throttle can also show up as **`HTTP 429 Too Many Requests`** on `/user/signon` (instead of `need_captcha`), and when it does it **also** throttles the cookie fallback's `/user/status` check, so even a fresh `TICKTICK_V2_COOKIES` can fail to verify. If `ticktick_auth_status` says "rate-limited (HTTP 429)", treat it as the same problem as `need_captcha`: the fix is to **stop the repeated sign-ons** (see "least techy" steps below and the restart-cause investigation), **not** to refresh the cookie.
+
 > **Tip:** call the **`ticktick_auth_status`** tool any time to get a live, plain-English read on what's authenticated, why V2 is down, whether your device id is valid, and the exact env var to fix — without exposing any secrets.
 
 **What to do, in order of "least techy" → "most reliable":**
@@ -328,7 +330,10 @@ You only need to do this if `need_captcha` is blocking the normal password login
 7. That's it — no need to isolate the token by hand. (The cookie string **must** contain a `t=...` entry; that's the session token. If for some reason it doesn't, you can set `TICKTICK_V2_TOKEN` separately to override.)
 8. In Railway, set both env vars and redeploy. Logs should show `V2 authenticated via pre-obtained session token (fallback)`.
 
-The token typically lasts months. If you ever see `V2 token fallback also failed` in the logs, the token has gone stale — repeat the steps above to get a fresh one.
+The token typically lasts months. If you ever see `V2 token fallback also failed` in the logs, check **why** before re-grabbing the cookie:
+
+- **`... rate-limited (HTTP 429) ...`** means TickTick is **throttling** you, not that the cookie is stale. Re-grabbing the cookie will **not** help while throttled. This usually means the server is restarting too often and re-running sign-on each time (Railway app-sleeping, a crash loop, or repeated redeploys). Stop redeploying, fix the restart cause, and let the throttle clear (can take hours). Run `ticktick_auth_status` to confirm the verdict.
+- **`... 401 ...` / "probably stale"** means the session really has expired. Repeat the steps above to get a fresh cookie.
 
 ### "V1 OAuth token expired or invalid"
 - Your `TICKTICK_ACCESS_TOKEN` has expired (TickTick OAuth tokens last ~6 months) or been revoked

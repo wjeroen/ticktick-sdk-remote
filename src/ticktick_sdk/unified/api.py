@@ -27,6 +27,7 @@ from ticktick_sdk.exceptions import (
     TickTickForbiddenError,
     TickTickNotFoundError,
     TickTickQuotaExceededError,
+    TickTickRateLimitError,
 )
 from ticktick_sdk.models import (
     Column,
@@ -64,6 +65,24 @@ _BATCH_NOT_FOUND_ERRORS = frozenset({
 _BATCH_QUOTA_ERRORS = frozenset({
     "EXCEED_QUOTA",
 })
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    """Was this failure a rate-limit / throttle (HTTP 429) rather than bad auth?
+
+    The V2 password and cookie paths surface 429 differently: the cookie
+    verification raises ``TickTickRateLimitError``, while password sign-on wraps
+    it as an auth error that still carries ``status_code=429`` in details. We
+    treat either as a throttle, because the operator guidance is the opposite of
+    a stale session ("wait / stop restarting", not "refresh the cookie").
+    """
+    if isinstance(error, TickTickRateLimitError):
+        return True
+    details = getattr(error, "details", None)
+    if isinstance(details, dict) and details.get("status_code") == 429:
+        return True
+    text = str(error).lower()
+    return "429" in text or "rate limit" in text or "too many requests" in text
 
 
 def _check_batch_response_errors(
@@ -359,6 +378,12 @@ class UnifiedTickTickAPI:
 
         await self._authenticate_v2()
 
+        # Surface *why* V2 is down on the client itself, so the degraded-mode
+        # error raised on each V2 call can be specific (rate-limited vs stale
+        # session) instead of listing every possible cause. None on success.
+        if self._v2_client is not None:
+            self._v2_client.degraded_reason = self._v2_unavailable_reason
+
         # --- Router + verification ----------------------------------------
         self._router = APIRouter(
             v1_client=self._v1_client,
@@ -444,7 +469,14 @@ class UnifiedTickTickAPI:
             except Exception as e:
                 # Includes TickTickSessionError for need_captcha, 2FA, wrong
                 # password, etc., plus any network failure.
-                password_failed_reason = str(e)
+                if _is_rate_limit_error(e):
+                    password_failed_reason = (
+                        f"rate-limited (HTTP 429) on /user/signon — TickTick is "
+                        f"throttling logins, usually because of too many sign-on "
+                        f"attempts (e.g. the server restarting often) ({e})"
+                    )
+                else:
+                    password_failed_reason = str(e)
                 cooldown_until = datetime.now(timezone.utc) + self._V2_PASSWORD_COOLDOWN
                 self._v2_unavailable_until = cooldown_until
                 logger.error(
@@ -525,21 +557,47 @@ class UnifiedTickTickAPI:
                 )
                 return
             except Exception as e:
-                logger.error(
-                    "V2 token fallback also failed: %s. The session in "
-                    "TICKTICK_V2_COOKIES is probably stale — refresh it from a "
-                    "logged-in TickTick browser tab.",
-                    e,
-                )
+                rate_limited = _is_rate_limit_error(e)
+                if rate_limited:
+                    logger.error(
+                        "V2 cookie fallback could not be verified: rate-limited "
+                        "(HTTP 429) on /user/status (%s). This is a THROTTLE, not "
+                        "proof of a stale cookie — the session in "
+                        "TICKTICK_V2_COOKIES may still be valid, we just can't "
+                        "confirm it while throttled. The usual cause is too many "
+                        "sign-on attempts (e.g. the server restarting and "
+                        "re-logging-in repeatedly). Refreshing the cookie will NOT "
+                        "help while you're being throttled — instead stop "
+                        "restarting/redeploying, let the limit clear, then retry.",
+                        e,
+                    )
+                else:
+                    logger.error(
+                        "V2 token fallback also failed: %s. The session in "
+                        "TICKTICK_V2_COOKIES is probably stale — refresh it from a "
+                        "logged-in TickTick browser tab.",
+                        e,
+                    )
                 # Clear the partially-set session so router.has_v2 = False
                 try:
                     self._v2_client._session_handler.clear_session()
                 except Exception:
                     pass
-                self._v2_unavailable_reason = (
-                    f"password failed ({password_failed_reason}) "
-                    f"and token fallback failed ({e})"
-                )
+                if rate_limited:
+                    self._v2_unavailable_reason = (
+                        f"V2 is rate-limited (HTTP 429): the cookie fallback was "
+                        f"throttled on /user/status before it could be verified "
+                        f"({e}), and password sign-on was also throttled "
+                        f"({password_failed_reason}). This is almost always too "
+                        f"many sign-on attempts (frequent restarts) — the cookie "
+                        f"itself may be fine. Stop restarting and let the throttle "
+                        f"clear before refreshing anything."
+                    )
+                else:
+                    self._v2_unavailable_reason = (
+                        f"password failed ({password_failed_reason}) "
+                        f"and token fallback failed ({e})"
+                    )
                 return
 
         # No fallback configured — record reason and bail.

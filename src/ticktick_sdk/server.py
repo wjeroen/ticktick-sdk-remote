@@ -2341,7 +2341,25 @@ def _build_auth_verdict(
         parts.append(f"All good — V1 and V2 both authenticated (V2 via {v2_auth_method}).")
     elif v1_ok and not v2_ok:
         detail = v2_error or v2_reason or "unknown reason"
-        if not v2_cookies_configured:
+        detail_l = detail.lower()
+        rate_limited = (
+            "429" in detail
+            or "rate-limited" in detail_l
+            or "rate limit" in detail_l
+            or "too many" in detail_l
+        )
+        if rate_limited:
+            parts.append(
+                "DEGRADED (V1-only): V2 is being RATE-LIMITED by TickTick (HTTP 429) — "
+                f"{detail} This is almost always too many sign-on attempts (the server "
+                "restarting/redeploying often and re-logging-in each time), NOT a stale "
+                "cookie. Do NOT refresh TICKTICK_V2_COOKIES yet — it won't help while "
+                "you're throttled. Instead: stop redeploying, find out why the server "
+                "keeps restarting (e.g. Railway app-sleeping or a crash loop), and let "
+                "the throttle clear (can take hours). Only if V2 then fails with a "
+                "401/expired error should you refresh the cookie."
+            )
+        elif not v2_cookies_configured:
             parts.append(
                 "DEGRADED (V1-only): V2 is down — "
                 f"{detail}. Fix: set TICKTICK_V2_COOKIES from a logged-in TickTick "

@@ -47,6 +47,11 @@ class BaseTickTickClient(ABC):
         self._user_agent = user_agent
         self._client: httpx.AsyncClient | None = None
         self._is_authenticated = False
+        # When this client can't authenticate, the unified layer records a
+        # human-readable reason here so the degraded-mode error raised on each
+        # call can say *why* (rate-limited vs stale session vs captcha) instead
+        # of guessing. None when authenticated or when no reason was recorded.
+        self.degraded_reason: str | None = None
 
     # =========================================================================
     # Abstract Properties
@@ -345,14 +350,29 @@ class BaseTickTickClient(ABC):
         """
         if require_auth and not self.is_authenticated:
             if self.api_version == APIVersion.V2:
+                if self.degraded_reason:
+                    # The unified layer recorded exactly why V2 is down, so be
+                    # specific instead of listing every possible cause.
+                    message = (
+                        f"TickTick V2 is unavailable: {self.degraded_reason} "
+                        "The server is running in V1-only degraded mode, so "
+                        "V2-routed tools (task search/listing, account status, "
+                        "tags, folders, habits, focus, subtasks) won't work "
+                        "until V2 recovers. If you are not the host, relay this "
+                        "to whoever is."
+                    )
+                else:
+                    message = (
+                        "TickTick V2 is unavailable — sign-on failed (captcha / "
+                        "anti-bot throttle, an invalid TICKTICK_DEVICE_ID, or an "
+                        "expired session) so the server is running in V1-only "
+                        "degraded mode. The person hosting this server can set "
+                        "TICKTICK_V2_COOKIES (from a logged-in browser, see README) "
+                        "to bypass V2 sign-on, or redeploy to retry. If you are not "
+                        "the host, relay this to whoever is."
+                    )
                 raise TickTickAuthenticationError(
-                    "TickTick V2 is unavailable — sign-on failed (captcha / "
-                    "anti-bot throttle, an invalid TICKTICK_DEVICE_ID, or an "
-                    "expired session) so the server is running in V1-only "
-                    "degraded mode. The person hosting this server can set "
-                    "TICKTICK_V2_COOKIES (from a logged-in browser, see README) "
-                    "to bypass V2 sign-on, or redeploy to retry. If you are not "
-                    "the host, relay this to whoever is.",
+                    message,
                     details={"endpoint": endpoint, "api_version": "v2", "degraded": True},
                 )
             raise TickTickAuthenticationError(
