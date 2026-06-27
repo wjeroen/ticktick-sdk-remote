@@ -299,6 +299,19 @@ separate class). Caveat: `signon` is the most anti-bot-scrutinized endpoint and 
 hit from whatever IP the server runs on, so even impersonated it's the least likely
 to pass from a datacenter IP; the cookie path is the surer bet.
 
+> **You cannot validate impersonation from a Claude Code remote/web sandbox.**
+> Those sandboxes send all outbound HTTPS through a **TLS-re-terminating** egress
+> proxy (the one with the CA bundle at `/root/.ccr/ca-bundle.crt`). Two separate
+> reasons make the test impossible there: (1) `curl_cffi`'s bundled BoringSSL
+> won't handshake through that proxy and fails with `curl: (35) TLS connect
+> error ... invalid library` for *every* host (confirmed 2026-06-27, even against
+> `example.com` with the CA bundle passed explicitly); and (2) even if it could,
+> the proxy re-signs the connection, so TickTick would see the *proxy's*
+> fingerprint, not Chrome's. Plain `httpx` still works in the sandbox (it trusts
+> the proxy CA via `REQUESTS_CA_BUNDLE`) and does reproduce the V2 `429`, but that
+> `429` reflects the proxy's fingerprint, not `httpx`'s. **Validate impersonation
+> only on Railway (plain NAT egress) or a real local machine.**
+
 #### Device id (why it matters)
 
 `X-Device.id` must look like a MongoDB ObjectId (24 lowercase-hex chars).
@@ -463,6 +476,12 @@ Read this before theorizing. It would have saved two debugging sessions:
    branch (confirm which branch + whether autodeploy is on); every redeploy
    re-runs startup; `sleepApplication: false` + `numReplicas: 1` means it is not
    sleeping or scaling to zero, so repeated re-inits are per-connection.
+8. **Do not try to test browser impersonation from a Claude Code remote/web
+   sandbox.** Its egress proxy re-terminates TLS, so `curl_cffi` can't even
+   handshake (`curl: (35) ... invalid library`) and TickTick would only ever see
+   the proxy's fingerprint anyway. Plain `httpx` does reproduce the V2 `429`
+   there, but that proves nothing about Chrome's fingerprint. Validate the fix on
+   Railway or a local machine. (Full explanation under §4 "V2 transport".)
 
 ---
 
