@@ -292,9 +292,12 @@ with browser impersonation (it replays a real Chrome TLS/JA3 + HTTP/2 fingerprin
 dropping our own `User-Agent` so the profile's matching UA is used. The profile is
 `TICKTICK_V2_IMPERSONATE` (default `chrome`; `off`/`none` forces plain httpx). If
 `curl_cffi` isn't importable it logs a warning and falls back to httpx. V1 always
-uses httpx (the official OAuth API has no such wall). Note: this is the cookie/data
-path; password `signon` goes through `SessionHandler` separately and isn't
-impersonated yet (cookie-first makes that moot in practice).
+uses httpx (the official OAuth API has no such wall). **Both V2 paths are
+impersonated:** the cookie/data path (`TickTickV2Client._send_http`) and password
+`signon` (`SessionHandler._post`, which has its own curl_cffi path since it's a
+separate class). Caveat: `signon` is the most anti-bot-scrutinized endpoint and is
+hit from whatever IP the server runs on, so even impersonated it's the least likely
+to pass from a datacenter IP; the cookie path is the surer bet.
 
 #### Device id (why it matters)
 

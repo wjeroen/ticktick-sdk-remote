@@ -641,3 +641,69 @@ async def test_v2_send_http_falls_back_to_httpx_when_impersonation_off(monkeypat
     monkeypatch.setattr(base_mod.BaseTickTickClient, "_send_http", _fake_base_send)
     await c._send_http("GET", "/user/status", None, None, {})
     assert called.get("used_base") is True
+
+
+async def test_signon_post_uses_impersonation_when_enabled():
+    """Sign-on (SessionHandler) also routes through curl_cffi when enabled, and
+    drops our User-Agent so the profile's UA is used."""
+    from ticktick_sdk.api.v2.auth import SessionHandler
+
+    calls = {}
+
+    class _FakeResp:
+        status_code = 200
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            calls.update(method=method, url=url, **kwargs)
+            return _FakeResp()
+
+    h = SessionHandler(device_id="a" * 24)
+    h._impersonate = "chrome"
+    h._curl_session_cls = _FakeSession
+
+    resp = await h._post(
+        "https://api.ticktick.com/api/v2/user/signon",
+        {"wc": "true"},
+        {"username": "u", "password": "p"},
+        {"User-Agent": "Firefox", "X-Device": "{}"},
+    )
+
+    assert resp.status_code == 200
+    assert calls["method"] == "POST"
+    assert calls["impersonate"] == "chrome"
+    assert all(k.lower() != "user-agent" for k in calls["headers"])
+    assert calls["headers"]["X-Device"] == "{}"
+
+
+def test_extract_cookies_handles_httpx_and_curl_shapes():
+    from ticktick_sdk.api.v2.auth import SessionHandler
+
+    # curl_cffi style: .cookies is dict-like (no .jar)
+    class _CurlResp:
+        cookies = {"t": "TOK", "AWSALB": "x"}
+
+    assert SessionHandler._extract_cookies(_CurlResp())["t"] == "TOK"
+
+    # httpx style: .cookies.jar yields objects with .name/.value
+    class _C:
+        def __init__(self, n, v):
+            self.name, self.value = n, v
+
+    class _Jar:
+        def __iter__(self):
+            return iter([_C("t", "TOK2")])
+
+    class _Cookies:
+        jar = _Jar()
+
+    class _HttpxResp:
+        cookies = _Cookies()
+
+    assert SessionHandler._extract_cookies(_HttpxResp())["t"] == "TOK2"
