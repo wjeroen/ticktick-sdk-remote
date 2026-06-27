@@ -298,57 +298,74 @@ def _id_sort_key(task) -> tuple:
 # =============================================================================
 
 
-@asynccontextmanager
-async def lifespan(mcp: FastMCP) -> AsyncIterator[dict[str, Any]]:
-    """
-    Manage the TickTick client lifecycle.
+# A single shared TickTick client per process. With streamable-http, the MCP
+# SDK runs the server lifespan once *per session*, not once per process, so
+# building the client in the lifespan would re-authenticate on every connection
+# — the bug that turned a flaky login into a rate-limit ban. We build it once,
+# behind a lock, and reuse it across all sessions.
+_shared_client: TickTickClient | None = None
+_shared_client_lock = asyncio.Lock()
 
-    Initializes the client on startup and closes it on shutdown.
-    """
-    logger.info("Initializing TickTick MCP Server...")
 
-    # Warn early if device_id is ephemeral — every Railway redeploy will look
-    # like a brand-new device to TickTick, which can trigger captcha walls.
-    settings = get_settings()
-    # Validate the device id format. TickTick expects a 24-char lowercase-hex
-    # ObjectId; a malformed value (wrong length, non-hex chars, stray
-    # whitespace/quotes) can make V2 sign-on fail with misleading errors.
-    if not settings.device_id_looks_valid:
-        logger.warning(
-            "TICKTICK_DEVICE_ID=%r does NOT look like a valid 24-char hex "
-            "ObjectId (length=%d). TickTick V2 sign-on may reject it. Use a "
-            "24-character lowercase-hex value — generate one with: "
-            "python -c \"import os; print(os.urandom(12).hex())\".",
-            settings.device_id,
-            len(settings.device_id),
-        )
-    else:
-        logger.info("TICKTICK_DEVICE_ID format looks valid (24-char hex).")
+async def _get_or_create_client() -> TickTickClient:
+    """Return the process-wide TickTick client, building + connecting it once."""
+    global _shared_client
+    async with _shared_client_lock:
+        if _shared_client is not None and _shared_client.is_connected:
+            return _shared_client
 
-    if settings.device_id_is_ephemeral:
-        logger.warning(
-            "TICKTICK_DEVICE_ID is not set. A new device id was auto-generated "
-            "for this process: %s — every redeploy will produce a different id, "
-            "which makes TickTick's anti-bot system more likely to flag your "
-            "logins. Set TICKTICK_DEVICE_ID in Railway to this value (or any "
-            "stable 24-char hex string) to make logins look like a single "
-            "consistent device.",
-            settings.device_id,
-        )
+        settings = get_settings()
+        # Startup warnings — logged once, on the single build (not per session).
+        # TickTick expects a 24-char lowercase-hex ObjectId; a malformed value
+        # can make V2 sign-on fail with misleading errors.
+        if not settings.device_id_looks_valid:
+            logger.warning(
+                "TICKTICK_DEVICE_ID=%r does NOT look like a valid 24-char hex "
+                "ObjectId (length=%d). TickTick V2 sign-on may reject it. Use a "
+                "24-character lowercase-hex value, generate one with: "
+                "python -c \"import os; print(os.urandom(12).hex())\".",
+                settings.device_id,
+                len(settings.device_id),
+            )
+        else:
+            logger.info("TICKTICK_DEVICE_ID format looks valid (24-char hex).")
+        if settings.device_id_is_ephemeral:
+            logger.warning(
+                "TICKTICK_DEVICE_ID is not set. A new device id was auto-generated "
+                "for this process: %s. Every redeploy will produce a different id, "
+                "which makes TickTick's anti-bot system more likely to flag your "
+                "logins. Set TICKTICK_DEVICE_ID in Railway to this value (or any "
+                "stable 24-char hex string) to look like one consistent device.",
+                settings.device_id,
+            )
 
-    client: TickTickClient | None = None
-    try:
         client = TickTickClient.from_settings(settings)
         await client.connect()
-        logger.info("TickTick client connected successfully")
-        yield {"client": client}
-    except Exception as e:
-        logger.error("Failed to initialize TickTick client: %s", e)
-        raise
-    finally:
-        if client is not None:
-            await client.disconnect()
-            logger.info("TickTick client disconnected")
+        _shared_client = client
+        logger.info("TickTick client connected (shared, built once per process)")
+        return _shared_client
+
+
+@asynccontextmanager
+async def lifespan(mcp: FastMCP) -> AsyncIterator[dict[str, Any]]:
+    """Provide the shared TickTick client to each MCP session.
+
+    The MCP streamable-http manager enters this lifespan once *per session*. We
+    therefore do NOT build or tear down the client here (that would re-auth on
+    every connection); we reuse the process-wide client, and if V2 is currently
+    degraded we make a single backoff-gated re-auth attempt so a long-running
+    process self-heals when a throttle clears.
+    """
+    logger.info("Initializing TickTick MCP session...")
+    client = await _get_or_create_client()
+    # Health tick: cheap no-op when V2 is healthy or within the backoff window.
+    try:
+        await client.ensure_v2_fresh()
+    except Exception as e:  # never let a recovery attempt break a session
+        logger.warning("V2 re-auth attempt errored (continuing degraded): %s", e)
+    yield {"client": client}
+    # Intentionally no disconnect: the shared client lives for the process and is
+    # reused by later sessions; it is reclaimed when the process exits.
 
 
 # Initialize FastMCP server

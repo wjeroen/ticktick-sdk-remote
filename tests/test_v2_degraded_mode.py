@@ -12,12 +12,14 @@ back in.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from ticktick_sdk.exceptions import (
     TickTickConfigurationError,
+    TickTickRateLimitError,
     TickTickSessionError,
 )
 from ticktick_sdk.unified.api import UnifiedTickTickAPI, _parse_cookie_header
@@ -443,3 +445,126 @@ async def test_cookie_rate_limited_does_not_trigger_password_signon(patched_clie
     v2.authenticate.assert_not_called()  # the whole point: no signon fuel
     reason = (api._v2_unavailable_reason or "").lower()
     assert "rate-limited" in reason or "429" in reason
+
+
+# =============================================================================
+# ensure_v2_fresh() — backoff-gated on-demand re-auth (recovery without redeploy)
+# =============================================================================
+
+
+def _degraded_cookie_api(patched_clients, status_side_effect):
+    """Build (not yet initialized) an api whose cookie verification fails per
+    `status_side_effect`. set_session marks authed; clear_session unmarks it."""
+    v1, v2 = patched_clients
+    v2.get_user_status.side_effect = status_side_effect
+
+    def _mark_authed(_session):
+        v2.is_authenticated = True
+    v2.set_session.side_effect = _mark_authed
+
+    def _clear():
+        v2.is_authenticated = False
+    v2._session_handler.clear_session.side_effect = _clear
+
+    api = UnifiedTickTickAPI(
+        client_id="cid",
+        client_secret="sec",
+        v1_access_token="v1tok",
+        username="user@example.com",
+        password="pw",
+        v2_cookies="t=COOKIE",
+    )
+    return api, v1, v2
+
+
+async def test_ensure_v2_fresh_is_noop_when_healthy(patched_clients):
+    """When V2 is up, ensure_v2_fresh must not re-authenticate or ping."""
+    api, v1, v2 = await _init_cookie_authed_api(patched_clients)
+    assert api._router.has_v2 is True
+    v2.set_session.reset_mock()
+    v2.get_user_status.reset_mock()
+
+    await api.ensure_v2_fresh()
+
+    v2.set_session.assert_not_called()
+    v2.get_user_status.assert_not_called()
+
+
+async def test_ensure_v2_fresh_respects_backoff(patched_clients):
+    """A second attempt within the backoff window must not hit TickTick again."""
+    api, v1, v2 = _degraded_cookie_api(
+        patched_clients, TickTickRateLimitError("Rate limit exceeded")
+    )
+    await api.initialize()
+    assert api._router.has_v2 is False
+    calls_after_init = v2.get_user_status.call_count  # the one init attempt
+
+    await api.ensure_v2_fresh()  # immediately after → inside backoff → skip
+
+    assert v2.get_user_status.call_count == calls_after_init
+    assert api._router.has_v2 is False
+
+
+async def test_ensure_v2_fresh_recovers_when_throttle_clears(patched_clients):
+    """Once the backoff elapses and the throttle is gone, V2 comes back, no redeploy."""
+    # First /user/status 429 (init, degraded); second succeeds (throttle cleared).
+    api, v1, v2 = _degraded_cookie_api(
+        patched_clients,
+        [
+            TickTickRateLimitError("Rate limit exceeded"),
+            {"inboxId": "inbox123", "userId": "u1"},
+        ],
+    )
+    await api.initialize()
+    assert api._router.has_v2 is False
+
+    # Simulate the backoff window having elapsed since the init attempt.
+    api._last_v2_reauth = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+    await api.ensure_v2_fresh()
+
+    assert api._router.has_v2 is True
+    assert api._v2_auth_method == "cookie"
+    assert api.inbox_id == "inbox123"
+
+
+# =============================================================================
+# server: client is built once per process, not per MCP session
+# =============================================================================
+
+
+async def test_server_builds_client_once_per_process(monkeypatch):
+    """_get_or_create_client reuses one client across calls (the per-session
+    lifespan must NOT re-build/re-auth on every connection)."""
+    import ticktick_sdk.server as server
+
+    built = {"count": 0}
+
+    def _fake_from_settings(settings):
+        built["count"] += 1
+        c = MagicMock()
+        c.is_connected = False
+
+        async def _connect():
+            c.is_connected = True
+
+        c.connect = AsyncMock(side_effect=_connect)
+        c.ensure_v2_fresh = AsyncMock()
+        return c
+
+    fake_settings = MagicMock()
+    fake_settings.device_id_looks_valid = True
+    fake_settings.device_id_is_ephemeral = False
+
+    monkeypatch.setattr(server, "_shared_client", None)
+    monkeypatch.setattr(server, "get_settings", lambda: fake_settings)
+    monkeypatch.setattr(
+        server.TickTickClient, "from_settings", staticmethod(_fake_from_settings)
+    )
+
+    c1 = await server._get_or_create_client()
+    c2 = await server._get_or_create_client()
+
+    assert c1 is c2
+    assert built["count"] == 1  # built + connected only once
+    c1.connect.assert_awaited_once()

@@ -359,8 +359,23 @@ opposite.
 > logins, which escalated TickTick to a `429` that *also* blocked the cookie's
 > `/user/status` check. Cookie-first stops the bleeding: when the cookie is
 > valid, `/user/signon` is never called, so the anti-bot is never provoked. The
-> remaining multiplier (per-session re-init) is tracked in TODO as the "build the
-> client once per process" fix.
+> per-session re-init multiplier is now fixed too: the client is built **once per
+> process** (see [§9](#9-mcp-server--tools)), and `ensure_v2_fresh()` does
+> **backoff-gated** on-demand re-auth so a degraded process recovers when the
+> throttle clears without a redeploy and without hammering.
+
+### `ensure_v2_fresh()` — recovery without a redeploy
+
+`UnifiedTickTickAPI.ensure_v2_fresh()` re-attempts V2 auth when it's degraded,
+but at most once per `_V2_REAUTH_BACKOFF` (10 min). It's a no-op when V2 is
+healthy or when the backoff hasn't elapsed; otherwise it re-runs the cookie-first
+`_authenticate_v2()`. Because auth is cookie-first, a retry makes no
+`/user/signon` call when the cookie is valid (just a `/user/status` check), so it
+stays gentle. The server lifespan calls it once per MCP session, which (since the
+lifespan runs per session) acts as a periodic health tick: dozens of connections
+no longer mean dozens of auth attempts, just one attempt per 10-minute window
+while degraded. `_last_v2_reauth` is stamped at the start of every
+`_authenticate_v2()` (initial connect or re-auth), so the backoff covers both.
 
 `initialize()` then checks the router:
 
@@ -827,10 +842,17 @@ short operator-facing version).
 A single `FastMCP("ticktick_sdk", lifespan=…, host="0.0.0.0", port=$PORT,
 streamable_http_path="/mcp")` instance. A `@mcp.custom_route("/health", …)`
 returns `{"status": "ok"}` for platform health checks (and is exempt from
-bearer auth). The **lifespan** builds one `TickTickClient.from_settings()` at
-startup, stashes it in the lifespan context (tools fetch it via a small
-`get_client(ctx)` helper), and closes it on shutdown. Startup also logs the
-device-id warnings (`device_id_looks_valid` / `device_id_is_ephemeral`).
+bearer auth). **Client lifecycle (important):** with streamable-http the MCP SDK
+runs the server **lifespan once per session**, not once per process, so the
+client is *not* built in the lifespan. Instead `_get_or_create_client()` builds
+and connects **one** `TickTickClient` per process (guarded by an `asyncio.Lock`)
+and caches it in the module-level `_shared_client`; the lifespan just hands that
+shared client to each session via the lifespan context (tools fetch it with
+`get_client(ctx)`) and calls `ensure_v2_fresh()` as a health tick. It is **not**
+disconnected per session (that would tear it out from under other sessions); it
+lives for the process and is reclaimed at exit. The device-id warnings are logged
+once, on the single build. This is the fix for the per-session re-auth storm
+described in [§4](#4-authentication--resilience).
 
 ### The 44 tools
 

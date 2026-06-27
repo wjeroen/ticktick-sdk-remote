@@ -325,6 +325,10 @@ class UnifiedTickTickAPI:
         # Which path produced the current V2 session: "password", "cookie",
         # or None when V2 isn't authenticated. Surfaced by get_auth_status().
         self._v2_auth_method: str | None = None
+        # Timestamp of the last V2 auth *attempt* (initial or re-auth). Used by
+        # ensure_v2_fresh() to rate-limit on-demand re-auth. Stamped at the start
+        # of every _authenticate_v2() call.
+        self._last_v2_reauth: datetime | None = None
 
     # =========================================================================
     # Initialization & Lifecycle
@@ -337,6 +341,13 @@ class UnifiedTickTickAPI:
     # password before this" marker, surfaced as `cooldown_until` for visibility,
     # and a redeploy resets it. Cookie-first means we usually never get here.
     _V2_PASSWORD_COOLDOWN = timedelta(hours=6)
+
+    # When V2 is degraded, ensure_v2_fresh() re-attempts auth at most once per
+    # this interval (cookie-first, so usually just a /user/status check). It lets
+    # a long-running process recover when a throttle clears, without a redeploy,
+    # while staying gentle enough not to sustain the throttle. The per-session
+    # lifespan calls ensure_v2_fresh() as a periodic health tick.
+    _V2_REAUTH_BACKOFF = timedelta(minutes=10)
 
     async def initialize(self) -> None:
         """
@@ -456,6 +467,9 @@ class UnifiedTickTickAPI:
         Never raises; records ``_v2_unavailable_reason`` /
         ``_v2_unavailable_until`` and lets the caller decide what to do.
         """
+        # Stamp every attempt (initial connect or on-demand re-auth) so
+        # ensure_v2_fresh()'s backoff covers both paths.
+        self._last_v2_reauth = datetime.now(timezone.utc)
         if self._v2_client is None:
             self._v2_unavailable_reason = "V2 client not constructed"
             return
@@ -629,6 +643,35 @@ class UnifiedTickTickAPI:
                 cooldown_until.isoformat(timespec="seconds"),
             )
             return False, reason
+
+    async def ensure_v2_fresh(self) -> None:
+        """Re-attempt V2 auth if it's currently degraded (backoff-gated).
+
+        A no-op when V2 is already healthy, or when the last auth attempt was
+        within ``_V2_REAUTH_BACKOFF``. Otherwise it re-runs the cookie-first
+        auth, so a long-running process recovers when a TickTick throttle clears
+        without needing a redeploy, and without hammering (cookie-first means no
+        ``/user/signon`` when the cookie is valid). The server lifespan calls
+        this once per MCP session, which acts as a periodic health tick.
+        """
+        if not self._initialized or self._v2_client is None:
+            return
+        if self._router is not None and self._router.has_v2:
+            return  # already healthy, nothing to do
+        now = datetime.now(timezone.utc)
+        if (
+            self._last_v2_reauth is not None
+            and (now - self._last_v2_reauth) < self._V2_REAUTH_BACKOFF
+        ):
+            return  # backoff not elapsed, don't poke TickTick yet
+        logger.info("V2 is degraded; making a backoff-gated re-authentication attempt.")
+        await self._authenticate_v2()
+        # Keep the per-call degraded message in sync with the new state (mirrors
+        # what initialize() does after the first auth).
+        if self._v2_client is not None:
+            self._v2_client.degraded_reason = self._v2_unavailable_reason
+        if self._router is not None and self._router.has_v2:
+            logger.info("V2 recovered via re-authentication.")
 
     async def get_auth_status(self) -> dict[str, Any]:
         """Live auth health snapshot for diagnostics (no secrets).
