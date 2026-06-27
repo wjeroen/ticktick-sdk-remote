@@ -66,6 +66,7 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 | `TICKTICK_DEVICE_ID` | **Strongly recommended** | Stable device id for V2 API (24-char hex). If unset, a fresh random id is generated every redeploy — see note below. |
 | `TICKTICK_V2_COOKIES` | Recommended | Full Cookie header string from a logged-in TickTick browser tab. **Tried first** (before password sign-on) because it makes no login call and so can't trip TickTick's anti-bot. Strongly recommended on a server; password sign-on from a datacenter IP is unreliable. The session token (`t` cookie) is extracted from it automatically. See "If V2 sign-on gets captcha-walled" below. |
 | `TICKTICK_V2_TOKEN` | No | Optional override for the session token — normally unnecessary, it's auto-extracted from the `t` cookie in `TICKTICK_V2_COOKIES`. |
+| `TICKTICK_V2_IMPERSONATE` | No | Browser profile used for the V2 transport to get past TickTick's anti-bot (which 429s plain Python clients). Default `chrome`. Set to `off` to use plain httpx. Requires the `curl_cffi` dependency (included). |
 | `MCP_BEARER_TOKEN` | No | Bearer token for server authentication — see note below |
 | `PORT` | No | Server port (default: `8000`, Railway sets this automatically) |
 

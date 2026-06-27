@@ -380,8 +380,6 @@ class BaseTickTickClient(ABC):
                 details={"endpoint": endpoint},
             )
 
-        client = await self._ensure_client()
-
         # Merge headers
         request_headers = self._get_headers()
         if headers:
@@ -394,8 +392,37 @@ class BaseTickTickClient(ABC):
             endpoint,
         )
 
+        response = await self._send_http(
+            method, endpoint, params, json_data, request_headers
+        )
+
+        # Handle errors. A status-code check works for both httpx and curl_cffi
+        # responses (curl_cffi has no `.is_success`).
+        if not (200 <= response.status_code < 300):
+            self._handle_error_response(response, endpoint)
+
+        return response
+
+    async def _send_http(
+        self,
+        method: str,
+        endpoint: str,
+        params: dict[str, Any] | None,
+        json_data: Any,
+        request_headers: dict[str, str],
+    ) -> Any:
+        """Send one HTTP request and return the response object.
+
+        The default transport is httpx (used by V1, and by V2 as a fallback).
+        Subclasses may override this to use a different transport: the V2 client
+        swaps in curl_cffi browser impersonation to get past TickTick's V2
+        anti-bot, which fingerprints plain Python HTTP clients. The returned
+        object must expose ``status_code``, ``json()``, ``text``, ``content``,
+        and ``headers.get()`` (both httpx and curl_cffi responses do).
+        """
+        client = await self._ensure_client()
         try:
-            response = await client.request(
+            return await client.request(
                 method=method,
                 url=endpoint,
                 params=params,
@@ -415,12 +442,6 @@ class BaseTickTickClient(ABC):
                 endpoint=endpoint,
                 api_version=self.api_version.value,
             ) from e
-
-        # Handle errors
-        if not response.is_success:
-            self._handle_error_response(response, endpoint)
-
-        return response
 
     async def _get(
         self,

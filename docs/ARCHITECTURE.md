@@ -280,6 +280,22 @@ header is the real auth mechanism** — the `t` cookie carries the session token
 alongside `X-Device` and the browser-y `User-Agent`. The token typically lasts
 months.
 
+#### V2 transport: browser impersonation (curl_cffi)
+
+Headers and cookies aren't always enough: TickTick's V2 anti-bot also fingerprints
+the **TLS/HTTP handshake**, and a plain Python client (`httpx`) gets `429`'d on V2
+even with a valid cookie from a working browser, from any IP. (Confirmed 2026-06-27:
+the same account/cookie returns `200` in a browser but `429` from `httpx`, across
+datacenter and residential IPs, and across device ids.) So `TickTickV2Client`
+overrides `BaseTickTickClient._send_http` to route V2 requests through **`curl_cffi`**
+with browser impersonation (it replays a real Chrome TLS/JA3 + HTTP/2 fingerprint),
+dropping our own `User-Agent` so the profile's matching UA is used. The profile is
+`TICKTICK_V2_IMPERSONATE` (default `chrome`; `off`/`none` forces plain httpx). If
+`curl_cffi` isn't importable it logs a warning and falls back to httpx. V1 always
+uses httpx (the official OAuth API has no such wall). Note: this is the cookie/data
+path; password `signon` goes through `SessionHandler` separately and isn't
+impersonated yet (cookie-first makes that moot in practice).
+
 #### Device id (why it matters)
 
 `X-Device.id` must look like a MongoDB ObjectId (24 lowercase-hex chars).

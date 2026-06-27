@@ -568,3 +568,76 @@ async def test_server_builds_client_once_per_process(monkeypatch):
     assert c1 is c2
     assert built["count"] == 1  # built + connected only once
     c1.connect.assert_awaited_once()
+
+
+# =============================================================================
+# V2 browser-impersonation transport (curl_cffi)
+# =============================================================================
+
+
+async def test_v2_send_http_uses_impersonation_when_enabled():
+    """When impersonation is on, _send_http routes through the curl_cffi session,
+    builds an absolute URL, passes the profile, and drops our User-Agent so the
+    profile's matching UA is used. Keeps Cookie/X-Device."""
+    from ticktick_sdk.api.v2.client import TickTickV2Client
+
+    calls = {}
+
+    class _FakeResp:
+        status_code = 200
+        content = b'{"ok": true}'
+        text = '{"ok": true}'
+        headers: dict = {}
+
+        def json(self):
+            return {"ok": True}
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            calls.update(method=method, url=url, **kwargs)
+            return _FakeResp()
+
+    c = TickTickV2Client(device_id="a" * 24)
+    c._impersonate = "chrome"
+    c._curl_session_cls = _FakeSession
+
+    resp = await c._send_http(
+        "GET",
+        "/user/status",
+        None,
+        None,
+        {"User-Agent": "Firefox", "Cookie": "t=x", "X-Device": "{}"},
+    )
+
+    assert resp.status_code == 200
+    assert calls["impersonate"] == "chrome"
+    assert calls["url"].endswith("/api/v2/user/status")
+    sent_headers = calls["headers"]
+    assert all(k.lower() != "user-agent" for k in sent_headers)  # UA stripped
+    assert sent_headers["Cookie"] == "t=x"
+    assert sent_headers["X-Device"] == "{}"
+
+
+async def test_v2_send_http_falls_back_to_httpx_when_impersonation_off(monkeypatch):
+    """With impersonation disabled, _send_http defers to the base (httpx) path."""
+    from ticktick_sdk.api.v2.client import TickTickV2Client
+    from ticktick_sdk.api import base as base_mod
+
+    c = TickTickV2Client(device_id="a" * 24)
+    c._impersonate = ""  # disabled
+
+    called = {}
+
+    async def _fake_base_send(self, method, endpoint, params, json_data, headers):
+        called["used_base"] = True
+        return MagicMock(status_code=200)
+
+    monkeypatch.setattr(base_mod.BaseTickTickClient, "_send_http", _fake_base_send)
+    await c._send_http("GET", "/user/status", None, None, {})
+    assert called.get("used_base") is True
