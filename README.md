@@ -329,12 +329,14 @@ If you see this in Railway logs:
 
 ```
 V2 password sign-on failed: Authentication failed: {"errorCode":"need_captcha", ...}
-V2 will be unavailable until ~<timestamp> UTC (6h cooldown).
+V2 password sign-on failed. From a datacenter IP this is usually TickTick's anti-bot,
+not a wrong password (the error code can be need_captcha / username_password_not_match
+/ 429 even with correct credentials). Most reliable fix: set TICKTICK_V2_COOKIES ...
 ```
 
 TickTick's anti-bot system has flagged your password login (usually because too many login attempts came from your Railway datacenter IP in a short window — e.g. a crash loop, or many redeploys in a row). The server keeps running in **V1-only degraded mode** — task/project tools still work, but tags/folders/habits/focus/subtasks return a "V2 unavailable" error.
 
-> **Note:** the same anti-bot throttle can also show up as **`HTTP 429 Too Many Requests`** on `/user/signon` (instead of `need_captcha`), and when it does it **also** throttles the cookie fallback's `/user/status` check, so even a fresh `TICKTICK_V2_COOKIES` can fail to verify. If `ticktick_auth_status` says "rate-limited (HTTP 429)", treat it as the same problem as `need_captcha`: the fix is to **stop the repeated sign-ons** (see "least techy" steps below and the restart-cause investigation), **not** to refresh the cookie.
+> **Note:** the same anti-bot throttle can also show up as **`HTTP 429 Too Many Requests`** on `/user/signon` (instead of `need_captcha`), and when it does it **also** throttles the cookie fallback's `/user/status` check, so even a fresh `TICKTICK_V2_COOKIES` can fail to verify. If `ticktick_auth_status` says "rate-limited (HTTP 429)", treat it as the same problem as `need_captcha`: a 429 is a throttle, so refreshing the cookie usually won't help while it's active. Stopping the repeated sign-ons and letting it clear tends to help more (see the "least techy" steps below and the restart-cause investigation).
 
 > **Tip:** call the **`ticktick_auth_status`** tool any time to get a live, plain-English read on what's authenticated, why V2 is down, whether your device id is valid, and the exact env var to fix — without exposing any secrets.
 

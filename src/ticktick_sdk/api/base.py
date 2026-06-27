@@ -351,25 +351,35 @@ class BaseTickTickClient(ABC):
         if require_auth and not self.is_authenticated:
             if self.api_version == APIVersion.V2:
                 if self.degraded_reason:
-                    # The unified layer recorded exactly why V2 is down, so be
-                    # specific instead of listing every possible cause.
+                    # Quote the raw reason verbatim, then add hedged,
+                    # non-prescriptive commentary rather than asserting a single
+                    # cause/fix (the V2 anti-bot masks itself behind several
+                    # error codes, so over-specific advice misleads).
                     message = (
-                        f"TickTick V2 is unavailable: {self.degraded_reason} "
+                        f"TickTick V2 is currently unavailable. Reason recorded at "
+                        f"auth time: {self.degraded_reason} "
                         "The server is running in V1-only degraded mode, so "
-                        "V2-routed tools (task search/listing, account status, "
-                        "tags, folders, habits, focus, subtasks) won't work "
-                        "until V2 recovers. If you are not the host, relay this "
-                        "to whoever is."
+                        "V2-routed tools (task search/listing, account status, tags, "
+                        "folders, habits, focus, subtasks) won't work until V2 "
+                        "recovers. Common causes: an expired or revoked session "
+                        "cookie, a TickTick rate-limit/throttle (HTTP 429), no cookie "
+                        "configured (so password sign-on was attempted and anti-bot "
+                        "blocked), or a different reason entirely. Read the reason "
+                        "above to tell which. The most reliable fix is usually to set "
+                        "or refresh TICKTICK_V2_COOKIES from a logged-in browser tab "
+                        "(see README) and redeploy. If you are not the host, relay "
+                        "this to whoever is."
                     )
                 else:
                     message = (
-                        "TickTick V2 is unavailable — sign-on failed (captcha / "
-                        "anti-bot throttle, an invalid TICKTICK_DEVICE_ID, or an "
-                        "expired session) so the server is running in V1-only "
-                        "degraded mode. The person hosting this server can set "
-                        "TICKTICK_V2_COOKIES (from a logged-in browser, see README) "
-                        "to bypass V2 sign-on, or redeploy to retry. If you are not "
-                        "the host, relay this to whoever is."
+                        "TickTick V2 is currently unavailable and no specific reason "
+                        "was recorded, so the server is running in V1-only degraded "
+                        "mode. Possible causes: an anti-bot/captcha block on password "
+                        "sign-on, an invalid TICKTICK_DEVICE_ID, an expired session, "
+                        "or a different reason entirely. The most reliable fix is "
+                        "usually to set TICKTICK_V2_COOKIES (from a logged-in browser, "
+                        "see README) so the server skips password sign-on, then "
+                        "redeploy. If you are not the host, relay this to whoever is."
                     )
                 raise TickTickAuthenticationError(
                     message,

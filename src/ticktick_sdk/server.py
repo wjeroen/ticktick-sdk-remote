@@ -2357,38 +2357,47 @@ def _build_auth_verdict(
     if v1_ok and v2_ok:
         parts.append(f"All good — V1 and V2 both authenticated (V2 via {v2_auth_method}).")
     elif v1_ok and not v2_ok:
-        detail = v2_error or v2_reason or "unknown reason"
+        detail = v2_error or v2_reason or "no specific error was recorded"
         detail_l = detail.lower()
-        rate_limited = (
+        looks_rate_limited = (
             "429" in detail
             or "rate-limited" in detail_l
             or "rate limit" in detail_l
             or "too many" in detail_l
         )
-        if rate_limited:
-            parts.append(
-                "DEGRADED (V1-only): V2 is being RATE-LIMITED by TickTick (HTTP 429) — "
-                f"{detail} This is almost always too many sign-on attempts (the server "
-                "restarting/redeploying often and re-logging-in each time), NOT a stale "
-                "cookie. Do NOT refresh TICKTICK_V2_COOKIES yet — it won't help while "
-                "you're throttled. Instead: stop redeploying, find out why the server "
-                "keeps restarting (e.g. Railway app-sleeping or a crash loop), and let "
-                "the throttle clear (can take hours). Only if V2 then fails with a "
-                "401/expired error should you refresh the cookie."
+        looks_expired = "401" in detail or "expired" in detail_l or "stale" in detail_l
+        # Lead with the RAW error verbatim, then give hedged, multi-cause
+        # commentary instead of one confident diagnosis. The V2 anti-bot masks
+        # itself behind several error codes, so an over-specific verdict tends to
+        # send the reader chasing the wrong fix.
+        parts.append(f"DEGRADED (V1-only): V2 is not working. Raw error: {detail}")
+        causes: list[str] = []
+        if not v2_cookies_configured:
+            causes.append(
+                "no session cookie is configured (TICKTICK_V2_COOKIES is unset), so the "
+                "server fell back to password sign-on, which TickTick's anti-bot usually "
+                "blocks from a server/datacenter IP (often masked as need_captcha / "
+                "username_password_not_match / 429 even when the password is correct)"
             )
-        elif not v2_cookies_configured:
-            parts.append(
-                "DEGRADED (V1-only): V2 is down — "
-                f"{detail}. Fix: set TICKTICK_V2_COOKIES from a logged-in TickTick "
-                "browser tab (see README) and redeploy. Tasks/projects still work; "
-                "tags/folders/habits/focus/subtasks don't until V2 is back."
+        if looks_rate_limited:
+            causes.append(
+                "the error looks like a rate-limit/throttle (429), in which case waiting "
+                "it out usually helps more than refreshing the cookie"
             )
-        else:
-            parts.append(
-                "DEGRADED (V1-only): the V2 session (cookie) has failed or expired — "
-                f"{detail}. Fix: refresh TICKTICK_V2_COOKIES from a logged-in browser "
-                "and redeploy."
+        if looks_expired:
+            causes.append(
+                "the error looks like an expired/stale session (401), which a cookie "
+                "refresh usually fixes"
             )
+        if v2_cookies_configured and not looks_rate_limited and not looks_expired:
+            causes.append("the configured cookie may have expired or been revoked")
+        causes.append("or it could be a TickTick-side issue or a different reason entirely")
+        parts.append("Possible causes: " + "; ".join(causes) + ".")
+        parts.append(
+            "Most reliable next step: set or refresh TICKTICK_V2_COOKIES from a "
+            "logged-in TickTick browser tab (see README) and redeploy. Tasks and "
+            "projects keep working meanwhile; tags/folders/habits/focus/subtasks need V2."
+        )
     elif v2_ok and not v1_ok:
         parts.append(
             "DEGRADED (V2-only): V1 (OAuth) is down — refresh TICKTICK_ACCESS_TOKEN "
@@ -2472,7 +2481,6 @@ async def ticktick_auth_status(ctx: Context, response_format: ResponseFormat = R
                 "auth_method": status["v2_auth_method"],
                 "cookie_fallback_configured": v2_cookies_configured,
                 "unavailable_reason": status["v2_unavailable_reason"],
-                "cooldown_until": status["v2_cooldown_until"],
             },
             "device_id": {
                 "configured": not device_id_ephemeral,
@@ -2501,8 +2509,6 @@ async def ticktick_auth_status(ctx: Context, response_format: ResponseFormat = R
                 f"(length {report['device_id']['length']}, value {report['device_id']['masked']}, "
                 f"configured: {report['device_id']['configured']})",
             ]
-            if v2["cooldown_until"]:
-                lines.append(f"- **V2 cooldown until:** {v2['cooldown_until']} (redeploy bypasses it)")
             if v2["unavailable_reason"]:
                 lines.append(f"- **Last V2 failure reason:** {v2['unavailable_reason']}")
             lines.append("")

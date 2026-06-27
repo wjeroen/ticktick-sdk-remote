@@ -2,9 +2,9 @@
 Tests for graceful V2 degradation in UnifiedTickTickAPI.initialize().
 
 When V2 password sign-on fails (e.g. TickTick returns need_captcha from
-its anti-bot system), the server must NOT crash — it should keep V1
-running, surface a clear log message with a cooldown timestamp, and
-optionally fall back to a pre-obtained session token from env vars.
+its anti-bot system), the server must NOT crash. It should keep V1
+running, record a clear (verbatim) failure reason, and optionally fall
+back to a pre-obtained session token from env vars.
 
 These tests pin that behavior so the crash-loop regression can't sneak
 back in.
@@ -114,7 +114,6 @@ async def test_initialize_succeeds_when_v2_password_fails_and_v1_works(patched_c
     assert api._router.has_v1 is True
     assert api._router.has_v2 is False
     assert api._v2_unavailable_reason is not None
-    assert api._v2_unavailable_until is not None
 
 
 async def test_initialize_raises_only_when_both_apis_dead(patched_clients):
@@ -526,6 +525,36 @@ async def test_ensure_v2_fresh_recovers_when_throttle_clears(patched_clients):
     assert api._router.has_v2 is True
     assert api._v2_auth_method == "cookie"
     assert api.inbox_id == "inbox123"
+
+
+async def test_ensure_v2_fresh_never_signs_on_with_password(patched_clients):
+    """The health tick is COOKIE-ONLY. With no cookie configured, a degraded
+    password-only api must NOT re-attempt /user/signon on ensure_v2_fresh()
+    (that would hammer the anti-bot endpoint). Password sign-on is boot-only."""
+    v1, v2 = patched_clients
+    # Password sign-on fails at init (anti-bot), so V2 starts degraded.
+    v2.authenticate.side_effect = TickTickSessionError(
+        "Authentication failed: need_captcha", details={"errorCode": "need_captcha"}
+    )
+    api = UnifiedTickTickAPI(
+        client_id="cid",
+        client_secret="sec",
+        v1_access_token="v1tok",
+        username="user@example.com",
+        password="pw",
+        # deliberately no v2_cookies — password is the only V2 path
+    )
+    await api.initialize()
+    assert api._router.has_v2 is False
+    assert v2.authenticate.call_count == 1  # exactly the one boot attempt
+
+    # Pretend the backoff elapsed so ensure_v2_fresh runs its body, not skips.
+    api._last_v2_reauth = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    await api.ensure_v2_fresh()
+
+    # The health tick must NOT have signed on again.
+    assert v2.authenticate.call_count == 1
+    assert api._router.has_v2 is False
 
 
 # =============================================================================

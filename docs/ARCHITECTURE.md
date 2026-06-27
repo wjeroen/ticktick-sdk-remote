@@ -312,6 +312,35 @@ to pass from a datacenter IP; the cookie path is the surer bet.
 > `429` reflects the proxy's fingerprint, not `httpx`'s. **Validate impersonation
 > only on Railway (plain NAT egress) or a real local machine.**
 
+#### Why a cookie is still required (impersonation is necessary but not sufficient for sign-on)
+
+Browser impersonation fixes the **transport fingerprint** (TLS/JA3 + HTTP/2), which
+is what gates the *data* endpoints (`GET /api/v2/...`). With a valid cookie, those
+calls now pass where plain `httpx` was `429`'d. But **password sign-on
+(`POST /user/signon`) has an additional anti-bot layer** that a fingerprint match
+alone does not satisfy. Empirically (2026-06-27, latest branch deployed to Railway,
+no cookie), an impersonated sign-on still returns HTTP `500`
+`username_password_not_match` even though the credentials are correct. That is the
+same anti-bot wall first seen in PR #5 as `need_captcha`; the error code has merely
+mutated over time (`need_captcha` → `username_password_not_match` → `429`). The
+most likely explanation: real web sign-on clears a JS/behavioral or captcha
+challenge (a reCAPTCHA-style token, prior-session/device trust) that a headless
+HTTP client can't produce no matter how perfect its TLS handshake is, and TickTick
+is extra-strict on logins from datacenter IPs. This matches the wider community,
+which authenticates via **browser-grabbed cookies (Selenium or manual)** rather
+than programmatic password login (e.g.
+[OliverStoll/ticktick-api-v2](https://github.com/OliverStoll/ticktick-api-v2),
+[yidianyiko/ticktick-mcp-v2](https://github.com/yidianyiko/ticktick-mcp-v2)).
+
+The cookie sidesteps all of it: it was minted *after* a real browser already
+cleared the sign-on challenge, so the server just reuses that session and never
+calls `/user/signon`. That is why the working setup is **cookie + impersonation**:
+impersonation gets the data calls past the fingerprint wall, and the cookie skips
+the sign-on challenge entirely. And why HTTP `500` rather than a cleaner
+`401`/`403`? TickTick's unofficial V2 API wraps app-level auth/anti-bot rejections
+in a `500` whose JSON body carries the real `errorCode`. It is not a server crash
+on our side. the meaningful signal is the `errorCode`, not the HTTP status.
+
 #### Device id (why it matters)
 
 `X-Device.id` must look like a MongoDB ObjectId (24 lowercase-hex chars).
@@ -344,7 +373,7 @@ fallback below, which sidesteps 2FA entirely.
 ### The V2 fallback chain & degraded mode
 
 `UnifiedTickTickAPI._authenticate_v2()` is built to **never crash the server**.
-It records a reason/cooldown and returns; `initialize()` then decides the run
+It records a reason and returns; `initialize()` then decides the run
 mode. The chain is **cookie-first**: the cookie path makes no login call so it
 can't trip the anti-bot, whereas password sign-on from a datacenter IP is the
 fragile, anti-bot-prone path and is only a fallback.
@@ -366,20 +395,29 @@ fragile, anti-bot-prone path and is only a fallback.
    - **no `t` cookie in the header:** record that and fall through to password.
 
 2. **Password sign-on** (`_try_v2_password`, Step 2). Reached only when no cookie
-   is configured, or the cookie was stale/unusable (and not rate-limited). If
+   is configured, or the cookie was stale/unusable (and not rate-limited), **and
+   only at boot/redeploy** (the periodic health tick passes `allow_password=False`,
+   so it never re-pokes `/user/signon` — see `ensure_v2_fresh` below). If
    `TICKTICK_USERNAME` + `TICKTICK_PASSWORD` are set, try `signon`. On success,
-   cache `inbox_id`, mark `_v2_auth_method = "password"`. On *any* failure
-   (captcha, wrong password, 2FA, 429, network), record the reason and set
-   `_v2_unavailable_until = now + 6h` (`_V2_PASSWORD_COOLDOWN`, in-memory and
-   informational; a redeploy resets it).
+   cache `inbox_id`, mark `_v2_auth_method = "password"`. On *any* failure, record
+   the **raw error verbatim** as the reason. Note: from a datacenter IP the
+   anti-bot frequently masks a *correct* password as `need_captcha` /
+   `username_password_not_match` (HTTP 500) or `429`, so we never assert "wrong
+   password" — we report what TickTick returned and point at the cookie path. A
+   redeploy retries sign-on.
 
 3. **Both failed / nothing configured** → record a combined reason and bail (V2
    stays unavailable; the server runs V1-only).
 
-The `auth_status` verdict and the per-call degraded error both classify `429`
-(rate-limited: "stop restarting and wait, do not refresh the cookie") vs `401`
-(stale: "refresh `TICKTICK_V2_COOKIES`"), because the operator action is
-opposite.
+The `auth_status` verdict and the per-call degraded error both **lead with the
+raw error verbatim, then list possible causes (hedged), ending with "or a
+different reason entirely"** rather than asserting one diagnosis. The V2 anti-bot
+masks itself behind several error codes (`need_captcha` /
+`username_password_not_match` / `429`), so an over-specific verdict tends to send
+the reader chasing the wrong fix. They still surface signal where it's clear (a
+`429` reads as a throttle, where waiting tends to help more than refreshing; a
+`401` reads as a stale session a refresh fixes), but always as a *possibility*,
+not a command.
 
 > **Why cookie-first matters (2026-06-26 incident).** Password sign-on from
 > Railway is rejected by TickTick's anti-bot (it returned `need_captcha`,
@@ -398,16 +436,20 @@ opposite.
 
 ### `ensure_v2_fresh()` — recovery without a redeploy
 
-`UnifiedTickTickAPI.ensure_v2_fresh()` re-attempts V2 auth when it's degraded,
-but at most once per `_V2_REAUTH_BACKOFF` (10 min). It's a no-op when V2 is
-healthy or when the backoff hasn't elapsed; otherwise it re-runs the cookie-first
-`_authenticate_v2()`. Because auth is cookie-first, a retry makes no
-`/user/signon` call when the cookie is valid (just a `/user/status` check), so it
-stays gentle. The server lifespan calls it once per MCP session, which (since the
-lifespan runs per session) acts as a periodic health tick: dozens of connections
-no longer mean dozens of auth attempts, just one attempt per 10-minute window
-while degraded. `_last_v2_reauth` is stamped at the start of every
-`_authenticate_v2()` (initial connect or re-auth), so the backoff covers both.
+`UnifiedTickTickAPI.ensure_v2_fresh()` re-checks V2 auth when it's degraded, but
+at most once per `_V2_REAUTH_BACKOFF` (10 min). It's a no-op when V2 is healthy or
+when the backoff hasn't elapsed; otherwise it re-runs
+`_authenticate_v2(allow_password=False)`. That `allow_password=False` makes the
+health tick **cookie-only**: it re-verifies a configured cookie with a gentle
+`/user/status` ping and **never** attempts password `/user/signon` (which would
+hammer the anti-bot). So a degraded process recovers on its own when a *throttle*
+clears (the cookie starts validating again), but a process with no/stale cookie
+waits for a redeploy to retry sign-on. The server lifespan calls it once per MCP
+session, which (since the lifespan runs per session) acts as a periodic health
+tick: dozens of connections no longer mean dozens of auth attempts, just one
+cookie re-check per 10-minute window while degraded. `_last_v2_reauth` is stamped
+at the start of every `_authenticate_v2()` (initial connect or re-check), so the
+backoff covers both.
 
 `initialize()` then checks the router:
 
@@ -429,20 +471,19 @@ while degraded. `_last_v2_reauth` is stamped at the start of every
 does two **live** read pings (V1 `GET /project`, V2 `GET /user/status`) so it
 catches credentials that expired *after* startup, not just the boot-time state.
 It returns booleans + derived facts only — `v1_ok`, `v2_ok`, `v2_auth_method`
-(`"password"`/`"cookie"`/`None`), `v2_unavailable_reason`, `v2_cooldown_until`,
-plus the error strings. It exposes **no** secret values. The tool layer adds
-device-id validity flags and a masked device id, and writes a plain-English
-verdict with the exact env var to fix. The verdict **distinguishes a 429
-(rate-limit) from a stale cookie**: when the reason looks rate-limited it tells
-the operator to stop restarting and wait (and explicitly *not* to refresh the
-cookie yet), rather than the default "refresh `TICKTICK_V2_COOKIES`" advice.
+(`"password"`/`"cookie"`/`None`), `v2_unavailable_reason`, plus the error strings.
+It exposes **no** secret values. The tool layer adds device-id validity flags and
+a masked device id, and writes a plain-English verdict. The verdict **leads with
+the raw error verbatim, then lists hedged possible causes** (ending with "or a
+different reason entirely") plus a single recommended next step, rather than one
+confident diagnosis — see the messaging note above.
 
-The same recorded reason is also copied onto the V2 client as
-`client.degraded_reason` in `initialize()`, so the `TickTickAuthenticationError`
-raised on **every** V2 call while degraded states the specific cause (e.g.
-"rate-limited (HTTP 429)") instead of the old generic "sign-on failed (captcha /
-device-id / expired session)" list. This is what an MCP consumer (Claude) sees
-when it calls a V2-routed tool in degraded mode.
+The same recorded reason (the raw error verbatim) is also copied onto the V2
+client as `client.degraded_reason` in `initialize()` and refreshed by
+`ensure_v2_fresh()`, so the `TickTickAuthenticationError` raised on **every** V2
+call while degraded quotes what TickTick actually returned and then lists hedged
+causes, instead of asserting one. This is what an MCP consumer (Claude) sees when
+it calls a V2-routed tool in degraded mode.
 
 ### Debugging checklist (when V2 is down)
 
@@ -469,9 +510,13 @@ Read this before theorizing. It would have saved two debugging sessions:
    Container" = the lifespan runs per MCP session, not per process.** So the
    client is rebuilt and V2 auth re-runs on every connection. That multiplier
    turned a flaky login into a ban. (Fix tracked in `TODO.md`.)
-6. **`cooldown_until` is our self-imposed `now + 6h` marker, not TickTick's real
-   throttle window.** Never quote it as "access returns at X"; the real window is
-   unknown.
+6. **Error messages lead with the raw error, then hedge.** `auth_status` and the
+   per-call degraded error quote what TickTick actually returned, then list
+   possible causes ending with "or a different reason entirely". Don't read them
+   as one confident diagnosis: `need_captcha` / `username_password_not_match` /
+   `429` are interchangeable anti-bot masks, not literally a wrong password. (The
+   former 6h `cooldown_until` marker was removed in 2026-06-27: it gated nothing
+   and read as a real throttle window when it wasn't.)
 7. **Railway facts:** the live `mcp__TickTick__*` tools run the **deployed**
    branch (confirm which branch + whether autodeploy is on); every redeploy
    re-runs startup; `sleepApplication: false` + `numReplicas: 1` means it is not
@@ -1028,8 +1073,9 @@ RRULE's `FREQ=`, falling back to `[REPEATS]` for anything unrecognized.
 
 Calls `client`'s `get_auth_status()` (the live V1+V2 pings from
 [§4](#get_auth_status--live-diagnostics)) and renders a verdict: what's
-authenticated, why V2 is down (and the cooldown), whether the device id is a
-valid 24-char hex, the V2 auth method, and the exact env var to fix. It masks the
+authenticated, why V2 is down (raw error verbatim, then hedged causes), whether
+the device id is a valid 24-char hex, the V2 auth method, and the most reliable
+next step. It masks the
 device id and **never** prints credential values. Use it first when tools start
 failing with auth errors.
 

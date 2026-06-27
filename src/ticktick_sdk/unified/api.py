@@ -312,15 +312,10 @@ class UnifiedTickTickAPI:
         self._initialized = False
         self._inbox_id: str | None = None
 
-        # V2 degraded-mode tracking. If we fall back to password sign-on and it
-        # fails, we stamp a *self-imposed* backoff timestamp here (now +
-        # _V2_PASSWORD_COOLDOWN). IMPORTANT: this is OUR marker so we don't
-        # immediately re-poke /user/signon; it is NOT TickTick's actual throttle
-        # window, which is unknown and can be shorter or much longer. It does not
-        # predict when access returns. With cookie-first auth we usually never
-        # reach the password path, so this is often left as None. A redeploy
-        # resets it.
-        self._v2_unavailable_until: datetime | None = None
+        # V2 degraded-mode tracking. Holds a human-readable reason for why V2
+        # isn't authenticated (the raw error verbatim where possible), so the
+        # degraded-mode error raised on each V2 call and ticktick_auth_status can
+        # quote it instead of guessing. None when authenticated or unset.
         self._v2_unavailable_reason: str | None = None
         # Which path produced the current V2 session: "password", "cookie",
         # or None when V2 isn't authenticated. Surfaced by get_auth_status().
@@ -334,19 +329,11 @@ class UnifiedTickTickAPI:
     # Initialization & Lifecycle
     # =========================================================================
 
-    # Self-imposed backoff after a failed V2 *password* sign-on, so we don't keep
-    # poking /user/signon (and re-triggering the anti-bot) on incidental retries.
-    # This is NOT how long TickTick will actually throttle us; that real window is
-    # unknown and unrelated to this number. It's purely our own "don't retry the
-    # password before this" marker, surfaced as `cooldown_until` for visibility,
-    # and a redeploy resets it. Cookie-first means we usually never get here.
-    _V2_PASSWORD_COOLDOWN = timedelta(hours=6)
-
-    # When V2 is degraded, ensure_v2_fresh() re-attempts auth at most once per
-    # this interval (cookie-first, so usually just a /user/status check). It lets
-    # a long-running process recover when a throttle clears, without a redeploy,
-    # while staying gentle enough not to sustain the throttle. The per-session
-    # lifespan calls ensure_v2_fresh() as a periodic health tick.
+    # When V2 is degraded, ensure_v2_fresh() re-checks auth at most once per this
+    # interval. The re-check is COOKIE-ONLY (a gentle /user/status ping) and never
+    # re-attempts password sign-on, so a long-running process can recover when a
+    # throttle clears without a redeploy, and without ever hammering the anti-bot
+    # /user/signon endpoint. The per-session lifespan calls it as a health tick.
     _V2_REAUTH_BACKOFF = timedelta(minutes=10)
 
     async def initialize(self) -> None:
@@ -452,7 +439,7 @@ class UnifiedTickTickAPI:
 
         self._initialized = True
 
-    async def _authenticate_v2(self) -> None:
+    async def _authenticate_v2(self, allow_password: bool = True) -> None:
         """Authenticate the V2 client.
 
         **Cookie-first.** If a pre-obtained session is configured
@@ -464,8 +451,13 @@ class UnifiedTickTickAPI:
         deliberately **skip** password sign-on when the cookie check was
         rate-limited (429), so we don't pour more failed logins onto a throttle.
 
-        Never raises; records ``_v2_unavailable_reason`` /
-        ``_v2_unavailable_until`` and lets the caller decide what to do.
+        ``allow_password`` gates the password fallback. ``initialize()`` calls
+        with it ``True`` (boot/redeploy may sign on once); the periodic health
+        tick (``ensure_v2_fresh``) calls with it ``False`` so it only ever
+        re-checks a configured cookie and never re-pokes ``/user/signon``.
+
+        Never raises; records ``_v2_unavailable_reason`` and lets the caller
+        decide what to do.
         """
         # Stamp every attempt (initial connect or on-demand re-auth) so
         # ensure_v2_fresh()'s backoff covers both paths.
@@ -492,17 +484,36 @@ class UnifiedTickTickAPI:
                 # only add more failed-login fuel to the throttle (and would be
                 # 429'd too). Stay degraded and let it cool off.
                 self._v2_unavailable_reason = (
-                    f"V2 is rate-limited (HTTP 429): the session cookie couldn't "
-                    f"be verified on /user/status ({cookie_failed_reason}). The "
-                    f"cookie itself may be fine — this is a throttle, usually from "
-                    f"too many sign-on attempts. Skipping password sign-on so we "
-                    f"don't add more. Stop restarting/redeploying and let the "
-                    f"throttle clear; do NOT refresh the cookie yet."
+                    f"the session cookie could not be verified on /user/status "
+                    f"because the request was rate-limited (HTTP 429): "
+                    f"{cookie_failed_reason}. A 429 is a throttle, so the cookie "
+                    f"itself may still be valid. Skipped password sign-on to avoid "
+                    f"adding more failed logins. It often clears on its own; if V2 "
+                    f"later fails with a 401/expired error instead, refresh the cookie."
                 )
                 return
             # else: cookie is stale/unusable → fall through to password.
 
         # --- Step 2: password sign-on (no cookie, or cookie stale) --------
+        # Reserved for boot/redeploy. The periodic health tick passes
+        # allow_password=False so it never re-pokes the anti-bot /user/signon
+        # endpoint; it only re-checks a configured cookie (above).
+        if not allow_password:
+            if cookie_configured and cookie_failed_reason:
+                self._v2_unavailable_reason = (
+                    f"the session cookie could not be verified "
+                    f"({cookie_failed_reason}); the periodic re-check does not "
+                    f"attempt password sign-on. If the cookie has expired, refresh "
+                    f"TICKTICK_V2_COOKIES and redeploy."
+                )
+            elif not cookie_configured:
+                self._v2_unavailable_reason = (
+                    "no session cookie is configured (TICKTICK_V2_COOKIES is unset) "
+                    "and the periodic re-check does not attempt password sign-on; "
+                    "set a cookie and redeploy to bring V2 up."
+                )
+            return
+
         ok, password_failed_reason = await self._try_v2_password()
         if ok:
             return
@@ -567,7 +578,6 @@ class UnifiedTickTickAPI:
             self._inbox_id = session.inbox_id or self._inbox_id
 
             self._v2_unavailable_reason = None
-            self._v2_unavailable_until = None
             self._v2_auth_method = "cookie"
             logger.info("V2 authenticated via pre-obtained session cookie.")
             return True, None, False
@@ -601,8 +611,9 @@ class UnifiedTickTickAPI:
         """Sign on to V2 with username/password (the anti-bot-prone path).
 
         Returns ``(ok, failure_reason)``. On success, marks
-        ``_v2_auth_method = "password"``. On failure, records a 6h informational
-        cooldown and logs actionable guidance.
+        ``_v2_auth_method = "password"``. Only called at boot/redeploy, never
+        from the periodic health tick (see ``ensure_v2_fresh``), so a failure
+        here is not retried until the next process start.
         """
         creds = self._v2_credentials
         if not (creds["username"] and creds["password"]):
@@ -614,33 +625,31 @@ class UnifiedTickTickAPI:
             )
             self._inbox_id = session.inbox_id
             self._v2_unavailable_reason = None
-            self._v2_unavailable_until = None
             self._v2_auth_method = "password"
             logger.info("V2 authenticated via username/password")
             return True, None
         except Exception as e:
             # Includes TickTickSessionError for need_captcha, 2FA, wrong
-            # password, etc., plus any network failure.
+            # password, etc., plus any network failure. NOTE: from a
+            # server/datacenter IP the anti-bot frequently masks itself as
+            # `username_password_not_match` or `need_captcha` (HTTP 500), or a
+            # 429, even when the credentials are correct, so we report the raw
+            # error verbatim rather than asserting the password is wrong.
             if _is_rate_limit_error(e):
                 reason = (
-                    f"rate-limited (HTTP 429) on /user/signon — TickTick is "
-                    f"throttling logins, usually from too many sign-on attempts "
-                    f"(e.g. re-authenticating on every connection) ({e})"
+                    f"rate-limited (HTTP 429) on /user/signon: TickTick is "
+                    f"throttling logins ({e})"
                 )
             else:
                 reason = str(e)
-            cooldown_until = datetime.now(timezone.utc) + self._V2_PASSWORD_COOLDOWN
-            self._v2_unavailable_until = cooldown_until
             logger.error("V2 password sign-on failed: %s", e)
             logger.error(
-                "V2 password sign-on failed; putting it on a self-imposed backoff "
-                "until ~%s UTC so we don't keep hammering /user/signon. NOTE: that "
-                "is OUR timer, NOT TickTick's actual throttle window (which is "
-                "unknown and may be shorter or much longer); it does not predict "
-                "when access returns. Best fix: set TICKTICK_V2_COOKIES from a "
-                "logged-in browser so the server skips /user/signon entirely "
-                "(it's tried first). A redeploy resets this backoff.",
-                cooldown_until.isoformat(timespec="seconds"),
+                "V2 password sign-on failed. From a datacenter IP this is usually "
+                "TickTick's anti-bot, not a wrong password (the error code can be "
+                "need_captcha / username_password_not_match / 429 even with correct "
+                "credentials). Most reliable fix: set TICKTICK_V2_COOKIES from a "
+                "logged-in browser so the server skips /user/signon entirely (it is "
+                "tried first). A redeploy retries sign-on."
             )
             return False, reason
 
@@ -664,8 +673,11 @@ class UnifiedTickTickAPI:
             and (now - self._last_v2_reauth) < self._V2_REAUTH_BACKOFF
         ):
             return  # backoff not elapsed, don't poke TickTick yet
-        logger.info("V2 is degraded; making a backoff-gated re-authentication attempt.")
-        await self._authenticate_v2()
+        logger.info(
+            "V2 is degraded; making a backoff-gated, cookie-only re-check "
+            "(no password sign-on)."
+        )
+        await self._authenticate_v2(allow_password=False)
         # Keep the per-call degraded message in sync with the new state (mirrors
         # what initialize() does after the first auth).
         if self._v2_client is not None:
@@ -712,11 +724,6 @@ class UnifiedTickTickAPI:
             "v2_error": v2_error,
             "v2_auth_method": self._v2_auth_method,
             "v2_unavailable_reason": self._v2_unavailable_reason,
-            "v2_cooldown_until": (
-                self._v2_unavailable_until.isoformat(timespec="seconds")
-                if self._v2_unavailable_until
-                else None
-            ),
         }
 
     async def close(self) -> None:
