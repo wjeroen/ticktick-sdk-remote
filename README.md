@@ -99,8 +99,36 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 
 #### Claude Desktop / Claude Code (Local Alternative)
 
-If you want to run the server locally instead, see the [original repo](https://github.com/dev-mirzabicer/ticktick-sdk) which supports stdio transport for local MCP usage.
-Note that it also misses some other features, like correct timezones and displaying priority levels when asking Claude to list tasks.
+### Run locally instead (Claude Desktop, stdio)
+
+You can also run this server **on your own machine** over stdio, which Claude
+Desktop launches directly. This is useful when TickTick's V2 anti-bot is
+throttling your datacenter/Railway IP: requests from a residential IP are not
+throttled. (See "Debugging V2 auth" in `docs/ARCHITECTURE.md` §4.)
+
+1. Install [uv](https://docs.astral.sh/uv/) (handles Python + deps).
+2. Get this repo's code on your machine (clone, or download the ZIP and extract).
+3. Create a `.env` file in the repo folder with your `TICKTICK_*` variables (the
+   same ones from the env-var table above, including `TICKTICK_V2_COOKIES`).
+4. In Claude Desktop: **Settings → Developer → Edit Config**, and add:
+
+   ```json
+   {
+     "mcpServers": {
+       "ticktick-local": {
+         "command": "uv",
+         "args": ["run", "--directory", "C:\\full\\path\\to\\this\\repo", "ticktick-sdk", "stdio"]
+       }
+     }
+   }
+   ```
+
+   Use the full path to `uv` if Claude Desktop can't find it on PATH, and double
+   backslashes on Windows. Then fully quit and reopen Claude Desktop.
+
+The `ticktick-sdk stdio` subcommand (or `python -m ticktick_sdk` still serves
+HTTP for Railway) runs the same 44 tools over stdio; logs go to stderr so stdout
+stays clean for the protocol.
 
 ---
 

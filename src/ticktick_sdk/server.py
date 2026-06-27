@@ -3417,5 +3417,21 @@ def main():
     anyio.run(server.serve)
 
 
+def main_stdio():
+    """Run the MCP server over stdio (for local clients like Claude Desktop).
+
+    Unlike main() (streamable-HTTP for Railway), this speaks MCP over
+    stdin/stdout, which is how Claude Desktop launches a local server. Logs go to
+    stderr (see basicConfig above), so stdout stays clean for the JSON-RPC
+    protocol. The lifespan still runs (building the shared client once), and
+    cookie-first auth means a local/residential IP sidesteps the datacenter
+    throttle.
+    """
+    _annotate_tool_apis()
+    _apply_tool_filtering()
+    logger.info("Starting TickTick MCP server over stdio")
+    mcp.run(transport="stdio")
+
+
 if __name__ == "__main__":
     main()

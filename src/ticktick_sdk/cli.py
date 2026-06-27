@@ -191,6 +191,7 @@ def run_server(
     enabled_tools: str | None = None,
     enabled_modules: str | None = None,
     host: str | None = None,
+    stdio: bool = False,
 ) -> int:
     """
     Run the MCP server.
@@ -202,6 +203,8 @@ def run_server(
         enabled_tools: Comma-separated list of specific tools to enable.
         enabled_modules: Comma-separated list of modules to enable.
         host: API host ("ticktick.com" or "dida365.com").
+        stdio: If True, run over stdio (for local clients like Claude Desktop)
+               instead of streamable-HTTP (for Railway).
 
     Returns:
         Exit code (0 for success, non-zero for error).
@@ -230,9 +233,14 @@ def run_server(
             file=sys.stderr,
         )
 
-    from ticktick_sdk.server import main as server_main
+    if stdio:
+        from ticktick_sdk.server import main_stdio
 
-    server_main()
+        main_stdio()
+    else:
+        from ticktick_sdk.server import main as server_main
+
+        server_main()
     return 0
 
 
@@ -356,6 +364,37 @@ Available modules: tasks, projects, folders, columns, tags, habits, user, focus
         ),
     )
 
+    # Stdio subcommand (for local clients like Claude Desktop)
+    stdio_parser = subparsers.add_parser(
+        "stdio",
+        help="Run the MCP server over stdio (for local clients like Claude Desktop)",
+        description="""\
+Run the TickTick MCP server over stdio instead of HTTP.
+
+This is the transport local clients like Claude Desktop use: the client
+launches this command and talks to it over stdin/stdout. Use this when running
+the server on your own machine (e.g. to reach TickTick from a residential IP
+that isn't rate-limited like a datacenter one).
+
+Set credentials via a .env file in the working directory or via environment
+variables (TICKTICK_CLIENT_ID/SECRET/ACCESS_TOKEN, TICKTICK_USERNAME/PASSWORD,
+TICKTICK_DEVICE_ID, TICKTICK_V2_COOKIES, TICKTICK_TIMEZONE).
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    stdio_parser.add_argument(
+        "--enabledTools", type=str, default=None, metavar="TOOLS",
+        help="Comma-separated list of specific tools to enable.",
+    )
+    stdio_parser.add_argument(
+        "--enabledModules", type=str, default=None, metavar="MODULES",
+        help="Comma-separated list of tool modules to enable.",
+    )
+    stdio_parser.add_argument(
+        "--host", type=str, default=None, metavar="HOST",
+        help="API host: ticktick.com (default) or dida365.com.",
+    )
+
     # Auth subcommand
     auth_parser = subparsers.add_parser(
         "auth",
@@ -421,6 +460,13 @@ def main() -> int | NoReturn:
             enabled_tools=args.enabledTools,
             enabled_modules=args.enabledModules,
             host=args.host,
+        )
+    elif args.command == "stdio":
+        return run_server(
+            enabled_tools=args.enabledTools,
+            enabled_modules=args.enabledModules,
+            host=args.host,
+            stdio=True,
         )
     elif args.command == "auth":
         return run_auth(manual=args.manual)
