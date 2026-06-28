@@ -64,8 +64,9 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 | `TICKTICK_HOST` | No | API host: `ticktick.com` (default) or `dida365.com` (Chinese version) |
 | `TICKTICK_TIMEOUT` | No | Request timeout in seconds (default: `30`) |
 | `TICKTICK_DEVICE_ID` | **Strongly recommended** | Stable device id for V2 API (24-char hex). If unset, a fresh random id is generated every redeploy — see note below. |
-| `TICKTICK_V2_COOKIES` | No (fallback) | Full Cookie header string from a logged-in TickTick browser tab. Only used if the username+password login fails (e.g. captcha-walled). The session token (`t` cookie) is extracted from it automatically. See "If V2 sign-on gets captcha-walled" below. |
+| `TICKTICK_V2_COOKIES` | Recommended | Full Cookie header string from a logged-in TickTick browser tab. **Tried first** (before password sign-on) because it makes no login call and so can't trip TickTick's anti-bot. Strongly recommended on a server; password sign-on from a datacenter IP is unreliable. The session token (`t` cookie) is extracted from it automatically. See "If V2 sign-on gets captcha-walled" below. |
 | `TICKTICK_V2_TOKEN` | No | Optional override for the session token — normally unnecessary, it's auto-extracted from the `t` cookie in `TICKTICK_V2_COOKIES`. |
+| `TICKTICK_V2_IMPERSONATE` | No | Browser profile used for the V2 transport to get past TickTick's anti-bot (which 429s plain Python clients). Default `chrome`. Set to `off` to use plain httpx. Requires the `curl_cffi` dependency (included). |
 | `MCP_BEARER_TOKEN` | No | Bearer token for server authentication — see note below |
 | `PORT` | No | Server port (default: `8000`, Railway sets this automatically) |
 
@@ -99,8 +100,36 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 
 #### Claude Desktop / Claude Code (Local Alternative)
 
-If you want to run the server locally instead, see the [original repo](https://github.com/dev-mirzabicer/ticktick-sdk) which supports stdio transport for local MCP usage.
-Note that it also misses some other features, like correct timezones and displaying priority levels when asking Claude to list tasks.
+### Run locally instead (Claude Desktop, stdio)
+
+You can also run this server **on your own machine** over stdio, which Claude
+Desktop launches directly. This is useful when TickTick's V2 anti-bot is
+throttling your datacenter/Railway IP: requests from a residential IP are not
+throttled. (See "Debugging V2 auth" in `docs/ARCHITECTURE.md` §4.)
+
+1. Install [uv](https://docs.astral.sh/uv/) (handles Python + deps).
+2. Get this repo's code on your machine (clone, or download the ZIP and extract).
+3. Create a `.env` file in the repo folder with your `TICKTICK_*` variables (the
+   same ones from the env-var table above, including `TICKTICK_V2_COOKIES`).
+4. In Claude Desktop: **Settings → Developer → Edit Config**, and add:
+
+   ```json
+   {
+     "mcpServers": {
+       "ticktick-local": {
+         "command": "uv",
+         "args": ["run", "--directory", "C:\\full\\path\\to\\this\\repo", "ticktick-sdk", "stdio"]
+       }
+     }
+   }
+   ```
+
+   Use the full path to `uv` if Claude Desktop can't find it on PATH, and double
+   backslashes on Windows. Then fully quit and reopen Claude Desktop.
+
+The `ticktick-sdk stdio` subcommand (or `python -m ticktick_sdk` still serves
+HTTP for Railway) runs the same 44 tools over stdio; logs go to stderr so stdout
+stays clean for the protocol.
 
 ---
 
@@ -300,10 +329,14 @@ If you see this in Railway logs:
 
 ```
 V2 password sign-on failed: Authentication failed: {"errorCode":"need_captcha", ...}
-V2 will be unavailable until ~<timestamp> UTC (6h cooldown).
+V2 password sign-on failed. From a datacenter IP this is usually TickTick's anti-bot,
+not a wrong password (the error code can be need_captcha / username_password_not_match
+/ 429 even with correct credentials). Most reliable fix: set TICKTICK_V2_COOKIES ...
 ```
 
 TickTick's anti-bot system has flagged your password login (usually because too many login attempts came from your Railway datacenter IP in a short window — e.g. a crash loop, or many redeploys in a row). The server keeps running in **V1-only degraded mode** — task/project tools still work, but tags/folders/habits/focus/subtasks return a "V2 unavailable" error.
+
+> **Note:** the same anti-bot throttle can also show up as **`HTTP 429 Too Many Requests`** on `/user/signon` (instead of `need_captcha`), and when it does it **also** throttles the cookie fallback's `/user/status` check, so even a fresh `TICKTICK_V2_COOKIES` can fail to verify. If `ticktick_auth_status` says "rate-limited (HTTP 429)", treat it as the same problem as `need_captcha`: a 429 is a throttle, so refreshing the cookie usually won't help while it's active. Stopping the repeated sign-ons and letting it clear tends to help more (see the "least techy" steps below and the restart-cause investigation).
 
 > **Tip:** call the **`ticktick_auth_status`** tool any time to get a live, plain-English read on what's authenticated, why V2 is down, whether your device id is valid, and the exact env var to fix — without exposing any secrets.
 
@@ -311,7 +344,7 @@ TickTick's anti-bot system has flagged your password login (usually because too 
 
 1. **Wait it out + set `TICKTICK_DEVICE_ID`.** Stop redeploying for several hours (the flag usually clears on its own). Then set `TICKTICK_DEVICE_ID` to a stable 24-char hex string in Railway so future redeploys don't look like new devices, and redeploy once.
 
-2. **If it still won't lift: use the V2 session cookie fallback** (`TICKTICK_V2_COOKIES`). This makes the server skip `/user/signon` entirely and reuse a session you've already established in your browser. It can't trigger `need_captcha` because no login happens. See the next section for how to grab it.
+2. **Best fix: set the V2 session cookie** (`TICKTICK_V2_COOKIES`). The server tries this **first**, before any password login, so when it's set and valid the server skips `/user/signon` entirely and reuses a session you've already established in your browser. It can't trigger `need_captcha` or a 429 because no login happens. See the next section for how to grab it.
 
 ### Grabbing `TICKTICK_V2_COOKIES` from a browser
 
@@ -328,7 +361,10 @@ You only need to do this if `need_captcha` is blocking the normal password login
 7. That's it — no need to isolate the token by hand. (The cookie string **must** contain a `t=...` entry; that's the session token. If for some reason it doesn't, you can set `TICKTICK_V2_TOKEN` separately to override.)
 8. In Railway, set both env vars and redeploy. Logs should show `V2 authenticated via pre-obtained session token (fallback)`.
 
-The token typically lasts months. If you ever see `V2 token fallback also failed` in the logs, the token has gone stale — repeat the steps above to get a fresh one.
+The token typically lasts months. If you ever see `V2 token fallback also failed` in the logs, check **why** before re-grabbing the cookie:
+
+- **`... rate-limited (HTTP 429) ...`** means TickTick is **throttling** you, not that the cookie is stale. Re-grabbing the cookie will **not** help while throttled. This usually means the server is restarting too often and re-running sign-on each time (Railway app-sleeping, a crash loop, or repeated redeploys). Stop redeploying, fix the restart cause, and let the throttle clear (can take hours). Run `ticktick_auth_status` to confirm the verdict.
+- **`... 401 ...` / "probably stale"** means the session really has expired. Repeat the steps above to get a fresh cookie.
 
 ### "V1 OAuth token expired or invalid"
 - Your `TICKTICK_ACCESS_TOKEN` has expired (TickTick OAuth tokens last ~6 months) or been revoked

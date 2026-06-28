@@ -167,6 +167,22 @@ class TickTickClient:
         """Live auth health snapshot for diagnostics (no secrets)."""
         return await self._api.get_auth_status()
 
+    async def ensure_v2_fresh(self) -> None:
+        """Re-attempt V2 auth if degraded (backoff-gated).
+
+        Lets a long-running process recover when a TickTick throttle clears,
+        without a redeploy. See ``UnifiedTickTickAPI.ensure_v2_fresh``.
+        """
+        await self._api.ensure_v2_fresh()
+
+    @property
+    def has_v2(self) -> bool:
+        """Whether the V2 (session) API is currently usable."""
+        try:
+            return self._api.router.has_v2
+        except Exception:
+            return False
+
     @property
     def inbox_id(self) -> str | None:
         """Get the inbox project ID."""

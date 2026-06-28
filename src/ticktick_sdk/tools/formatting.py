@@ -231,7 +231,7 @@ def format_task_markdown(
     project_names: dict[str, str] | None = None,
     child_meta: dict[str, dict[str, Any]] | None = None,
 ) -> str:
-    """Format a single task as Markdown.
+    r"""Format a single task as Markdown.
 
     When `project_names` is provided and contains an entry for this task's
     `project_id`, the **Project** line shows `Name (\`id\`)` instead of just
@@ -423,7 +423,7 @@ def format_task_row_markdown(
     project_names: dict[str, str] | None = None,
     child_meta: dict[str, dict[str, Any]] | None = None,
 ) -> str:
-    """Format a single task as one markdown list row.
+    r"""Format a single task as one markdown list row.
 
     When `child_meta` is provided and the task has children, the row is
     followed by indented sub-bullets — one per resolvable child showing

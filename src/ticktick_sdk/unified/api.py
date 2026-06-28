@@ -27,6 +27,7 @@ from ticktick_sdk.exceptions import (
     TickTickForbiddenError,
     TickTickNotFoundError,
     TickTickQuotaExceededError,
+    TickTickRateLimitError,
 )
 from ticktick_sdk.models import (
     Column,
@@ -64,6 +65,24 @@ _BATCH_NOT_FOUND_ERRORS = frozenset({
 _BATCH_QUOTA_ERRORS = frozenset({
     "EXCEED_QUOTA",
 })
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    """Was this failure a rate-limit / throttle (HTTP 429) rather than bad auth?
+
+    The V2 password and cookie paths surface 429 differently: the cookie
+    verification raises ``TickTickRateLimitError``, while password sign-on wraps
+    it as an auth error that still carries ``status_code=429`` in details. We
+    treat either as a throttle, because the operator guidance is the opposite of
+    a stale session ("wait / stop restarting", not "refresh the cookie").
+    """
+    if isinstance(error, TickTickRateLimitError):
+        return True
+    details = getattr(error, "details", None)
+    if isinstance(details, dict) and details.get("status_code") == 429:
+        return True
+    text = str(error).lower()
+    return "429" in text or "rate limit" in text or "too many requests" in text
 
 
 def _check_batch_response_errors(
@@ -293,26 +312,29 @@ class UnifiedTickTickAPI:
         self._initialized = False
         self._inbox_id: str | None = None
 
-        # V2 degraded-mode tracking. When V2 sign-on fails (e.g. need_captcha),
-        # we record a cooldown timestamp so logs and future code can see when
-        # it's reasonable to retry. The server only attempts sign-on at startup
-        # today; the cooldown is primarily informational + a guard against any
-        # future re-auth path. A redeploy always bypasses the cooldown.
-        self._v2_unavailable_until: datetime | None = None
+        # V2 degraded-mode tracking. Holds a human-readable reason for why V2
+        # isn't authenticated (the raw error verbatim where possible), so the
+        # degraded-mode error raised on each V2 call and ticktick_auth_status can
+        # quote it instead of guessing. None when authenticated or unset.
         self._v2_unavailable_reason: str | None = None
         # Which path produced the current V2 session: "password", "cookie",
         # or None when V2 isn't authenticated. Surfaced by get_auth_status().
         self._v2_auth_method: str | None = None
+        # Timestamp of the last V2 auth *attempt* (initial or re-auth). Used by
+        # ensure_v2_fresh() to rate-limit on-demand re-auth. Stamped at the start
+        # of every _authenticate_v2() call.
+        self._last_v2_reauth: datetime | None = None
 
     # =========================================================================
     # Initialization & Lifecycle
     # =========================================================================
 
-    # Cooldown after a failed V2 password sign-on. Long enough that we won't
-    # keep poking at TickTick (and re-triggering need_captcha) on incidental
-    # retries, but a Railway redeploy always resets in-memory state so the
-    # user can manually retry sooner.
-    _V2_PASSWORD_COOLDOWN = timedelta(hours=6)
+    # When V2 is degraded, ensure_v2_fresh() re-checks auth at most once per this
+    # interval. The re-check is COOKIE-ONLY (a gentle /user/status ping) and never
+    # re-attempts password sign-on, so a long-running process can recover when a
+    # throttle clears without a redeploy, and without ever hammering the anti-bot
+    # /user/signon endpoint. The per-session lifespan calls it as a health tick.
+    _V2_REAUTH_BACKOFF = timedelta(minutes=10)
 
     async def initialize(self) -> None:
         """
@@ -358,6 +380,12 @@ class UnifiedTickTickAPI:
             self._v2_client = None
 
         await self._authenticate_v2()
+
+        # Surface *why* V2 is down on the client itself, so the degraded-mode
+        # error raised on each V2 call can be specific (rate-limited vs stale
+        # session) instead of listing every possible cause. None on success.
+        if self._v2_client is not None:
+            self._v2_client.degraded_reason = self._v2_unavailable_reason
 
         # --- Router + verification ----------------------------------------
         self._router = APIRouter(
@@ -411,139 +439,251 @@ class UnifiedTickTickAPI:
 
         self._initialized = True
 
-    async def _authenticate_v2(self) -> None:
+    async def _authenticate_v2(self, allow_password: bool = True) -> None:
         """Authenticate the V2 client.
 
-        Tries password sign-on first (the common path). If it fails — most
-        often with ``need_captcha`` from TickTick's anti-bot — falls back to
-        an env-provided session token + cookies if the user has set them.
+        **Cookie-first.** If a pre-obtained session is configured
+        (``TICKTICK_V2_COOKIES`` / ``TICKTICK_V2_TOKEN``) we try it *before*
+        password sign-on, because the cookie path makes **no** login call and so
+        cannot trip TickTick's anti-bot (captcha / 429). Password sign-on from a
+        datacenter IP is the fragile, anti-bot-magnet path, so it's only used as
+        a fallback when no cookie is configured or the cookie is stale. We also
+        deliberately **skip** password sign-on when the cookie check was
+        rate-limited (429), so we don't pour more failed logins onto a throttle.
 
-        Never raises; records ``_v2_unavailable_reason`` /
-        ``_v2_unavailable_until`` and lets the caller decide what to do.
+        ``allow_password`` gates the password fallback. ``initialize()`` calls
+        with it ``True`` (boot/redeploy may sign on once); the periodic health
+        tick (``ensure_v2_fresh``) calls with it ``False`` so it only ever
+        re-checks a configured cookie and never re-pokes ``/user/signon``.
+
+        Never raises; records ``_v2_unavailable_reason`` and lets the caller
+        decide what to do.
         """
+        # Stamp every attempt (initial connect or on-demand re-auth) so
+        # ensure_v2_fresh()'s backoff covers both paths.
+        self._last_v2_reauth = datetime.now(timezone.utc)
         if self._v2_client is None:
             self._v2_unavailable_reason = "V2 client not constructed"
             return
 
         creds = self._v2_credentials
-
-        # --- Step 1: password sign-on -------------------------------------
-        password_failed_reason: str | None = None
-        if creds["username"] and creds["password"]:
-            try:
-                session = await self._v2_client.authenticate(
-                    creds["username"],
-                    creds["password"],
-                )
-                self._inbox_id = session.inbox_id
-                self._v2_unavailable_reason = None
-                self._v2_unavailable_until = None
-                self._v2_auth_method = "password"
-                logger.info("V2 authenticated via username/password")
-                return
-            except Exception as e:
-                # Includes TickTickSessionError for need_captcha, 2FA, wrong
-                # password, etc., plus any network failure.
-                password_failed_reason = str(e)
-                cooldown_until = datetime.now(timezone.utc) + self._V2_PASSWORD_COOLDOWN
-                self._v2_unavailable_until = cooldown_until
-                logger.error(
-                    "V2 password sign-on failed: %s",
-                    e,
-                )
-                logger.error(
-                    "V2 will be unavailable until ~%s UTC (6h cooldown). "
-                    "You can REDEPLOY the server at any time to retry sooner "
-                    "— the cooldown is in-memory only and resets on restart. "
-                    "If this keeps happening, TickTick is probably anti-bot "
-                    "flagging your password login (look for 'need_captcha' in "
-                    "the error above). Workarounds: (1) set TICKTICK_DEVICE_ID "
-                    "to a stable value so each redeploy doesn't look like a "
-                    "new device, (2) set TICKTICK_V2_TOKEN + TICKTICK_V2_COOKIES "
-                    "from a logged-in browser to skip the password login.",
-                    cooldown_until.isoformat(timespec="seconds"),
-                )
-        else:
-            password_failed_reason = "no username/password configured"
-
-        # --- Step 2: pre-obtained session token fallback ------------------
-        # The only required env var is TICKTICK_V2_COOKIES (the full Cookie
-        # header pasted from a logged-in browser). The session token is the
-        # `t` cookie inside it, so we extract it automatically. Setting
-        # TICKTICK_V2_TOKEN explicitly is optional and just overrides `t`.
         token = creds.get("v2_token")
         cookie_header = creds.get("v2_cookies")
-        if token or cookie_header:
-            cookies = _parse_cookie_header(cookie_header) if cookie_header else {}
-            # Token precedence: explicit env var, else the `t` cookie.
-            token = token or cookies.get("t")
-            if not token:
-                logger.error(
-                    "TICKTICK_V2_COOKIES is set but contains no `t=` cookie, and "
-                    "TICKTICK_V2_TOKEN is unset — cannot build a V2 session. Make "
-                    "sure you pasted the FULL Cookie header (it must include the "
-                    "`t=...` entry)."
-                )
-                self._v2_unavailable_reason = (
-                    f"password failed ({password_failed_reason}) and no `t` "
-                    "cookie found in TICKTICK_V2_COOKIES"
-                )
-                return
-            logger.info(
-                "Attempting V2 fallback via pre-obtained session token "
-                "(from TICKTICK_V2_COOKIES%s)",
-                " + TICKTICK_V2_TOKEN" if creds.get("v2_token") else "",
+        cookie_configured = bool(token or cookie_header)
+
+        # --- Step 1: cookie / pre-obtained session (preferred) ------------
+        cookie_failed_reason: str | None = None
+        if cookie_configured:
+            ok, cookie_failed_reason, rate_limited = await self._try_v2_cookie(
+                token, cookie_header
             )
-            try:
-                # Always include the bare token as the 't' cookie too, since
-                # that's what the V2 API actually checks.
-                cookies.setdefault("t", token)
-                session = SessionToken(
-                    token=token,
-                    user_id="",
-                    username=creds["username"] or "",
-                    inbox_id="",
-                    cookies=cookies,
-                )
-                self._v2_client.set_session(session)
-
-                # Verify by hitting /user/status — this also gives us the
-                # real inbox_id and user_id that the SessionToken didn't
-                # have. If the token is stale this will 401.
-                status = await self._v2_client.get_user_status()
-                session.inbox_id = str(status.get("inboxId", "")) if isinstance(status, dict) else ""
-                session.user_id = str(status.get("userId", "")) if isinstance(status, dict) else ""
-                self._inbox_id = session.inbox_id or self._inbox_id
-
-                self._v2_unavailable_reason = None
-                self._v2_unavailable_until = None
-                self._v2_auth_method = "cookie"
-                logger.info(
-                    "V2 authenticated via pre-obtained session token (fallback). "
-                    "Password sign-on failed earlier: %s",
-                    password_failed_reason or "n/a",
+            if ok:
+                return
+            if rate_limited:
+                # Do NOT fall through to /user/signon: a password login would
+                # only add more failed-login fuel to the throttle (and would be
+                # 429'd too). Stay degraded and let it cool off.
+                self._v2_unavailable_reason = (
+                    f"the session cookie could not be verified on /user/status "
+                    f"because the request was rate-limited (HTTP 429): "
+                    f"{cookie_failed_reason}. A 429 is a throttle, so the cookie "
+                    f"itself may still be valid. Skipped password sign-on to avoid "
+                    f"adding more failed logins. It often clears on its own; if V2 "
+                    f"later fails with a 401/expired error instead, refresh the cookie."
                 )
                 return
-            except Exception as e:
+            # else: cookie is stale/unusable → fall through to password.
+
+        # --- Step 2: password sign-on (no cookie, or cookie stale) --------
+        # Reserved for boot/redeploy. The periodic health tick passes
+        # allow_password=False so it never re-pokes the anti-bot /user/signon
+        # endpoint; it only re-checks a configured cookie (above).
+        if not allow_password:
+            if cookie_configured and cookie_failed_reason:
+                self._v2_unavailable_reason = (
+                    f"the session cookie could not be verified "
+                    f"({cookie_failed_reason}); the periodic re-check does not "
+                    f"attempt password sign-on. If the cookie has expired, refresh "
+                    f"TICKTICK_V2_COOKIES and redeploy."
+                )
+            elif not cookie_configured:
+                self._v2_unavailable_reason = (
+                    "no session cookie is configured (TICKTICK_V2_COOKIES is unset) "
+                    "and the periodic re-check does not attempt password sign-on; "
+                    "set a cookie and redeploy to bring V2 up."
+                )
+            return
+
+        ok, password_failed_reason = await self._try_v2_password()
+        if ok:
+            return
+
+        # --- Both paths failed (or password not configured) ---------------
+        if cookie_configured and cookie_failed_reason:
+            self._v2_unavailable_reason = (
+                f"cookie fallback failed ({cookie_failed_reason}) and password "
+                f"sign-on failed ({password_failed_reason})"
+            )
+        else:
+            self._v2_unavailable_reason = (
+                password_failed_reason or "V2 credentials not provided"
+            )
+
+    async def _try_v2_cookie(
+        self, token: str | None, cookie_header: str | None
+    ) -> tuple[bool, str | None, bool]:
+        """Bring V2 up from a pre-obtained cookie/token (no login call).
+
+        Returns ``(ok, failure_reason, was_rate_limited)``. On success, marks
+        ``_v2_auth_method = "cookie"`` and clears the unavailable reason. On
+        failure, clears the partial session so ``router.has_v2`` is False.
+        """
+        creds = self._v2_credentials
+        cookies = _parse_cookie_header(cookie_header) if cookie_header else {}
+        # Token precedence: explicit env var, else the `t` cookie.
+        token = token or cookies.get("t")
+        if not token:
+            logger.error(
+                "TICKTICK_V2_COOKIES is set but contains no `t=` cookie, and "
+                "TICKTICK_V2_TOKEN is unset — cannot build a V2 session. Make "
+                "sure you pasted the FULL Cookie header (it must include the "
+                "`t=...` entry)."
+            )
+            return False, "no `t` cookie found in TICKTICK_V2_COOKIES", False
+
+        logger.info(
+            "Attempting V2 auth via pre-obtained session cookie "
+            "(from TICKTICK_V2_COOKIES%s)",
+            " + TICKTICK_V2_TOKEN" if creds.get("v2_token") else "",
+        )
+        try:
+            # Always include the bare token as the 't' cookie too, since that's
+            # what the V2 API actually checks.
+            cookies.setdefault("t", token)
+            session = SessionToken(
+                token=token,
+                user_id="",
+                username=creds["username"] or "",
+                inbox_id="",
+                cookies=cookies,
+            )
+            self._v2_client.set_session(session)
+
+            # Verify by hitting /user/status — this also gives us the real
+            # inbox_id / user_id the hand-built SessionToken didn't have. A
+            # stale cookie 401s here; a throttle 429s here.
+            status = await self._v2_client.get_user_status()
+            session.inbox_id = str(status.get("inboxId", "")) if isinstance(status, dict) else ""
+            session.user_id = str(status.get("userId", "")) if isinstance(status, dict) else ""
+            self._inbox_id = session.inbox_id or self._inbox_id
+
+            self._v2_unavailable_reason = None
+            self._v2_auth_method = "cookie"
+            logger.info("V2 authenticated via pre-obtained session cookie.")
+            return True, None, False
+        except Exception as e:
+            rate_limited = _is_rate_limit_error(e)
+            if rate_limited:
                 logger.error(
-                    "V2 token fallback also failed: %s. The session in "
+                    "V2 cookie could not be verified: rate-limited (HTTP 429) on "
+                    "/user/status (%s). This is a THROTTLE, not proof of a stale "
+                    "cookie — the session may still be valid, we just can't "
+                    "confirm it while throttled. Usual cause: too many sign-on "
+                    "attempts (the server re-authenticating on every connection). "
+                    "Refreshing the cookie will NOT help while throttled.",
+                    e,
+                )
+            else:
+                logger.error(
+                    "V2 cookie verification failed: %s. The session in "
                     "TICKTICK_V2_COOKIES is probably stale — refresh it from a "
                     "logged-in TickTick browser tab.",
                     e,
                 )
-                # Clear the partially-set session so router.has_v2 = False
-                try:
-                    self._v2_client._session_handler.clear_session()
-                except Exception:
-                    pass
-                self._v2_unavailable_reason = (
-                    f"password failed ({password_failed_reason}) "
-                    f"and token fallback failed ({e})"
-                )
-                return
+            # Clear the partial session so router.has_v2 = False.
+            try:
+                self._v2_client._session_handler.clear_session()
+            except Exception:
+                pass
+            return False, str(e), rate_limited
 
-        # No fallback configured — record reason and bail.
-        self._v2_unavailable_reason = password_failed_reason or "V2 credentials not provided"
+    async def _try_v2_password(self) -> tuple[bool, str | None]:
+        """Sign on to V2 with username/password (the anti-bot-prone path).
+
+        Returns ``(ok, failure_reason)``. On success, marks
+        ``_v2_auth_method = "password"``. Only called at boot/redeploy, never
+        from the periodic health tick (see ``ensure_v2_fresh``), so a failure
+        here is not retried until the next process start.
+        """
+        creds = self._v2_credentials
+        if not (creds["username"] and creds["password"]):
+            return False, "no username/password configured"
+        try:
+            session = await self._v2_client.authenticate(
+                creds["username"],
+                creds["password"],
+            )
+            self._inbox_id = session.inbox_id
+            self._v2_unavailable_reason = None
+            self._v2_auth_method = "password"
+            logger.info("V2 authenticated via username/password")
+            return True, None
+        except Exception as e:
+            # Includes TickTickSessionError for need_captcha, 2FA, wrong
+            # password, etc., plus any network failure. NOTE: from a
+            # server/datacenter IP the anti-bot frequently masks itself as
+            # `username_password_not_match` or `need_captcha` (HTTP 500), or a
+            # 429, even when the credentials are correct, so we report the raw
+            # error verbatim rather than asserting the password is wrong.
+            if _is_rate_limit_error(e):
+                reason = (
+                    f"rate-limited (HTTP 429) on /user/signon: TickTick is "
+                    f"throttling logins ({e})"
+                )
+            else:
+                reason = str(e)
+            logger.error("V2 password sign-on failed: %s", e)
+            logger.error(
+                "V2 password sign-on failed. From a datacenter IP this is usually "
+                "TickTick's anti-bot, not a wrong password (the error code can be "
+                "need_captcha / username_password_not_match / 429 even with correct "
+                "credentials). Most reliable fix: set TICKTICK_V2_COOKIES from a "
+                "logged-in browser so the server skips /user/signon entirely (it is "
+                "tried first). A redeploy retries sign-on."
+            )
+            return False, reason
+
+    async def ensure_v2_fresh(self) -> None:
+        """Re-attempt V2 auth if it's currently degraded (backoff-gated).
+
+        A no-op when V2 is already healthy, or when the last auth attempt was
+        within ``_V2_REAUTH_BACKOFF``. Otherwise it re-runs the cookie-first
+        auth, so a long-running process recovers when a TickTick throttle clears
+        without needing a redeploy, and without hammering (cookie-first means no
+        ``/user/signon`` when the cookie is valid). The server lifespan calls
+        this once per MCP session, which acts as a periodic health tick.
+        """
+        if not self._initialized or self._v2_client is None:
+            return
+        if self._router is not None and self._router.has_v2:
+            return  # already healthy, nothing to do
+        now = datetime.now(timezone.utc)
+        if (
+            self._last_v2_reauth is not None
+            and (now - self._last_v2_reauth) < self._V2_REAUTH_BACKOFF
+        ):
+            return  # backoff not elapsed, don't poke TickTick yet
+        logger.info(
+            "V2 is degraded; making a backoff-gated, cookie-only re-check "
+            "(no password sign-on)."
+        )
+        await self._authenticate_v2(allow_password=False)
+        # Keep the per-call degraded message in sync with the new state (mirrors
+        # what initialize() does after the first auth).
+        if self._v2_client is not None:
+            self._v2_client.degraded_reason = self._v2_unavailable_reason
+        if self._router is not None and self._router.has_v2:
+            logger.info("V2 recovered via re-authentication.")
 
     async def get_auth_status(self) -> dict[str, Any]:
         """Live auth health snapshot for diagnostics (no secrets).
@@ -584,11 +724,6 @@ class UnifiedTickTickAPI:
             "v2_error": v2_error,
             "v2_auth_method": self._v2_auth_method,
             "v2_unavailable_reason": self._v2_unavailable_reason,
-            "v2_cooldown_until": (
-                self._v2_unavailable_until.isoformat(timespec="seconds")
-                if self._v2_unavailable_until
-                else None
-            ),
         }
 
     async def close(self) -> None:

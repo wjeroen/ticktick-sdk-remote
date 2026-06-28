@@ -47,6 +47,11 @@ class BaseTickTickClient(ABC):
         self._user_agent = user_agent
         self._client: httpx.AsyncClient | None = None
         self._is_authenticated = False
+        # When this client can't authenticate, the unified layer records a
+        # human-readable reason here so the degraded-mode error raised on each
+        # call can say *why* (rate-limited vs stale session vs captcha) instead
+        # of guessing. None when authenticated or when no reason was recorded.
+        self.degraded_reason: str | None = None
 
     # =========================================================================
     # Abstract Properties
@@ -345,22 +350,45 @@ class BaseTickTickClient(ABC):
         """
         if require_auth and not self.is_authenticated:
             if self.api_version == APIVersion.V2:
+                if self.degraded_reason:
+                    # Quote the raw reason verbatim, then add hedged,
+                    # non-prescriptive commentary rather than asserting a single
+                    # cause/fix (the V2 anti-bot masks itself behind several
+                    # error codes, so over-specific advice misleads).
+                    message = (
+                        f"TickTick V2 is currently unavailable. Reason recorded at "
+                        f"auth time: {self.degraded_reason} "
+                        "The server is running in V1-only degraded mode, so "
+                        "V2-routed tools (task search/listing, account status, tags, "
+                        "folders, habits, focus, subtasks) won't work until V2 "
+                        "recovers. Common causes: an expired or revoked session "
+                        "cookie, a TickTick rate-limit/throttle (HTTP 429), no cookie "
+                        "configured (so password sign-on was attempted and anti-bot "
+                        "blocked), or a different reason entirely. Read the reason "
+                        "above to tell which. The most reliable fix is usually to set "
+                        "or refresh TICKTICK_V2_COOKIES from a logged-in browser tab "
+                        "(see README) and redeploy. If you are not the host, relay "
+                        "this to whoever is."
+                    )
+                else:
+                    message = (
+                        "TickTick V2 is currently unavailable and no specific reason "
+                        "was recorded, so the server is running in V1-only degraded "
+                        "mode. Possible causes: an anti-bot/captcha block on password "
+                        "sign-on, an invalid TICKTICK_DEVICE_ID, an expired session, "
+                        "or a different reason entirely. The most reliable fix is "
+                        "usually to set TICKTICK_V2_COOKIES (from a logged-in browser, "
+                        "see README) so the server skips password sign-on, then "
+                        "redeploy. If you are not the host, relay this to whoever is."
+                    )
                 raise TickTickAuthenticationError(
-                    "TickTick V2 is unavailable — sign-on failed (captcha / "
-                    "anti-bot throttle, an invalid TICKTICK_DEVICE_ID, or an "
-                    "expired session) so the server is running in V1-only "
-                    "degraded mode. The person hosting this server can set "
-                    "TICKTICK_V2_COOKIES (from a logged-in browser, see README) "
-                    "to bypass V2 sign-on, or redeploy to retry. If you are not "
-                    "the host, relay this to whoever is.",
+                    message,
                     details={"endpoint": endpoint, "api_version": "v2", "degraded": True},
                 )
             raise TickTickAuthenticationError(
                 f"Authentication required for {self.api_version.value} API",
                 details={"endpoint": endpoint},
             )
-
-        client = await self._ensure_client()
 
         # Merge headers
         request_headers = self._get_headers()
@@ -374,8 +402,37 @@ class BaseTickTickClient(ABC):
             endpoint,
         )
 
+        response = await self._send_http(
+            method, endpoint, params, json_data, request_headers
+        )
+
+        # Handle errors. A status-code check works for both httpx and curl_cffi
+        # responses (curl_cffi has no `.is_success`).
+        if not (200 <= response.status_code < 300):
+            self._handle_error_response(response, endpoint)
+
+        return response
+
+    async def _send_http(
+        self,
+        method: str,
+        endpoint: str,
+        params: dict[str, Any] | None,
+        json_data: Any,
+        request_headers: dict[str, str],
+    ) -> Any:
+        """Send one HTTP request and return the response object.
+
+        The default transport is httpx (used by V1, and by V2 as a fallback).
+        Subclasses may override this to use a different transport: the V2 client
+        swaps in curl_cffi browser impersonation to get past TickTick's V2
+        anti-bot, which fingerprints plain Python HTTP clients. The returned
+        object must expose ``status_code``, ``json()``, ``text``, ``content``,
+        and ``headers.get()`` (both httpx and curl_cffi responses do).
+        """
+        client = await self._ensure_client()
         try:
-            response = await client.request(
+            return await client.request(
                 method=method,
                 url=endpoint,
                 params=params,
@@ -395,12 +452,6 @@ class BaseTickTickClient(ABC):
                 endpoint=endpoint,
                 api_version=self.api_version.value,
             ) from e
-
-        # Handle errors
-        if not response.is_success:
-            self._handle_error_response(response, endpoint)
-
-        return response
 
     async def _get(
         self,

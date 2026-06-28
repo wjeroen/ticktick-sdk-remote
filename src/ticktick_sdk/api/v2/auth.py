@@ -24,6 +24,14 @@ from typing import Any
 
 import httpx
 
+# Same browser-fingerprint impersonation as the V2 client (see api/v2/client.py):
+# sign-on is the most anti-bot-scrutinized V2 endpoint, so route it through
+# curl_cffi too when available. Optional, falls back to httpx.
+try:
+    from curl_cffi.requests import AsyncSession as _CurlAsyncSession
+except Exception:  # pragma: no cover - optional dependency
+    _CurlAsyncSession = None
+
 from ticktick_sdk.constants import (
     DEFAULT_TIMEOUT,
     V2_DEVICE_VERSION,
@@ -137,6 +145,16 @@ class SessionHandler:
 
         self._session: SessionToken | None = None
 
+        # Browser-impersonation transport (see module note). Profile from
+        # TICKTICK_V2_IMPERSONATE (default "chrome"); "off"/"none" or a missing
+        # curl_cffi falls back to httpx.
+        profile = os.getenv("TICKTICK_V2_IMPERSONATE", "chrome").strip()
+        if profile.lower() in ("", "off", "none", "false", "0") or _CurlAsyncSession is None:
+            self._impersonate = ""
+        else:
+            self._impersonate = profile
+        self._curl_session_cls = _CurlAsyncSession
+
     @property
     def session(self) -> SessionToken | None:
         """Get the current session."""
@@ -192,6 +210,68 @@ class SessionHandler:
             "X-Device": self._get_x_device_header(),
         }
 
+    async def _post(
+        self,
+        url: str,
+        params: dict[str, Any] | None,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+    ) -> Any:
+        """POST to a V2 auth endpoint, via curl_cffi impersonation if enabled.
+
+        Returns the raw response (httpx or curl_cffi). Raises
+        TickTickSessionError on a transport-level failure.
+        """
+        if self._impersonate and self._curl_session_cls is not None:
+            # Drop our User-Agent so the impersonation profile's matching UA wins.
+            send_headers = {
+                k: v for k, v in headers.items() if k.lower() != "user-agent"
+            }
+            try:
+                async with self._curl_session_cls() as session:
+                    return await session.request(
+                        "POST",
+                        url,
+                        params=params,
+                        json=payload,
+                        headers=send_headers,
+                        impersonate=self._impersonate,
+                        timeout=self.timeout,
+                    )
+            except Exception as e:
+                raise TickTickSessionError(
+                    f"Authentication request failed: {e}",
+                ) from e
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                return await client.post(
+                    url, params=params, json=payload, headers=headers
+                )
+            except httpx.RequestError as e:
+                raise TickTickSessionError(
+                    f"Authentication request failed: {e}",
+                ) from e
+
+    @staticmethod
+    def _extract_cookies(response: Any) -> dict[str, str]:
+        """Pull cookies out of an httpx OR curl_cffi response."""
+        cookies: dict[str, str] = {}
+        raw = getattr(response, "cookies", None)
+        if raw is None:
+            return cookies
+        jar = getattr(raw, "jar", None)
+        if jar is not None:  # httpx
+            for cookie in jar:
+                cookies[cookie.name] = cookie.value
+            return cookies
+        try:  # curl_cffi cookies are dict-like
+            for k, v in raw.items():
+                cookies[k] = v
+        except Exception:
+            pass
+        return cookies
+
     async def authenticate(
         self,
         username: str,
@@ -217,23 +297,12 @@ class SessionHandler:
 
         logger.debug("Authenticating user: %s", username)
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                response = await client.post(
-                    url,
-                    params=params,
-                    json=payload,
-                    headers=headers,
-                )
-            except httpx.RequestError as e:
-                raise TickTickSessionError(
-                    f"Authentication request failed: {e}",
-                ) from e
+        response = await self._post(url, params, payload, headers)
 
-            if not response.is_success:
-                self._handle_auth_error(response)
+        if not (200 <= response.status_code < 300):
+            self._handle_auth_error(response)
 
-            data = response.json()
+        data = response.json()
 
         # Check for 2FA requirement
         if "authId" in data and "token" not in data:
@@ -244,10 +313,8 @@ class SessionHandler:
                 details={"expire_time": data.get("expireTime")},
             )
 
-        # Extract cookies
-        cookies: dict[str, str] = {}
-        for cookie in response.cookies.jar:
-            cookies[cookie.name] = cookie.value
+        # Extract cookies (handles both httpx and curl_cffi responses)
+        cookies = self._extract_cookies(response)
 
         # Also add the token as a cookie (required by V2 API)
         if "t" not in cookies and "token" in data:
@@ -300,27 +367,15 @@ class SessionHandler:
 
         logger.debug("Completing 2FA authentication")
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                response = await client.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                )
-            except httpx.RequestError as e:
-                raise TickTickSessionError(
-                    f"2FA verification request failed: {e}",
-                ) from e
+        response = await self._post(url, None, payload, headers)
 
-            if not response.is_success:
-                self._handle_auth_error(response)
+        if not (200 <= response.status_code < 300):
+            self._handle_auth_error(response)
 
-            data = response.json()
+        data = response.json()
 
-        # Extract cookies
-        cookies: dict[str, str] = {}
-        for cookie in response.cookies.jar:
-            cookies[cookie.name] = cookie.value
+        # Extract cookies (handles both httpx and curl_cffi responses)
+        cookies = self._extract_cookies(response)
 
         if "t" not in cookies and "token" in data:
             cookies["t"] = data["token"]

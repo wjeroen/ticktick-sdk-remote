@@ -51,11 +51,22 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import date, datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
 import httpx
+
+# curl_cffi lets us mimic a real browser's TLS/HTTP fingerprint. TickTick's V2
+# anti-bot fingerprints plain Python clients (httpx) and 429s them even with a
+# valid cookie from a working browser session, so for V2 we send requests through
+# curl_cffi with browser impersonation. Optional: if it isn't installed we fall
+# back to httpx (V2 may then be anti-bot blocked).
+try:
+    from curl_cffi.requests import AsyncSession as _CurlAsyncSession
+except Exception:  # pragma: no cover - optional dependency
+    _CurlAsyncSession = None
 
 from ticktick_sdk.api.base import BaseTickTickClient
 from ticktick_sdk.api.v2.auth import SessionHandler, SessionToken
@@ -110,7 +121,7 @@ from ticktick_sdk.constants import (
     V2_USER_AGENT,
     get_api_base_v2,
 )
-from ticktick_sdk.exceptions import TickTickAuthenticationError
+from ticktick_sdk.exceptions import TickTickAPIError, TickTickAuthenticationError
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +156,29 @@ class TickTickV2Client(BaseTickTickClient):
             device_id=device_id,
             timeout=timeout,
         )
+
+        # Browser-impersonation transport for V2 (gets past the anti-bot that
+        # 429s plain Python clients). Profile from TICKTICK_V2_IMPERSONATE
+        # (default "chrome"); set it to "off"/"none" to force plain httpx.
+        profile = os.getenv("TICKTICK_V2_IMPERSONATE", "chrome").strip()
+        if profile.lower() in ("", "off", "none", "false", "0"):
+            self._impersonate: str = ""
+        else:
+            self._impersonate = profile
+        self._curl_session_cls = _CurlAsyncSession
+        if self._impersonate and self._curl_session_cls is None:
+            logger.warning(
+                "TICKTICK_V2_IMPERSONATE=%s but curl_cffi is not installed; "
+                "falling back to httpx for V2. TickTick may anti-bot block it. "
+                "Install curl_cffi (it's in this project's dependencies).",
+                profile,
+            )
+            self._impersonate = ""
+        elif self._impersonate:
+            logger.info(
+                "V2 transport: curl_cffi browser impersonation (profile=%s)",
+                self._impersonate,
+            )
 
     # =========================================================================
     # Abstract Property Implementations
@@ -200,6 +234,50 @@ class TickTickV2Client(BaseTickTickClient):
                 headers["Cookie"] = cookie_str
 
         return headers
+
+    async def _send_http(
+        self,
+        method: str,
+        endpoint: str,
+        params: dict[str, Any] | None,
+        json_data: Any,
+        request_headers: dict[str, str],
+    ) -> Any:
+        """V2 transport: curl_cffi browser impersonation, with httpx fallback.
+
+        TickTick's V2 anti-bot 429s plain Python clients by their TLS/HTTP
+        fingerprint, even with a valid cookie from a working browser. curl_cffi
+        replays a real browser's fingerprint so the request looks legitimate.
+        """
+        if not (self._impersonate and self._curl_session_cls is not None):
+            return await super()._send_http(
+                method, endpoint, params, json_data, request_headers
+            )
+
+        # curl_cffi has no base_url, so build the absolute URL ourselves.
+        url = f"{self.base_url}{endpoint}"
+        # Drop our User-Agent so the impersonation profile's own (matching) UA is
+        # used. A Firefox UA over a Chrome TLS fingerprint would itself look fake.
+        send_headers = {
+            k: v for k, v in request_headers.items() if k.lower() != "user-agent"
+        }
+        try:
+            async with self._curl_session_cls() as session:
+                return await session.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json_data,
+                    headers=send_headers,
+                    impersonate=self._impersonate,
+                    timeout=self._timeout,
+                )
+        except Exception as e:
+            raise TickTickAPIError(
+                f"Request failed (impersonated V2 transport): {e}",
+                endpoint=endpoint,
+                api_version=self.api_version.value,
+            ) from e
 
     # =========================================================================
     # Authentication Methods

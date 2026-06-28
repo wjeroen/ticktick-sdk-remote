@@ -2,9 +2,9 @@
 Tests for graceful V2 degradation in UnifiedTickTickAPI.initialize().
 
 When V2 password sign-on fails (e.g. TickTick returns need_captcha from
-its anti-bot system), the server must NOT crash — it should keep V1
-running, surface a clear log message with a cooldown timestamp, and
-optionally fall back to a pre-obtained session token from env vars.
+its anti-bot system), the server must NOT crash. It should keep V1
+running, record a clear (verbatim) failure reason, and optionally fall
+back to a pre-obtained session token from env vars.
 
 These tests pin that behavior so the crash-loop regression can't sneak
 back in.
@@ -12,12 +12,14 @@ back in.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from ticktick_sdk.exceptions import (
     TickTickConfigurationError,
+    TickTickRateLimitError,
     TickTickSessionError,
 )
 from ticktick_sdk.unified.api import UnifiedTickTickAPI, _parse_cookie_header
@@ -112,7 +114,6 @@ async def test_initialize_succeeds_when_v2_password_fails_and_v1_works(patched_c
     assert api._router.has_v1 is True
     assert api._router.has_v2 is False
     assert api._v2_unavailable_reason is not None
-    assert api._v2_unavailable_until is not None
 
 
 async def test_initialize_raises_only_when_both_apis_dead(patched_clients):
@@ -135,7 +136,7 @@ async def test_initialize_raises_only_when_both_apis_dead(patched_clients):
 
 
 async def test_initialize_falls_back_to_session_token_when_password_fails(patched_clients):
-    """Password sign-on fails → token+cookie env vars → V2 recovers."""
+    """Cookie-first: token+cookie env vars bring V2 up (password never needed)."""
     v1, v2 = patched_clients
     v2.authenticate.side_effect = TickTickSessionError("need_captcha")
     # After set_session is called, treat the V2 client as authenticated so
@@ -346,7 +347,7 @@ async def test_initialize_cookies_without_t_fails_gracefully(patched_clients):
 
 
 async def test_initialize_token_fallback_failure_keeps_v2_unavailable(patched_clients):
-    """Password fails AND token fallback fails → V2 stays unavailable, server still starts on V1."""
+    """Stale cookie AND password sign-on fails → V2 stays unavailable, server still starts on V1."""
     v1, v2 = patched_clients
     v2.authenticate.side_effect = TickTickSessionError("need_captcha")
     v2.get_user_status.side_effect = TickTickSessionError("token stale (401)")
@@ -368,4 +369,370 @@ async def test_initialize_token_fallback_failure_keeps_v2_unavailable(patched_cl
 
     assert api._router.has_v1 is True
     assert v2._session_handler.clear_session.called
-    assert "token fallback failed" in (api._v2_unavailable_reason or "")
+    # Cookie-first: a stale (401) cookie falls through to password sign-on, and
+    # the combined reason names both failures.
+    reason = api._v2_unavailable_reason or ""
+    assert "cookie fallback failed" in reason
+    assert "password sign-on failed" in reason
+
+
+async def test_cookie_is_tried_before_password_and_password_is_skipped(patched_clients):
+    """Cookie-first: when the cookie works, /user/signon is never called."""
+    v1, v2 = patched_clients
+    # If password sign-on were attempted it would "succeed" here — prove it
+    # isn't called at all because the cookie path wins first.
+    v2.authenticate = AsyncMock(side_effect=AssertionError("password must not be tried"))
+
+    def _mark_authed(_session):
+        v2.is_authenticated = True
+        v2.verify_authentication = AsyncMock(return_value=True)
+    v2.set_session.side_effect = _mark_authed
+
+    api = UnifiedTickTickAPI(
+        client_id="cid",
+        client_secret="sec",
+        v1_access_token="v1tok",
+        username="user@example.com",
+        password="pw",
+        v2_cookies="t=GOOD_TOKEN; AWSALB=z",
+    )
+
+    await api.initialize()
+
+    assert api._router.has_v2 is True
+    assert api._v2_auth_method == "cookie"
+    v2.authenticate.assert_not_called()  # password sign-on skipped entirely
+
+
+async def test_cookie_rate_limited_does_not_trigger_password_signon(patched_clients):
+    """A 429 verifying the cookie must NOT fall through to /user/signon.
+
+    Otherwise we pour more failed logins onto the throttle that's already
+    blocking us. V2 stays degraded with a rate-limit reason, password untouched.
+    """
+    from ticktick_sdk.exceptions import TickTickRateLimitError
+
+    v1, v2 = patched_clients
+    v2.authenticate = AsyncMock(side_effect=AssertionError("password must not be tried"))
+    v2.get_user_status.side_effect = TickTickRateLimitError(
+        "Rate limit exceeded", details={"api_version": "v2", "endpoint": "/user/status"}
+    )
+
+    # set_session marks the client authed; clear_session (called when the 429
+    # fails verification) must flip it back, like the real session handler does.
+    def _mark_authed(_session):
+        v2.is_authenticated = True
+    v2.set_session.side_effect = _mark_authed
+
+    def _clear():
+        v2.is_authenticated = False
+    v2._session_handler.clear_session.side_effect = _clear
+
+    api = UnifiedTickTickAPI(
+        client_id="cid",
+        client_secret="sec",
+        v1_access_token="v1tok",
+        username="user@example.com",
+        password="pw",
+        v2_cookies="t=MAYBE_FINE; AWSALB=z",
+    )
+
+    await api.initialize()
+
+    assert api._router.has_v1 is True
+    assert api._router.has_v2 is False
+    v2.authenticate.assert_not_called()  # the whole point: no signon fuel
+    reason = (api._v2_unavailable_reason or "").lower()
+    assert "rate-limited" in reason or "429" in reason
+
+
+# =============================================================================
+# ensure_v2_fresh() — backoff-gated on-demand re-auth (recovery without redeploy)
+# =============================================================================
+
+
+def _degraded_cookie_api(patched_clients, status_side_effect):
+    """Build (not yet initialized) an api whose cookie verification fails per
+    `status_side_effect`. set_session marks authed; clear_session unmarks it."""
+    v1, v2 = patched_clients
+    v2.get_user_status.side_effect = status_side_effect
+
+    def _mark_authed(_session):
+        v2.is_authenticated = True
+    v2.set_session.side_effect = _mark_authed
+
+    def _clear():
+        v2.is_authenticated = False
+    v2._session_handler.clear_session.side_effect = _clear
+
+    api = UnifiedTickTickAPI(
+        client_id="cid",
+        client_secret="sec",
+        v1_access_token="v1tok",
+        username="user@example.com",
+        password="pw",
+        v2_cookies="t=COOKIE",
+    )
+    return api, v1, v2
+
+
+async def test_ensure_v2_fresh_is_noop_when_healthy(patched_clients):
+    """When V2 is up, ensure_v2_fresh must not re-authenticate or ping."""
+    api, v1, v2 = await _init_cookie_authed_api(patched_clients)
+    assert api._router.has_v2 is True
+    v2.set_session.reset_mock()
+    v2.get_user_status.reset_mock()
+
+    await api.ensure_v2_fresh()
+
+    v2.set_session.assert_not_called()
+    v2.get_user_status.assert_not_called()
+
+
+async def test_ensure_v2_fresh_respects_backoff(patched_clients):
+    """A second attempt within the backoff window must not hit TickTick again."""
+    api, v1, v2 = _degraded_cookie_api(
+        patched_clients, TickTickRateLimitError("Rate limit exceeded")
+    )
+    await api.initialize()
+    assert api._router.has_v2 is False
+    calls_after_init = v2.get_user_status.call_count  # the one init attempt
+
+    await api.ensure_v2_fresh()  # immediately after → inside backoff → skip
+
+    assert v2.get_user_status.call_count == calls_after_init
+    assert api._router.has_v2 is False
+
+
+async def test_ensure_v2_fresh_recovers_when_throttle_clears(patched_clients):
+    """Once the backoff elapses and the throttle is gone, V2 comes back, no redeploy."""
+    # First /user/status 429 (init, degraded); second succeeds (throttle cleared).
+    api, v1, v2 = _degraded_cookie_api(
+        patched_clients,
+        [
+            TickTickRateLimitError("Rate limit exceeded"),
+            {"inboxId": "inbox123", "userId": "u1"},
+        ],
+    )
+    await api.initialize()
+    assert api._router.has_v2 is False
+
+    # Simulate the backoff window having elapsed since the init attempt.
+    api._last_v2_reauth = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+    await api.ensure_v2_fresh()
+
+    assert api._router.has_v2 is True
+    assert api._v2_auth_method == "cookie"
+    assert api.inbox_id == "inbox123"
+
+
+async def test_ensure_v2_fresh_never_signs_on_with_password(patched_clients):
+    """The health tick is COOKIE-ONLY. With no cookie configured, a degraded
+    password-only api must NOT re-attempt /user/signon on ensure_v2_fresh()
+    (that would hammer the anti-bot endpoint). Password sign-on is boot-only."""
+    v1, v2 = patched_clients
+    # Password sign-on fails at init (anti-bot), so V2 starts degraded.
+    v2.authenticate.side_effect = TickTickSessionError(
+        "Authentication failed: need_captcha", details={"errorCode": "need_captcha"}
+    )
+    api = UnifiedTickTickAPI(
+        client_id="cid",
+        client_secret="sec",
+        v1_access_token="v1tok",
+        username="user@example.com",
+        password="pw",
+        # deliberately no v2_cookies — password is the only V2 path
+    )
+    await api.initialize()
+    assert api._router.has_v2 is False
+    assert v2.authenticate.call_count == 1  # exactly the one boot attempt
+
+    # Pretend the backoff elapsed so ensure_v2_fresh runs its body, not skips.
+    api._last_v2_reauth = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    await api.ensure_v2_fresh()
+
+    # The health tick must NOT have signed on again.
+    assert v2.authenticate.call_count == 1
+    assert api._router.has_v2 is False
+
+
+# =============================================================================
+# server: client is built once per process, not per MCP session
+# =============================================================================
+
+
+async def test_server_builds_client_once_per_process(monkeypatch):
+    """_get_or_create_client reuses one client across calls (the per-session
+    lifespan must NOT re-build/re-auth on every connection)."""
+    import ticktick_sdk.server as server
+
+    built = {"count": 0}
+
+    def _fake_from_settings(settings):
+        built["count"] += 1
+        c = MagicMock()
+        c.is_connected = False
+
+        async def _connect():
+            c.is_connected = True
+
+        c.connect = AsyncMock(side_effect=_connect)
+        c.ensure_v2_fresh = AsyncMock()
+        return c
+
+    fake_settings = MagicMock()
+    fake_settings.device_id_looks_valid = True
+    fake_settings.device_id_is_ephemeral = False
+
+    monkeypatch.setattr(server, "_shared_client", None)
+    monkeypatch.setattr(server, "get_settings", lambda: fake_settings)
+    monkeypatch.setattr(
+        server.TickTickClient, "from_settings", staticmethod(_fake_from_settings)
+    )
+
+    c1 = await server._get_or_create_client()
+    c2 = await server._get_or_create_client()
+
+    assert c1 is c2
+    assert built["count"] == 1  # built + connected only once
+    c1.connect.assert_awaited_once()
+
+
+# =============================================================================
+# V2 browser-impersonation transport (curl_cffi)
+# =============================================================================
+
+
+async def test_v2_send_http_uses_impersonation_when_enabled():
+    """When impersonation is on, _send_http routes through the curl_cffi session,
+    builds an absolute URL, passes the profile, and drops our User-Agent so the
+    profile's matching UA is used. Keeps Cookie/X-Device."""
+    from ticktick_sdk.api.v2.client import TickTickV2Client
+
+    calls = {}
+
+    class _FakeResp:
+        status_code = 200
+        content = b'{"ok": true}'
+        text = '{"ok": true}'
+        headers: dict = {}
+
+        def json(self):
+            return {"ok": True}
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            calls.update(method=method, url=url, **kwargs)
+            return _FakeResp()
+
+    c = TickTickV2Client(device_id="a" * 24)
+    c._impersonate = "chrome"
+    c._curl_session_cls = _FakeSession
+
+    resp = await c._send_http(
+        "GET",
+        "/user/status",
+        None,
+        None,
+        {"User-Agent": "Firefox", "Cookie": "t=x", "X-Device": "{}"},
+    )
+
+    assert resp.status_code == 200
+    assert calls["impersonate"] == "chrome"
+    assert calls["url"].endswith("/api/v2/user/status")
+    sent_headers = calls["headers"]
+    assert all(k.lower() != "user-agent" for k in sent_headers)  # UA stripped
+    assert sent_headers["Cookie"] == "t=x"
+    assert sent_headers["X-Device"] == "{}"
+
+
+async def test_v2_send_http_falls_back_to_httpx_when_impersonation_off(monkeypatch):
+    """With impersonation disabled, _send_http defers to the base (httpx) path."""
+    from ticktick_sdk.api.v2.client import TickTickV2Client
+    from ticktick_sdk.api import base as base_mod
+
+    c = TickTickV2Client(device_id="a" * 24)
+    c._impersonate = ""  # disabled
+
+    called = {}
+
+    async def _fake_base_send(self, method, endpoint, params, json_data, headers):
+        called["used_base"] = True
+        return MagicMock(status_code=200)
+
+    monkeypatch.setattr(base_mod.BaseTickTickClient, "_send_http", _fake_base_send)
+    await c._send_http("GET", "/user/status", None, None, {})
+    assert called.get("used_base") is True
+
+
+async def test_signon_post_uses_impersonation_when_enabled():
+    """Sign-on (SessionHandler) also routes through curl_cffi when enabled, and
+    drops our User-Agent so the profile's UA is used."""
+    from ticktick_sdk.api.v2.auth import SessionHandler
+
+    calls = {}
+
+    class _FakeResp:
+        status_code = 200
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            calls.update(method=method, url=url, **kwargs)
+            return _FakeResp()
+
+    h = SessionHandler(device_id="a" * 24)
+    h._impersonate = "chrome"
+    h._curl_session_cls = _FakeSession
+
+    resp = await h._post(
+        "https://api.ticktick.com/api/v2/user/signon",
+        {"wc": "true"},
+        {"username": "u", "password": "p"},
+        {"User-Agent": "Firefox", "X-Device": "{}"},
+    )
+
+    assert resp.status_code == 200
+    assert calls["method"] == "POST"
+    assert calls["impersonate"] == "chrome"
+    assert all(k.lower() != "user-agent" for k in calls["headers"])
+    assert calls["headers"]["X-Device"] == "{}"
+
+
+def test_extract_cookies_handles_httpx_and_curl_shapes():
+    from ticktick_sdk.api.v2.auth import SessionHandler
+
+    # curl_cffi style: .cookies is dict-like (no .jar)
+    class _CurlResp:
+        cookies = {"t": "TOK", "AWSALB": "x"}
+
+    assert SessionHandler._extract_cookies(_CurlResp())["t"] == "TOK"
+
+    # httpx style: .cookies.jar yields objects with .name/.value
+    class _C:
+        def __init__(self, n, v):
+            self.name, self.value = n, v
+
+    class _Jar:
+        def __iter__(self):
+            return iter([_C("t", "TOK2")])
+
+    class _Cookies:
+        jar = _Jar()
+
+    class _HttpxResp:
+        cookies = _Cookies()
+
+    assert SessionHandler._extract_cookies(_HttpxResp())["t"] == "TOK2"
