@@ -40,6 +40,24 @@ class StatisticsSection(str, Enum):
     POMODOROS = "pomodoros"
 
 
+class TaskSort(str, Enum):
+    """Sort order for task search/listing.
+
+    The ``_desc``/``_asc`` suffix is the direction. Date sorts put tasks
+    missing that date last in either direction. ``created_desc`` (newest
+    first) is the search default because most lookups want the latest match.
+    """
+
+    CREATED_DESC = "created_desc"
+    CREATED_ASC = "created_asc"
+    MODIFIED_DESC = "modified_desc"
+    MODIFIED_ASC = "modified_asc"
+    DUE_DESC = "due_desc"
+    DUE_ASC = "due_asc"
+    PRIORITY_DESC = "priority_desc"
+    TITLE_ASC = "title_asc"
+
+
 class BaseMCPInput(BaseModel):
     """Base input model with common configuration."""
 
@@ -532,10 +550,26 @@ class TaskListInput(BaseMCPInput):
         ge=1,
         le=90,
     )
+    # Sorting
+    sort: Optional[TaskSort] = Field(
+        default=None,
+        description=(
+            "Optional explicit sort order. When omitted, the natural order for "
+            "the status is used (active: due date ascending, undated last; "
+            "completed/abandoned: most recently completed first; deleted: by id). "
+            "Options: created_desc, created_asc, modified_desc, modified_asc, "
+            "due_desc, due_asc, priority_desc, title_asc."
+        ),
+    )
     # Pagination
     limit: int = Field(
         default=50,
-        description="Maximum number of tasks to consider after filtering. Combine with offset for paging through large result sets.",
+        description=(
+            "Maximum tasks per page. The response also respects a hard size "
+            "budget, so a page may contain fewer than 'limit'; when more match, "
+            "'next_offset' (JSON) or a markdown footer signals there is another "
+            "page. 'total' always reports the true count regardless of 'limit'."
+        ),
         ge=1,
         le=500,
     )
@@ -551,23 +585,88 @@ class TaskListInput(BaseMCPInput):
 
 
 class SearchInput(BaseMCPInput):
-    """Input for searching tasks."""
+    """Search active tasks by text and/or structured filters.
 
-    query: str = Field(
-        ...,
-        description="Search query to match against task titles and content",
-        min_length=1,
+    Matches a case-insensitive substring against task titles and content, and
+    can be narrowed by project, kind, tag, priority, and due/created date
+    ranges. Results default to newest-first (``created_desc``). The text
+    ``query`` is optional: omit it to do a pure filter lookup, e.g. "the latest
+    NOTE in project X" via ``project_id`` + ``kind='NOTE'`` + ``limit=1``.
+
+    Scope note: this searches *active* tasks only (not completed, abandoned, or
+    trashed). Use ``ticktick_list_tasks`` with a status filter for those.
+    """
+
+    query: Optional[str] = Field(
+        default=None,
+        description=(
+            "Text to match against task titles and content (case-insensitive "
+            "substring). Optional — omit to filter without a text query."
+        ),
         max_length=200,
+    )
+    project_id: Optional[str] = Field(
+        default=None,
+        description="Only return tasks in this project.",
+        pattern=r"^(inbox\d+|[a-f0-9]{24})$",
+    )
+    kind: Optional[str] = Field(
+        default=None,
+        description="Only return tasks of this kind: 'TEXT', 'NOTE', or 'CHECKLIST'.",
+        pattern=r"^(TEXT|NOTE|CHECKLIST)$",
+    )
+    tag: Optional[str] = Field(
+        default=None,
+        description="Only return tasks carrying this tag (case-insensitive).",
+    )
+    priority: Optional[str] = Field(
+        default=None,
+        description="Only return tasks with this priority: 'none', 'low', 'medium', 'high'.",
+        pattern=r"^(none|low|medium|high)$",
+    )
+    due_before: Optional[str] = Field(
+        default=None,
+        description="Only tasks due on or before this date (YYYY-MM-DD), in TICKTICK_TIMEZONE.",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    )
+    due_after: Optional[str] = Field(
+        default=None,
+        description="Only tasks due on or after this date (YYYY-MM-DD), in TICKTICK_TIMEZONE.",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    )
+    created_before: Optional[str] = Field(
+        default=None,
+        description="Only tasks created on or before this date (YYYY-MM-DD), in TICKTICK_TIMEZONE.",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    )
+    created_after: Optional[str] = Field(
+        default=None,
+        description="Only tasks created on or after this date (YYYY-MM-DD), in TICKTICK_TIMEZONE.",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    )
+    sort: TaskSort = Field(
+        default=TaskSort.CREATED_DESC,
+        description=(
+            "Result order, default 'created_desc' (newest first). Options: "
+            "created_desc, created_asc, modified_desc, modified_asc, due_desc, "
+            "due_asc, priority_desc, title_asc."
+        ),
     )
     limit: int = Field(
         default=20,
-        description="Maximum number of results to consider after filtering. Combine with offset for paging.",
+        description=(
+            "Maximum tasks per page. The response also respects a hard size "
+            "budget, so a page may contain fewer than 'limit'; when more match, "
+            "'next_offset' is set (or a markdown footer is shown) — call again "
+            "with it to fetch the next page. 'total' always reports the true "
+            "match count regardless of 'limit'."
+        ),
         ge=1,
         le=100,
     )
     offset: int = Field(
         default=0,
-        description="Zero-based offset into the search result list. The response includes 'next_offset' (or a markdown footer) when more results remain.",
+        description="Zero-based offset into the result list. Pass the previous response's 'next_offset' to continue.",
         ge=0,
     )
     response_format: ResponseFormat = Field(
@@ -577,10 +676,13 @@ class SearchInput(BaseMCPInput):
 
     @field_validator("query")
     @classmethod
-    def validate_query(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("Query cannot be empty or whitespace only")
-        return v.strip()
+    def validate_query(cls, v: Optional[str]) -> Optional[str]:
+        # Treat empty/whitespace-only as "no text filter" (not an error), so a
+        # pure filter + sort lookup is allowed.
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
 
 
 # =============================================================================

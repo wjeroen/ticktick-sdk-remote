@@ -1017,26 +1017,63 @@ per-task formatter, so the fields shown are identical between `list_tasks` and
 `search_tasks`.
 
 **Budget-aware pagination.** MCP responses must stay under
-`CHARACTER_LIMIT = 25000`. Every list-returning tool accepts an `offset` and the
-server computes how many items actually fit:
+`CHARACTER_LIMIT = 25000`. Every list-returning tool accepts an `offset`; the
+task tools also take a `limit`. **The full sorted list is handed to the
+paginator — it is NOT pre-sliced** — so the paginator owns page-sizing and the
+count stays honest:
 
+- `total` is always `len(full list)` (the true match count), independent of
+  `limit` and the budget. `next_offset = offset + shown` whenever `offset +
+  shown < total`, else null — so `next_offset` is non-null exactly when more
+  results remain.
+- `limit` (when given) caps the page size; the budget caps it further. A page
+  holds `min(limit, what-fits)` items, and when the budget bit first,
+  `next_offset` still points at the remainder.
 - Markdown: accumulate row lengths against the budget (minus small header/footer
-  reserves); when more remain, append a footer telling the model to call again
-  with the next `offset`.
+  reserves), stopping at `limit`; when more remain, append a footer telling the
+  model to call again with the next `offset`.
 - JSON: serialize the whole envelope after each added item and back off when it
   would exceed the budget (exact size-checking — no "zero items but truncated"
-  responses). The envelope carries `count`, `total`, `offset`, `next_offset`
-  (null when done), and a `_pagination_hint` (omitted when everything fits).
+  responses), stopping at `limit`. The envelope carries `count`, `total`,
+  `offset`, `next_offset` (null when done), and a `_pagination_hint` (omitted
+  when everything fits).
+- **Empty-page guard:** a non-empty page always emits at least one item, even a
+  lone item that exceeds the budget by itself — otherwise `shown == 0` would set
+  `next_offset == offset`, an infinite paging loop. (List rows are
+  content-capped, so this is a safety net.)
+
+> History: `limit` used to be applied as a pre-slice in the tool
+> (`tasks[: offset + limit]`) *before* the paginator counted, so `total` echoed
+> the page size and a small `limit` reported a false `next_offset: null` ("this
+> is everything" when it wasn't). The pre-slice is gone and `limit` is a
+> paginator argument now. Don't reintroduce a pre-slice.
 
 **Deterministic ordering before paging.** Because TickTick's list endpoints
 don't guarantee a stable order, `server.py` sorts before paginating so different
-offsets don't duplicate or skip items:
+offsets don't duplicate or skip items. `list_tasks` uses a per-status default
+(overridable via its optional `sort`); `search_tasks` defaults to newest-first:
 
 - `_active_sort_key`: active tasks by `due_date` ascending (undated last), then
-  `id`.
+  `id`. (`list_tasks` active default.)
 - `_completed_sort_key`: completed/abandoned by `completed_time` descending
-  (undated last), then `id`.
-- `_id_sort_key`: fallback by `id`.
+  (undated last), then `id`. (`list_tasks` completed/abandoned default.)
+- `_id_sort_key`: fallback by `id`. (`list_tasks` deleted default.)
+- `task_sort_key(sort)` (in `tools/formatting.py`): maps a `TaskSort` value
+  (`created_desc` default, plus `created_asc` / `modified_*` / `due_*` /
+  `priority_desc` / `title_asc`) to a key. Date sorts put missing dates last in
+  either direction; every key ends with `id` for stable ties. Used by
+  `search_tasks` always, and by `list_tasks` when its `sort` is set.
+
+**Search filtering.** `search_tasks` fetches the active-task list, builds the
+child-meta map from it, then applies (all optional) a case-insensitive
+title/content substring (`query`), structured filters (`project_id`, `kind`,
+`tag`, `priority`), and date ranges (`due_before` / `due_after` /
+`created_before` / `created_after`, in `TICKTICK_TIMEZONE`) before sorting and
+paging. `query` is optional, so a pure filter lookup (e.g. latest `NOTE` in a
+project) is one call. **Scope: active tasks only** — completed/abandoned/trash
+aren't searched (tracked in `TODO.md`). Both `list_tasks` and `search_tasks`
+render through the shared `_render_task_page` helper, the single place that calls
+the paginator with `offset` + `limit`.
 
 **Per-task content cap in list views.** Task notes can be huge, so JSON *list*
 views truncate `content` to `LIST_CONTENT_MAX_CHARS = 500`, set
