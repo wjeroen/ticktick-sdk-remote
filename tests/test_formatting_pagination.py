@@ -306,7 +306,8 @@ class TestLimitTotalNextOffset:
 
     def test_markdown_total_independent_of_small_limit(self):
         out = paginate_tasks_markdown(_tasks(47), title="X", offset=0, limit=5, budget=100_000)
-        assert "of 47 total" in out          # pre-fix: "Found 5 tasks"
+        assert "Showing tasks 1 to 5 of 47 total" in out  # pre-fix: "Found 5 tasks"
+        assert "–" not in out           # plain "to", no en-dash
         assert "offset=5" in out             # footer points to the next page
 
 

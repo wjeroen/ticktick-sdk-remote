@@ -1076,10 +1076,11 @@ render through the shared `_render_task_page` helper, the single place that call
 the paginator with `offset` + `limit`.
 
 **Per-task content cap in list views.** Task notes can be huge, so JSON *list*
-views truncate `content` to `LIST_CONTENT_MAX_CHARS = 500`, set
+views truncate `content` to `LIST_CONTENT_MAX_CHARS = 1000`, set
 `content_truncated: true` on affected tasks, and add a top-level `_content_hint`
 pointing at `ticktick_get_task`. The **detail** view (`get_task`) never
-truncates.
+truncates. (Raising the cap trades fewer tasks per page against the fixed
+25k-char response budget — content-heavy lists just paginate sooner.)
 
 **Subtask enrichment.** List views build a `{child_id: {title, priority}}` meta
 map from the same fetch, so children render with title + priority and **no extra

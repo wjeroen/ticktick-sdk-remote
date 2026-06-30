@@ -148,7 +148,7 @@ def paginate_markdown(
         summary = f"Found {total} {item_label}:"
     else:
         summary = (
-            f"Showing {item_label} {offset + 1}–{offset + shown} of {total} total:"
+            f"Showing {item_label} {offset + 1} to {offset + shown} of {total} total:"
         )
 
     out = [f"# {title}", "", summary, ""]
@@ -614,9 +614,11 @@ def format_tasks_json(
     return result
 
 
-# Per-task content cap for list views (~one or two tweets); the model can
-# call ticktick_get_task to retrieve the full notes when needed.
-LIST_CONTENT_MAX_CHARS = 500
+# Per-task content cap for list views (~a short paragraph); the model can
+# call ticktick_get_task to retrieve the full notes when needed. Raising this
+# shows more content per task but fits fewer tasks per page (the 25k-char
+# response budget is fixed), so list pages get shorter for content-heavy tasks.
+LIST_CONTENT_MAX_CHARS = 1000
 
 
 def paginate_tasks_markdown(

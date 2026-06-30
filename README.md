@@ -171,7 +171,7 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 **Pagination & response sizing**
 - [x] Budget-aware pagination across **all** list-returning tools (`list_tasks`, `search_tasks`, `list_projects`, `list_folders`, `list_tags`, `list_columns`, `habits`) — pass `offset`, response surfaces `next_offset`
 - [x] `total` always reports the **true match count**, independent of `limit`, and `next_offset` is non-null whenever more results remain. (Previously a small `limit` made `search_tasks`/`list_tasks` pre-slice the list, so `total` echoed the page size and `next_offset` went null — a false "this is everything." `limit` is now the page size, enforced inside the paginator, not a cap on the count.)
-- [x] Per-task `content` capped at 500 chars in JSON list views (with `content_truncated` flag + `_content_hint` pointing at `ticktick_get_task` for the full text)
+- [x] Per-task `content` capped at 1000 chars in JSON list views (with `content_truncated` flag + `_content_hint` pointing at `ticktick_get_task` for the full text)
 - [x] Exact size-checking — no more zero-task truncated responses (and a single over-budget item is still emitted one-per-page so paging can't stall)
 
 **Task search** (`ticktick_search_tasks`)
