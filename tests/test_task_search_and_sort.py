@@ -228,3 +228,37 @@ async def test_list_tasks_sort_override_priority_desc():
     )
     prios = [t["priority"] for t in json.loads(out)["tasks"]]
     assert prios == [5, 3, 1, 0]
+
+
+# =============================================================================
+# Compact output + omit-defaults (search/list density)
+# =============================================================================
+
+
+async def test_search_output_is_compact_and_omits_defaults():
+    out = await server.ticktick_search_tasks(
+        SearchInput(query="Daily brief", response_format="json"), _ctx(FakeClient(make_briefs(3)))
+    )
+    # Compact JSON: no pretty-print indentation.
+    assert "\n  " not in out
+    t = json.loads(out)["tasks"][0]
+    # Always-present identity + priority/status survive omission.
+    assert {"id", "project_id", "title", "kind", "priority", "status"} <= set(t)
+    # Briefs have no tags, aren't pinned, are top-level -> those defaults dropped.
+    assert "tags" not in t
+    assert "is_pinned" not in t
+    assert "parent_id" not in t
+
+
+async def test_list_tasks_omits_defaults_but_get_task_stays_full():
+    # A bare active task through list_tasks drops default fields...
+    bare = Task(id="a" * 24, project_id=PROJ, title="bare", status=0, priority=0)
+    out = await server.ticktick_list_tasks(
+        TaskListInput(status="active", response_format="json"), _ctx(FakeClient([bare]))
+    )
+    t = json.loads(out)["tasks"][0]
+    assert "is_pinned" not in t and "tags" not in t and "items" not in t
+    # ...while the detail view (get_task path, omit_defaults=False) keeps them.
+    from ticktick_sdk.tools.formatting import format_task_json
+    full = format_task_json(bare, omit_defaults=False)
+    assert "is_pinned" in full and "tags" in full and "items" in full

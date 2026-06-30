@@ -173,6 +173,8 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 - [x] `total` always reports the **true match count**, independent of `limit`, and `next_offset` is non-null whenever more results remain. (Previously a small `limit` made `search_tasks`/`list_tasks` pre-slice the list, so `total` echoed the page size and `next_offset` went null — a false "this is everything." `limit` is now the page size, enforced inside the paginator, not a cap on the count.)
 - [x] Per-task `content` capped at 1000 chars in JSON list views (with `content_truncated` flag + `_content_hint` pointing at `ticktick_get_task` for the full text)
 - [x] Exact size-checking — no more zero-task truncated responses (and a single over-budget item is still emitted one-per-page so paging can't stall)
+- [x] **Compact JSON** output (no pretty-print whitespace) and a **40,000-char** budget (was 25k), so far more fits per response. The char budget is well under the strictest documented client limit (Claude Code's 25k-**token** cap); see `docs/ARCHITECTURE.md` §9
+- [x] **`list_tasks`/`search_tasks` JSON omits default-valued fields** to save space (absent = default; the convention is spelled out in each tool's description). `ticktick_get_task` stays full-fidelity as the escape hatch. Always present: `id`, `project_id`, `title`, `priority` (+label), `status` (+label), `time_zone`
 
 **Task search** (`ticktick_search_tasks`)
 - [x] Newest-first by default (`sort=created_desc`) plus a `sort` param (`created_*`, `modified_*`, `due_*`, `priority_desc`, `title_asc`) — previously results were oldest-first, which truncated the newest matches away under a limit

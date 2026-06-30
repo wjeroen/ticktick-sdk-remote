@@ -1017,10 +1017,14 @@ per-task formatter, so the fields shown are identical between `list_tasks` and
 `search_tasks`.
 
 **Budget-aware pagination.** MCP responses must stay under
-`CHARACTER_LIMIT = 25000`. Every list-returning tool accepts an `offset`; the
-task tools also take a `limit`. **The full sorted list is handed to the
-paginator — it is NOT pre-sliced** — so the paginator owns page-sizing and the
-count stays honest:
+`CHARACTER_LIMIT = 40000` (measured on the **compact** JSON we emit, see below).
+The constant is duplicated in `server.py` and `tools/formatting.py`; keep them
+in sync. It is a *self-imposed* safety margin, not a hard client limit: MCP
+clients cap tool results variously (Claude Code at 25k **tokens** ≈ ~100k chars,
+Claude Desktop ~150k chars), and 40k chars is ~10k tokens, comfortably under
+those. Every list-returning tool accepts an `offset`; the task tools also take a
+`limit`. **The full sorted list is handed to the paginator — it is NOT
+pre-sliced** — so the paginator owns page-sizing and the count stays honest:
 
 - `total` is always `len(full list)` (the true match count), independent of
   `limit` and the budget. `next_offset = offset + shown` whenever `offset +
@@ -1047,6 +1051,30 @@ count stays honest:
 > the page size and a small `limit` reported a false `next_offset: null` ("this
 > is everything" when it wasn't). The pre-slice is gone and `limit` is a
 > paginator argument now. Don't reintroduce a pre-slice.
+
+**Compact JSON + omitted defaults (density).** Two changes pack ~2-3× more into
+the budget. (1) **Compact serialization:** every `json.dumps` tool response uses
+`separators=(",", ":")` (no `indent=2` whitespace), and `paginate_json`'s
+internal size check uses the same so the budget accounting matches the bytes we
+emit. Markdown is unaffected. (2) **Omitted defaults:** `format_task_json(...,
+omit_defaults=True)` drops fields at their default (absent == default) so a bare
+active task carries only the fields that matter. `paginate_tasks_json` threads
+the flag; `_render_task_page` (the shared `list_tasks`/`search_tasks` renderer)
+passes `omit_defaults=True`. **`get_task` and the batch result formatters leave
+it False** (full fidelity), so `get_task` is the unabridged escape hatch.
+
+- **Always kept:** `id`, `project_id`, `title`, `kind`, `priority` (+`priority_label`),
+  `status` (+`status_label`), `time_zone`. (Per the user's decision, priority and
+  status are never omitted; `time_zone` is kept so the model always sees it.)
+- **Dropped when default:** `content`, `start_date`, `due_date`, `completed_time`,
+  `progress`, `is_pinned`, `is_all_day`, `repeat_flag`, `parent_id`, `tags`,
+  `children`, `items`. The conditional hint keys
+  (`total_children`/`children_hidden`/`_children_hint`/`content_truncated`) are
+  kept when present (e.g. an all-hidden-children parent drops the empty
+  `children` but keeps the "N hidden subtasks" hint).
+- The exact "absent means X" conventions are documented **once** in the
+  `list_tasks` and `search_tasks` tool descriptions (not per response, which
+  would pay the cost on every call).
 
 **Deterministic ordering before paging.** Because TickTick's list endpoints
 don't guarantee a stable order, `server.py` sorts before paginating so different
@@ -1080,7 +1108,7 @@ views truncate `content` to `LIST_CONTENT_MAX_CHARS = 1000`, set
 `content_truncated: true` on affected tasks, and add a top-level `_content_hint`
 pointing at `ticktick_get_task`. The **detail** view (`get_task`) never
 truncates. (Raising the cap trades fewer tasks per page against the fixed
-25k-char response budget — content-heavy lists just paginate sooner.)
+response budget — content-heavy lists just paginate sooner.)
 
 **Subtask enrichment.** List views build a `{child_id: {title, priority}}` meta
 map from the same fetch, so children render with title + priority and **no extra

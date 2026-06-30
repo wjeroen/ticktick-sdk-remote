@@ -395,3 +395,61 @@ class TestTaskSortKey:
         b = self._t("b", created=datetime(2026, 6, 1, tzinfo=UTC))
         out = sorted([a, b], key=task_sort_key(TaskSort.CREATED_ASC))
         assert [t.id for t in out] == ["a", "b"]
+
+
+class TestOmitDefaults:
+    """`format_task_json(omit_defaults=True)` drops default-valued fields for
+    list/search density; detail view (omit_defaults=False) keeps everything.
+
+    Always kept either way: id, project_id, title, kind, priority(+label),
+    status(+label), time_zone. These are the fields the convention note in the
+    list_tasks/search_tasks descriptions promises are always present.
+    """
+
+    ALWAYS = {"id", "project_id", "title", "kind", "priority", "priority_label",
+              "status", "status_label", "time_zone"}
+    DROPPABLE = ("content", "start_date", "due_date", "completed_time", "progress",
+                 "is_pinned", "is_all_day", "repeat_flag", "parent_id",
+                 "tags", "children", "items")
+
+    def test_default_task_keeps_only_always_present(self):
+        t = Task(id="a" * 24, project_id="b" * 24, title="Bare", status=0, priority=0)
+        out = format_task_json(t, omit_defaults=True)
+        assert set(out.keys()) == self.ALWAYS
+        for k in self.DROPPABLE:
+            assert k not in out
+
+    def test_priority_and_status_kept_even_at_default(self):
+        t = Task(id="a" * 24, project_id="b" * 24, title="x", status=0, priority=0)
+        out = format_task_json(t, omit_defaults=True)
+        assert out["status"] == 0 and out["status_label"] == "Active"
+        assert out["priority"] == 0 and out["priority_label"] == "None"
+        assert "time_zone" in out  # always present (even when null)
+
+    def test_populated_fields_survive(self):
+        t = Task(id="c" * 24, project_id="d" * 24, title="Rich", content="notes",
+                 kind="NOTE", status=0, priority=5,
+                 due_date=datetime(2026, 7, 1, tzinfo=UTC), is_all_day=True,
+                 repeat_flag="RRULE:FREQ=DAILY", tags=["x"])
+        out = format_task_json(t, omit_defaults=True)
+        for k in ("content", "due_date", "is_all_day", "repeat_flag", "tags"):
+            assert k in out
+        assert out["priority_label"] == "High"
+        assert out["kind"] == "NOTE"
+
+    def test_detail_view_keeps_default_fields(self):
+        t = Task(id="e" * 24, project_id="f" * 24, title="Detail", status=0, priority=0)
+        full = format_task_json(t, omit_defaults=False)
+        for k in ("content", "due_date", "is_pinned", "tags", "children", "items"):
+            assert k in full
+
+    def test_hidden_children_hint_survives_omission(self):
+        # All children filtered out -> empty `children` dropped, but the hint
+        # fields that explain "N hidden subtasks" remain.
+        parent = Task(id="0" * 24, project_id="1" * 24, title="P", status=0,
+                      priority=0, child_ids=["c" * 24, "d" * 24])
+        out = format_task_json(parent, child_meta={}, omit_defaults=True)
+        assert "children" not in out
+        assert out["total_children"] == 2
+        assert out["children_hidden"] == 2
+        assert "_children_hint" in out

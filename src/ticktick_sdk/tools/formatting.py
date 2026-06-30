@@ -16,8 +16,12 @@ from zoneinfo import ZoneInfo
 from ticktick_sdk.models import Column, Task, Project, ProjectGroup, Tag, User, UserStatus, UserStatistics
 from ticktick_sdk.tools.inputs import ResponseFormat
 
-# Maximum response size in characters
-CHARACTER_LIMIT = 25000
+# Maximum response size in characters, measured on the compact JSON we emit.
+# MCP clients cap tool results (Claude Code at 25k *tokens*, Claude Desktop
+# ~150k chars, others vary); this char budget is the self-imposed safety margin
+# the paginator fills. Raised 25k -> 40k once output went compact + omits
+# default-valued fields, so more tasks fit without risking the client ceiling.
+CHARACTER_LIMIT = 40000
 
 
 def convert_tz(dt: datetime | None, tz_name: str) -> datetime | None:
@@ -231,7 +235,7 @@ def paginate_json(
         formatted.append(format_item(item))
         # Worst-case envelope: next_offset present (longer than null)
         provisional_next = offset + len(formatted) + 1
-        if len(json.dumps(envelope(formatted, provisional_next), indent=2, default=str)) > budget:
+        if len(json.dumps(envelope(formatted, provisional_next), separators=(",", ":"), default=str)) > budget:
             # Keep a lone oversized item so paging still advances past it;
             # otherwise back it off so it leads the next page.
             if len(formatted) > 1:
@@ -393,6 +397,7 @@ def format_task_json(
     tz_name: str = "UTC",
     content_max_chars: int | None = None,
     child_meta: dict[str, dict[str, Any]] | None = None,
+    omit_defaults: bool = False,
 ) -> dict[str, Any]:
     """Format a single task as JSON-serializable dict.
 
@@ -401,6 +406,12 @@ def format_task_json(
     truncated with an ellipsis and an extra `content_truncated: true` field
     is added — the model should call `ticktick_get_task` for the full text.
     Detail-view callers leave this at None to get the full content.
+
+    `omit_defaults` (list/search views) drops fields that are at their default
+    to shrink the page; absent then means the default (see the
+    list_tasks/search_tasks tool descriptions for the exact conventions).
+    Detail callers leave it False to get every field. Always kept either way:
+    id, project_id, title, kind, priority(+label), status(+label), time_zone.
 
     `child_meta` is `{child_id: {"title": str, "priority": int}}`. When
     provided, the `children` array becomes a list of `{id, title,
@@ -485,6 +496,20 @@ def format_task_json(
         )
     if content_truncated:
         payload["content_truncated"] = True
+
+    if omit_defaults:
+        # Drop fields at their default value (absent == default). Keys not
+        # listed here are always kept: id/project_id/title/kind/priority/
+        # priority_label/status/status_label/time_zone, plus the conditional
+        # hint keys (total_children/children_hidden/_children_hint/
+        # content_truncated) which only appear when meaningful.
+        for key in (
+            "content", "start_date", "due_date", "completed_time", "progress",
+            "is_pinned", "is_all_day", "repeat_flag", "parent_id",
+            "tags", "children", "items",
+        ):
+            if not payload.get(key):  # None / "" / 0 / False / []
+                payload.pop(key, None)
     return payload
 
 
@@ -588,6 +613,7 @@ def format_tasks_json(
     tz_name: str = "UTC",
     content_max_chars: int | None = None,
     child_meta: dict[str, dict[str, Any]] | None = None,
+    omit_defaults: bool = False,
 ) -> dict[str, Any]:
     """Format multiple tasks as JSON (non-paginated convenience wrapper).
 
@@ -601,7 +627,11 @@ def format_tasks_json(
     (which only helps when children happen to be in the same batch).
     """
     meta = child_meta if child_meta is not None else _build_child_meta(tasks)
-    formatted = [format_task_json(t, tz_name, content_max_chars=content_max_chars, child_meta=meta) for t in tasks]
+    formatted = [
+        format_task_json(t, tz_name, content_max_chars=content_max_chars,
+                         child_meta=meta, omit_defaults=omit_defaults)
+        for t in tasks
+    ]
     result: dict[str, Any] = {
         "count": len(tasks),
         "tasks": formatted,
@@ -658,6 +688,7 @@ def paginate_tasks_json(
     budget: int = CHARACTER_LIMIT,
     child_meta: dict[str, dict[str, Any]] | None = None,
     limit: int | None = None,
+    omit_defaults: bool = False,
 ) -> dict[str, Any]:
     """Paginated, budget-aware JSON rendering of a task list.
 
@@ -677,7 +708,10 @@ def paginate_tasks_json(
     result = paginate_json(
         tasks,
         offset=offset,
-        format_item=lambda t: format_task_json(t, tz_name, content_max_chars=content_max_chars, child_meta=meta),
+        format_item=lambda t: format_task_json(
+            t, tz_name, content_max_chars=content_max_chars,
+            child_meta=meta, omit_defaults=omit_defaults,
+        ),
         budget=budget,
         item_key="tasks",
         limit=limit,
@@ -1236,7 +1270,7 @@ def format_response(
     if response_format == ResponseFormat.MARKDOWN:
         result = markdown_formatter(data)
     else:
-        result = json.dumps(json_formatter(data), indent=2, default=str)
+        result = json.dumps(json_formatter(data), separators=(",", ":"), default=str)
 
     # Check character limit
     if len(result) > CHARACTER_LIMIT:
