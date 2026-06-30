@@ -165,6 +165,7 @@ from ticktick_sdk.tools.formatting import (
     paginate_tasks_json,
     paginate_markdown,
     paginate_json,
+    task_sort_key,
     paginate_projects_markdown,
     paginate_projects_json,
     paginate_tags_markdown,
@@ -211,8 +212,9 @@ USER_TIMEZONE = get_settings().timezone
 # Constants
 # =============================================================================
 
-# Maximum response size in characters to prevent overwhelming context
-CHARACTER_LIMIT = 25000
+# Maximum response size in characters (compact JSON). Kept in sync with
+# formatting.CHARACTER_LIMIT; see that constant for the rationale.
+CHARACTER_LIMIT = 40000
 
 # Default pagination limits
 DEFAULT_TASK_LIMIT = 50
@@ -445,6 +447,49 @@ async def build_project_name_for_task(
         return {project.id: project.name}
     except Exception:
         return None
+
+
+async def _render_task_page(
+    client: TickTickClient,
+    tasks: list,
+    *,
+    offset: int,
+    limit: int,
+    response_format: ResponseFormat,
+    title: str,
+    child_meta: dict[str, dict[str, Any]] | None,
+) -> str:
+    """Render one page of an already-sorted task list (markdown or JSON).
+
+    Shared by ``list_tasks`` and ``search_tasks``. The full ``tasks`` list is
+    handed to the paginator (NOT pre-sliced), so ``total`` is the true match
+    count and ``next_offset`` is non-null whenever more remain; ``limit`` caps
+    the page size and the response budget caps it further. The JSON path does
+    not touch ``client`` (so it is unit-testable with ``client=None``); the
+    markdown path uses it only to build the project-name map.
+    """
+    if response_format == ResponseFormat.MARKDOWN:
+        project_names = await build_project_name_map(client, tasks)
+        return paginate_tasks_markdown(
+            tasks,
+            title=title,
+            offset=offset,
+            limit=limit,
+            tz_name=USER_TIMEZONE,
+            project_names=project_names,
+            child_meta=child_meta,
+        )
+    return json.dumps(
+        paginate_tasks_json(
+            tasks,
+            offset=offset,
+            limit=limit,
+            tz_name=USER_TIMEZONE,
+            child_meta=child_meta,
+            omit_defaults=True,  # list/search views drop default-valued fields
+        ),
+        separators=(",", ":"),
+    )
 
 
 # =============================================================================
@@ -694,7 +739,7 @@ async def ticktick_create_tasks(params: CreateTasksInput, ctx: Context) -> str:
                     format_task_json(t, USER_TIMEZONE, content_max_chars=LIST_CONTENT_MAX_CHARS)
                     for t in created_tasks
                 ],
-            }, indent=2)
+            }, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "create_tasks")
@@ -748,7 +793,7 @@ async def ticktick_get_task(params: TaskGetInput, ctx: Context) -> str:
         else:
             return json.dumps(
                 format_task_json(task, USER_TIMEZONE, child_meta=child_meta),
-                indent=2,
+                separators=(",", ":"),
             )
 
     except Exception as e:
@@ -811,6 +856,17 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         - Due in a date range: status="active", due_after="2026-03-16", due_before="2026-03-20"
         - Unscheduled tasks: status="active", has_due_date=False
         - Only tasks with a due date: status="active", has_due_date=True
+
+    Field defaults: fields at their default are omitted to save space. A field
+    absent from a task is at its default: missing `content` = no notes; missing
+    `start_date` / `due_date` / `completed_time` = that date is unset (absent
+    `completed_time` also means the task is not completed); missing `progress`
+    = 0; missing `is_pinned` = false; missing `is_all_day` = false (not an
+    all-day task); missing `repeat_flag` = no recurrence; missing `parent_id` =
+    top-level (no parent); missing `tags` / `children` / `items` = empty.
+    `id`, `project_id`, `title`, `priority` (with `priority_label`), `status`
+    (with `status_label`), and `time_zone` are always present. Use
+    `ticktick_get_task` for one task's complete, unabridged fields.
     """
     try:
         client = get_client(ctx)
@@ -901,41 +957,31 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
             tasks = await client.get_all_tasks()
 
         # Deterministic sort so paginated calls return a stable order
-        # (TickTick's list endpoints don't guarantee one).
-        if params.status == "active":
+        # (TickTick's list endpoints don't guarantee one). An explicit
+        # `sort` overrides the per-status default; otherwise use the natural
+        # order for the status.
+        if params.sort is not None:
+            tasks.sort(key=task_sort_key(params.sort))
+        elif params.status == "active":
             tasks.sort(key=_active_sort_key)
         elif params.status in ("completed", "abandoned"):
             tasks.sort(key=_completed_sort_key)
         else:
             tasks.sort(key=_id_sort_key)
 
-        # Cap consideration to offset + limit so the requested offset can
-        # always reach into the window. (Earlier `tasks[:limit]` was buggy:
-        # with limit=50 and offset=60, the slice threw away the very tasks
-        # the offset was asking for, yielding 0 results.)
-        tasks = tasks[: params.offset + params.limit]
-
-        if params.response_format == ResponseFormat.MARKDOWN:
-            title = f"{params.status.capitalize()} Tasks" if params.status else "Tasks"
-            project_names = await build_project_name_map(client, tasks)
-            return paginate_tasks_markdown(
-                tasks,
-                title=title,
-                offset=params.offset,
-                tz_name=USER_TIMEZONE,
-                project_names=project_names,
-                child_meta=all_child_meta,
-            )
-        else:
-            return json.dumps(
-                paginate_tasks_json(
-                    tasks,
-                    offset=params.offset,
-                    tz_name=USER_TIMEZONE,
-                    child_meta=all_child_meta,
-                ),
-                indent=2,
-            )
+        # Hand the FULL sorted list to the paginator (no pre-slice): `limit`
+        # caps the page size there, so `total` stays the true count and
+        # `next_offset` is non-null whenever more tasks remain.
+        title = f"{params.status.capitalize()} Tasks" if params.status else "Tasks"
+        return await _render_task_page(
+            client,
+            tasks,
+            offset=params.offset,
+            limit=params.limit,
+            response_format=params.response_format,
+            title=title,
+            child_meta=all_child_meta,
+        )
 
     except Exception as e:
         return handle_error(e, "list_tasks")
@@ -1050,7 +1096,7 @@ async def ticktick_update_tasks(params: UpdateTasksInput, ctx: Context) -> str:
                 "success": True,
                 "count": len(update_specs),
                 "response": response
-            }, indent=2)
+            }, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "update_tasks")
@@ -1329,45 +1375,107 @@ async def ticktick_unparent_tasks(params: UnparentTasksInput, ctx: Context) -> s
 )
 async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
     """
-    Search for tasks by title or content.
+    Search active tasks by text and/or structured filters.
 
-    Performs a text search across all active tasks, matching the query
-    against task titles and content.
+    Matches a case-insensitive substring against task titles and content, and
+    can narrow by project, kind, tag, priority, and due/created date ranges.
+    Results default to newest-first (created_desc). The text query is optional:
+    omit it for a pure filter lookup (e.g. the latest NOTE in a project).
+
+    Scope: active tasks only (not completed/abandoned/trashed) — use
+    ticktick_list_tasks with a status filter for those.
 
     Args:
-        params: Search parameters:
-            - query (str): Search query (required)
-            - limit (int): Maximum results (default 20)
+        params: Search parameters (all optional except none are required):
+            - query (str): case-insensitive substring on title/content
+            - project_id / kind / tag / priority: structured filters
+            - due_before / due_after / created_before / created_after (YYYY-MM-DD)
+            - sort (str): default 'created_desc' (newest first)
+            - limit (int, default 20) / offset (int): pagination
 
     Returns:
-        Formatted list of matching tasks or error message.
+        Formatted list of matching tasks or error message. 'total' is the true
+        match count; 'next_offset' (or a markdown footer) signals more pages.
 
     Examples:
-        - Search by keyword: query="meeting"
-        - Search by phrase: query="quarterly report"
+        - Keyword: query="meeting"
+        - Latest note in a project: project_id="...", kind="NOTE", limit=1
+        - High-priority matches, newest due first: query="report", priority="high", sort="due_desc"
+
+    Field defaults: fields at their default are omitted to save space. A field
+    absent from a task is at its default: missing `content` = no notes; missing
+    `start_date` / `due_date` / `completed_time` = that date is unset (absent
+    `completed_time` also means the task is not completed); missing `progress`
+    = 0; missing `is_pinned` = false; missing `is_all_day` = false (not an
+    all-day task); missing `repeat_flag` = no recurrence; missing `parent_id` =
+    top-level (no parent); missing `tags` / `children` / `items` = empty.
+    `id`, `project_id`, `title`, `priority` (with `priority_label`), `status`
+    (with `status_label`), and `time_zone` are always present. Use
+    `ticktick_get_task` for one task's complete, unabridged fields.
     """
     try:
         client = get_client(ctx)
-        tasks = await client.search_tasks(params.query)
-        tasks.sort(key=_active_sort_key)
-        tasks = tasks[: params.offset + params.limit]
+        tasks = await client.get_all_tasks()
 
-        title = f"Search Results: '{params.query}'"
+        # Capture {id: {title, priority}} from the FULL active list before
+        # filtering, so child references still resolve to title + priority
+        # even when the child itself is filtered out of the results.
+        all_child_meta = {
+            t.id: {"title": t.title, "priority": t.priority}
+            for t in tasks if t.id
+        }
 
-        if params.response_format == ResponseFormat.MARKDOWN:
-            project_names = await build_project_name_map(client, tasks)
-            return paginate_tasks_markdown(
-                tasks,
-                title=title,
-                offset=params.offset,
-                tz_name=USER_TIMEZONE,
-                project_names=project_names,
-            )
-        else:
-            return json.dumps(
-                paginate_tasks_json(tasks, offset=params.offset, tz_name=USER_TIMEZONE),
-                indent=2,
-            )
+        # Text match (optional).
+        if params.query:
+            q = params.query.lower()
+            tasks = [
+                t for t in tasks
+                if (t.title and q in t.title.lower())
+                or (t.content and q in t.content.lower())
+            ]
+
+        # Structured filters.
+        if params.project_id:
+            tasks = [t for t in tasks if t.project_id == params.project_id]
+        if params.kind:
+            tasks = [t for t in tasks if (t.kind or "TEXT") == params.kind]
+        if params.tag:
+            tag_lower = params.tag.lower()
+            tasks = [t for t in tasks if any(tg.lower() == tag_lower for tg in t.tags)]
+        if params.priority:
+            priority_map = {"none": 0, "low": 1, "medium": 3, "high": 5}
+            target_priority = priority_map.get(params.priority, 0)
+            tasks = [t for t in tasks if t.priority == target_priority]
+
+        # Date-range filters (interpreted in the user's timezone).
+        tz = ZoneInfo(USER_TIMEZONE)
+        if params.due_before:
+            d = date.fromisoformat(params.due_before)
+            tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(tz).date() <= d]
+        if params.due_after:
+            d = date.fromisoformat(params.due_after)
+            tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(tz).date() >= d]
+        if params.created_before:
+            d = date.fromisoformat(params.created_before)
+            tasks = [t for t in tasks if t.created_time and t.created_time.astimezone(tz).date() <= d]
+        if params.created_after:
+            d = date.fromisoformat(params.created_after)
+            tasks = [t for t in tasks if t.created_time and t.created_time.astimezone(tz).date() >= d]
+
+        # Sort (default newest-first), then paginate the FULL list (no
+        # pre-slice) so `total` is accurate and `next_offset` works.
+        tasks.sort(key=task_sort_key(params.sort))
+
+        title = f"Search Results: '{params.query}'" if params.query else "Search Results"
+        return await _render_task_page(
+            client,
+            tasks,
+            offset=params.offset,
+            limit=params.limit,
+            response_format=params.response_format,
+            title=title,
+            child_meta=all_child_meta,
+        )
 
     except Exception as e:
         return handle_error(e, "search_tasks")
@@ -1443,7 +1551,7 @@ async def ticktick_pin_tasks(params: PinTasksInput, ctx: Context) -> str:
             else:
                 result = format_task_json(task, USER_TIMEZONE)
                 result["action"] = action
-                return json.dumps(result, indent=2, default=str)
+                return json.dumps(result, separators=(",", ":"), default=str)
         else:
             if params.response_format == ResponseFormat.MARKDOWN:
                 project_names = await build_project_name_map(client, updated_tasks)
@@ -1459,7 +1567,7 @@ async def ticktick_pin_tasks(params: PinTasksInput, ctx: Context) -> str:
                         format_task_json(t, USER_TIMEZONE, content_max_chars=LIST_CONTENT_MAX_CHARS)
                         for t in updated_tasks
                     ],
-                }, indent=2, default=str)
+                }, separators=(",", ":"), default=str)
 
     except Exception as e:
         return handle_error(e, "pin_tasks")
@@ -1505,7 +1613,7 @@ async def ticktick_list_columns(params: ColumnListInput, ctx: Context) -> str:
         else:
             return json.dumps(
                 paginate_columns_json(columns, offset=params.offset, tz_name=USER_TIMEZONE),
-                indent=2,
+                separators=(",", ":"),
                 default=str,
             )
 
@@ -1549,7 +1657,7 @@ async def ticktick_create_column(params: ColumnCreateInput, ctx: Context) -> str
         else:
             result = format_column_json(column, USER_TIMEZONE)
             result["action"] = "created"
-            return json.dumps(result, indent=2, default=str)
+            return json.dumps(result, separators=(",", ":"), default=str)
 
     except Exception as e:
         return handle_error(e, "create_column")
@@ -1589,7 +1697,7 @@ async def ticktick_update_column(params: ColumnUpdateInput, ctx: Context) -> str
         else:
             result = format_column_json(column, USER_TIMEZONE)
             result["action"] = "updated"
-            return json.dumps(result, indent=2, default=str)
+            return json.dumps(result, separators=(",", ":"), default=str)
 
     except Exception as e:
         return handle_error(e, "update_column")
@@ -1669,7 +1777,7 @@ async def ticktick_list_projects(
         if response_format == ResponseFormat.MARKDOWN:
             return paginate_projects_markdown(projects, offset=offset)
         else:
-            return json.dumps(paginate_projects_json(projects, offset=offset), indent=2)
+            return json.dumps(paginate_projects_json(projects, offset=offset), separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "list_projects")
@@ -1720,14 +1828,14 @@ async def ticktick_get_project(params: ProjectGetInput, ctx: Context) -> str:
                         USER_TIMEZONE,
                         content_max_chars=LIST_CONTENT_MAX_CHARS,
                     ),
-                }, indent=2)
+                }, separators=(",", ":"))
         else:
             project = await client.get_project(params.project_id)
 
             if params.response_format == ResponseFormat.MARKDOWN:
                 return format_project_markdown(project)
             else:
-                return json.dumps(format_project_json(project), indent=2)
+                return json.dumps(format_project_json(project), separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "get_project")
@@ -1797,7 +1905,7 @@ async def ticktick_create_project(params: ProjectCreateInput, ctx: Context) -> s
         if params.response_format == ResponseFormat.MARKDOWN:
             return f"# Project Created\n\n{format_project_markdown(project)}"
         else:
-            return json.dumps({"success": True, "project": format_project_json(project)}, indent=2)
+            return json.dumps({"success": True, "project": format_project_json(project)}, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "create_project")
@@ -1847,7 +1955,7 @@ async def ticktick_update_project(params: ProjectUpdateInput, ctx: Context) -> s
         if params.response_format == ResponseFormat.MARKDOWN:
             return f"# Project Updated\n\n{format_project_markdown(project)}"
         else:
-            return json.dumps({"success": True, "project": format_project_json(project)}, indent=2)
+            return json.dumps({"success": True, "project": format_project_json(project)}, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "update_project")
@@ -1922,7 +2030,7 @@ async def ticktick_list_folders(
         if response_format == ResponseFormat.MARKDOWN:
             return paginate_folders_markdown(folders, offset=offset)
         else:
-            return json.dumps(paginate_folders_json(folders, offset=offset), indent=2)
+            return json.dumps(paginate_folders_json(folders, offset=offset), separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "list_folders")
@@ -1956,7 +2064,7 @@ async def ticktick_create_folder(params: FolderCreateInput, ctx: Context) -> str
         if params.response_format == ResponseFormat.MARKDOWN:
             return f"# Folder Created\n\n- **{folder.name}** (`{folder.id}`)"
         else:
-            return json.dumps({"success": True, "folder": {"id": folder.id, "name": folder.name}}, indent=2)
+            return json.dumps({"success": True, "folder": {"id": folder.id, "name": folder.name}}, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "create_folder")
@@ -1991,7 +2099,7 @@ async def ticktick_rename_folder(params: FolderRenameInput, ctx: Context) -> str
         if params.response_format == ResponseFormat.MARKDOWN:
             return f"# Folder Renamed\n\n- **{folder.name}** (`{folder.id}`)"
         else:
-            return json.dumps({"success": True, "folder": {"id": folder.id, "name": folder.name}}, indent=2)
+            return json.dumps({"success": True, "folder": {"id": folder.id, "name": folder.name}}, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "rename_folder")
@@ -2066,7 +2174,7 @@ async def ticktick_list_tags(
         if response_format == ResponseFormat.MARKDOWN:
             return paginate_tags_markdown(tags, offset=offset)
         else:
-            return json.dumps(paginate_tags_json(tags, offset=offset), indent=2)
+            return json.dumps(paginate_tags_json(tags, offset=offset), separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "list_tags")
@@ -2104,7 +2212,7 @@ async def ticktick_create_tag(params: TagCreateInput, ctx: Context) -> str:
         if params.response_format == ResponseFormat.MARKDOWN:
             return f"# Tag Created\n\n{format_tag_markdown(tag)}"
         else:
-            return json.dumps({"success": True, "tag": format_tag_json(tag)}, indent=2)
+            return json.dumps({"success": True, "tag": format_tag_json(tag)}, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "create_tag")
@@ -2176,7 +2284,7 @@ async def ticktick_update_tag(params: TagUpdateInput, ctx: Context) -> str:
         if params.response_format == ResponseFormat.MARKDOWN:
             return f"# Tag Updated\n\n{format_tag_markdown(tag)}"
         else:
-            return json.dumps({"success": True, "tag": format_tag_json(tag)}, indent=2)
+            return json.dumps({"success": True, "tag": format_tag_json(tag)}, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "update_tag")
@@ -2287,7 +2395,7 @@ async def ticktick_get_profile(ctx: Context, response_format: ResponseFormat = R
                 "email": user.email,
                 "locale": user.locale,
                 "verified_email": user.verified_email,
-            }, indent=2)
+            }, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "get_profile")
@@ -2326,7 +2434,7 @@ async def ticktick_get_status(ctx: Context, response_format: ResponseFormat = Re
                 "is_pro": status.is_pro,
                 "pro_end_date": status.pro_end_date,
                 "team_user": status.team_user,
-            }, indent=2)
+            }, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "get_status")
@@ -2518,7 +2626,7 @@ async def ticktick_auth_status(ctx: Context, response_format: ResponseFormat = R
             )
             return "\n".join(lines)
         else:
-            return json.dumps(report, indent=2)
+            return json.dumps(report, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "auth_status")
@@ -2565,7 +2673,7 @@ async def ticktick_get_statistics(
         else:
             return json.dumps(
                 format_statistics_json(stats, section=section.value),
-                indent=2,
+                separators=(",", ":"),
                 default=str,
             )
 
@@ -2602,7 +2710,7 @@ async def ticktick_get_preferences(ctx: Context) -> str:
     try:
         client = get_client(ctx)
         preferences = await client.get_preferences()
-        return json.dumps(preferences, indent=2)
+        return json.dumps(preferences, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "get_preferences")
@@ -2657,7 +2765,7 @@ async def ticktick_focus_heatmap(params: FocusStatsInput, ctx: Context) -> str:
                 "start_date": str(start_date),
                 "end_date": str(end_date),
                 "data": data,
-            }, indent=2)
+            }, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "focus_heatmap")
@@ -2712,7 +2820,7 @@ async def ticktick_focus_by_tag(params: FocusStatsInput, ctx: Context) -> str:
                 "start_date": str(start_date),
                 "end_date": str(end_date),
                 "tag_durations": data,
-            }, indent=2)
+            }, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "focus_by_tag")
@@ -2872,7 +2980,7 @@ async def ticktick_habits(params: HabitListInput, ctx: Context) -> str:
                     format_item=format_habit_json,
                     item_key="habits",
                 ),
-                indent=2,
+                separators=(",", ":"),
             )
 
     except Exception as e:
@@ -2908,7 +3016,7 @@ async def ticktick_habit(params: HabitGetInput, ctx: Context) -> str:
         if params.response_format == ResponseFormat.MARKDOWN:
             return format_habit_markdown(habit)
         else:
-            return json.dumps(format_habit_json(habit), indent=2)
+            return json.dumps(format_habit_json(habit), separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "get_habit")
@@ -2943,7 +3051,7 @@ async def ticktick_habit_sections(ctx: Context, response_format: ResponseFormat 
                 lines.append(format_section_markdown(section))
             return "\n".join(lines)
         else:
-            return json.dumps(format_sections_json(sections), indent=2)
+            return json.dumps(format_sections_json(sections), separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "habit_sections")
@@ -3002,7 +3110,7 @@ async def ticktick_create_habit(params: HabitCreateInput, ctx: Context) -> str:
         if params.response_format == ResponseFormat.MARKDOWN:
             return f"# Habit Created\n\n{format_habit_markdown(habit)}"
         else:
-            return json.dumps({"success": True, "habit": format_habit_json(habit)}, indent=2)
+            return json.dumps({"success": True, "habit": format_habit_json(habit)}, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "create_habit")
@@ -3071,7 +3179,7 @@ async def ticktick_update_habit(params: HabitUpdateInput, ctx: Context) -> str:
                 if params.response_format == ResponseFormat.MARKDOWN:
                     return f"# Habit {action.capitalize()}\n\n**{habit.name}** has been {action}."
                 else:
-                    return json.dumps({"success": True, "action": action, "habit": format_habit_json(habit)}, indent=2)
+                    return json.dumps({"success": True, "action": action, "habit": format_habit_json(habit)}, separators=(",", ":"))
 
         # Apply other updates
         habit = await client.update_habit(
@@ -3091,7 +3199,7 @@ async def ticktick_update_habit(params: HabitUpdateInput, ctx: Context) -> str:
         if params.response_format == ResponseFormat.MARKDOWN:
             return f"# Habit Updated\n\n{format_habit_markdown(habit)}"
         else:
-            return json.dumps({"success": True, "habit": format_habit_json(habit)}, indent=2)
+            return json.dumps({"success": True, "habit": format_habit_json(habit)}, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "update_habit")
@@ -3216,7 +3324,7 @@ async def ticktick_checkin_habits(params: CheckinHabitsInput, ctx: Context) -> s
                     habit_id: format_habit_json(habit)
                     for habit_id, habit in results.items()
                 },
-            }, indent=2)
+            }, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "checkin_habits")
@@ -3277,7 +3385,7 @@ async def ticktick_habit_checkins(params: HabitCheckinsInput, ctx: Context) -> s
                     }
                     for c in checkins
                 ]
-            return json.dumps(result, indent=2)
+            return json.dumps(result, separators=(",", ":"))
 
     except Exception as e:
         return handle_error(e, "habit_checkins")

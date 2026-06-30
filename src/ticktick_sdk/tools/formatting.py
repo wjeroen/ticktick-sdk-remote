@@ -16,8 +16,12 @@ from zoneinfo import ZoneInfo
 from ticktick_sdk.models import Column, Task, Project, ProjectGroup, Tag, User, UserStatus, UserStatistics
 from ticktick_sdk.tools.inputs import ResponseFormat
 
-# Maximum response size in characters
-CHARACTER_LIMIT = 25000
+# Maximum response size in characters, measured on the compact JSON we emit.
+# MCP clients cap tool results (Claude Code at 25k *tokens*, Claude Desktop
+# ~150k chars, others vary); this char budget is the self-imposed safety margin
+# the paginator fills. Raised 25k -> 40k once output went compact + omits
+# default-valued fields, so more tasks fit without risking the client ceiling.
+CHARACTER_LIMIT = 40000
 
 
 def convert_tz(dt: datetime | None, tz_name: str) -> datetime | None:
@@ -101,13 +105,20 @@ def paginate_markdown(
     format_item: Callable[[Any], str],
     item_label: str = "items",
     budget: int = CHARACTER_LIMIT,
+    limit: int | None = None,
 ) -> str:
     """Budget-aware paginated markdown rendering.
 
-    Adds one item at a time until the next would exceed `budget`, then stops
-    and appends a footer telling the caller how to fetch the next page. If
-    every item fits, the footer is omitted entirely so pagination is
-    invisible to the consumer.
+    Adds one item at a time until the next would exceed `budget` (or until
+    `limit` items have been added, when a limit is given), then stops and
+    appends a footer telling the caller how to fetch the next page. If every
+    item fits, the footer is omitted entirely so pagination is invisible to
+    the consumer.
+
+    `total` always reflects the full `items` length, independent of `limit`
+    and `budget`, so the count never under-reports how many matches exist.
+    At least one row is always emitted for a non-empty page (even an oversized
+    one), so paging can never stall by returning `next_offset == offset`.
     """
     total = len(items)
     if total == 0:
@@ -125,8 +136,11 @@ def paginate_markdown(
     rows = []
     used = 0
     for item in page:
+        if limit is not None and len(rows) >= limit:
+            break
         row = format_item(item)
-        if used + len(row) + 1 > available:
+        # Always emit at least one row; past that, stop before busting budget.
+        if rows and used + len(row) + 1 > available:
             break
         rows.append(row)
         used += len(row) + 1
@@ -138,7 +152,7 @@ def paginate_markdown(
         summary = f"Found {total} {item_label}:"
     else:
         summary = (
-            f"Showing {item_label} {offset + 1}–{offset + shown} of {total} total:"
+            f"Showing {item_label} {offset + 1} to {offset + shown} of {total} total:"
         )
 
     out = [f"# {title}", "", summary, ""]
@@ -161,12 +175,20 @@ def paginate_json(
     format_item: Callable[[Any], dict],
     budget: int = CHARACTER_LIMIT,
     item_key: str = "items",
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """Budget-aware paginated JSON rendering.
 
     Returns `{count, total, offset, next_offset, <item_key>}`. Caller
     serializes with `json.dumps`. When `next_offset` is None there are no
     more pages; otherwise pass it back as `offset` to continue.
+
+    `total` always reflects the full `items` length, independent of `limit`
+    and `budget`, so the count never under-reports how many matches exist.
+    The page stops at whichever comes first: `limit` items (when given) or the
+    `budget`. At least one item is always emitted for a non-empty page (even
+    an oversized one), so paging can never stall by returning
+    `next_offset == offset`.
 
     Sizing is exact: after each item we serialize the whole envelope and
     back off if we've gone over budget. O(n²) in page size but n is small.
@@ -207,17 +229,70 @@ def paginate_json(
         return env
 
     formatted: list[dict] = []
-    for idx, item in enumerate(items[offset:]):
+    for item in items[offset:]:
+        if limit is not None and len(formatted) >= limit:
+            break
         formatted.append(format_item(item))
         # Worst-case envelope: next_offset present (longer than null)
         provisional_next = offset + len(formatted) + 1
-        if len(json.dumps(envelope(formatted, provisional_next), indent=2, default=str)) > budget:
-            formatted.pop()
+        if len(json.dumps(envelope(formatted, provisional_next), separators=(",", ":"), default=str)) > budget:
+            # Keep a lone oversized item so paging still advances past it;
+            # otherwise back it off so it leads the next page.
+            if len(formatted) > 1:
+                formatted.pop()
             break
 
     shown = len(formatted)
     next_offset = offset + shown if offset + shown < total else None
     return envelope(formatted, next_offset)
+
+
+# =============================================================================
+# Task Sorting
+# =============================================================================
+
+# Maps a sort name (TaskSort value) to (Task attribute, descending?). These
+# all sort an optional datetime; missing values sort last in either direction.
+_SORT_DATE_FIELDS: dict[str, tuple[str, bool]] = {
+    "created_desc": ("created_time", True),
+    "created_asc": ("created_time", False),
+    "modified_desc": ("modified_time", True),
+    "modified_asc": ("modified_time", False),
+    "due_desc": ("due_date", True),
+    "due_asc": ("due_date", False),
+}
+
+
+def _date_sort_fragment(dt: datetime | None, descending: bool) -> tuple:
+    """Sort-key fragment for an optional datetime.
+
+    Missing dates sort *last* in both directions (group 1); present dates sort
+    by timestamp ascending or, for descending, by negated timestamp (group 0).
+    """
+    if dt is None:
+        return (1, 0.0)
+    return (0, -dt.timestamp() if descending else dt.timestamp())
+
+
+def task_sort_key(sort) -> Callable[[Task], tuple]:
+    """Return a sort-key function for the given sort name (a ``TaskSort`` or
+    its string value).
+
+    Used by search/list to order tasks deterministically *before* pagination,
+    so offsets are stable and the default is newest-first. Unknown values fall
+    back to ``created_desc``. The key always ends with the task id, so items
+    that tie on the primary field keep a stable, repeatable order.
+    """
+    key = sort.value if hasattr(sort, "value") else sort
+    if key in _SORT_DATE_FIELDS:
+        field, descending = _SORT_DATE_FIELDS[key]
+        return lambda t: _date_sort_fragment(getattr(t, field, None), descending) + (t.id or "",)
+    if key == "priority_desc":
+        return lambda t: (-(t.priority or 0), t.id or "")
+    if key == "title_asc":
+        return lambda t: ((t.title or "").lower(), t.id or "")
+    # Default / unrecognized: newest-created first.
+    return lambda t: _date_sort_fragment(getattr(t, "created_time", None), True) + (t.id or "",)
 
 
 # =============================================================================
@@ -322,6 +397,7 @@ def format_task_json(
     tz_name: str = "UTC",
     content_max_chars: int | None = None,
     child_meta: dict[str, dict[str, Any]] | None = None,
+    omit_defaults: bool = False,
 ) -> dict[str, Any]:
     """Format a single task as JSON-serializable dict.
 
@@ -330,6 +406,12 @@ def format_task_json(
     truncated with an ellipsis and an extra `content_truncated: true` field
     is added — the model should call `ticktick_get_task` for the full text.
     Detail-view callers leave this at None to get the full content.
+
+    `omit_defaults` (list/search views) drops fields that are at their default
+    to shrink the page; absent then means the default (see the
+    list_tasks/search_tasks tool descriptions for the exact conventions).
+    Detail callers leave it False to get every field. Always kept either way:
+    id, project_id, title, kind, priority(+label), status(+label), time_zone.
 
     `child_meta` is `{child_id: {"title": str, "priority": int}}`. When
     provided, the `children` array becomes a list of `{id, title,
@@ -414,6 +496,20 @@ def format_task_json(
         )
     if content_truncated:
         payload["content_truncated"] = True
+
+    if omit_defaults:
+        # Drop fields at their default value (absent == default). Keys not
+        # listed here are always kept: id/project_id/title/kind/priority/
+        # priority_label/status/status_label/time_zone, plus the conditional
+        # hint keys (total_children/children_hidden/_children_hint/
+        # content_truncated) which only appear when meaningful.
+        for key in (
+            "content", "start_date", "due_date", "completed_time", "progress",
+            "is_pinned", "is_all_day", "repeat_flag", "parent_id",
+            "tags", "children", "items",
+        ):
+            if not payload.get(key):  # None / "" / 0 / False / []
+                payload.pop(key, None)
     return payload
 
 
@@ -517,6 +613,7 @@ def format_tasks_json(
     tz_name: str = "UTC",
     content_max_chars: int | None = None,
     child_meta: dict[str, dict[str, Any]] | None = None,
+    omit_defaults: bool = False,
 ) -> dict[str, Any]:
     """Format multiple tasks as JSON (non-paginated convenience wrapper).
 
@@ -530,7 +627,11 @@ def format_tasks_json(
     (which only helps when children happen to be in the same batch).
     """
     meta = child_meta if child_meta is not None else _build_child_meta(tasks)
-    formatted = [format_task_json(t, tz_name, content_max_chars=content_max_chars, child_meta=meta) for t in tasks]
+    formatted = [
+        format_task_json(t, tz_name, content_max_chars=content_max_chars,
+                         child_meta=meta, omit_defaults=omit_defaults)
+        for t in tasks
+    ]
     result: dict[str, Any] = {
         "count": len(tasks),
         "tasks": formatted,
@@ -543,9 +644,11 @@ def format_tasks_json(
     return result
 
 
-# Per-task content cap for list views (~one or two tweets); the model can
-# call ticktick_get_task to retrieve the full notes when needed.
-LIST_CONTENT_MAX_CHARS = 500
+# Per-task content cap for list views (~a short paragraph); the model can
+# call ticktick_get_task to retrieve the full notes when needed. Raising this
+# shows more content per task but fits fewer tasks per page (the 25k-char
+# response budget is fixed), so list pages get shorter for content-heavy tasks.
+LIST_CONTENT_MAX_CHARS = 1000
 
 
 def paginate_tasks_markdown(
@@ -556,11 +659,14 @@ def paginate_tasks_markdown(
     project_names: dict[str, str] | None = None,
     budget: int = CHARACTER_LIMIT,
     child_meta: dict[str, dict[str, Any]] | None = None,
+    limit: int | None = None,
 ) -> str:
     """Paginated, budget-aware markdown rendering of a task list.
 
     `child_meta` enables nested-children rendering (see
     `format_task_row_markdown`). Falls back to building one from `tasks`.
+    `limit` caps the page size (the budget still applies on top); `total`
+    reflects the full `tasks` length regardless.
     """
     meta = child_meta if child_meta is not None else _build_child_meta(tasks)
     return paginate_markdown(
@@ -570,6 +676,7 @@ def paginate_tasks_markdown(
         format_item=lambda t: format_task_row_markdown(t, tz_name, project_names, child_meta=meta),
         item_label="tasks",
         budget=budget,
+        limit=limit,
     )
 
 
@@ -580,6 +687,8 @@ def paginate_tasks_json(
     content_max_chars: int = LIST_CONTENT_MAX_CHARS,
     budget: int = CHARACTER_LIMIT,
     child_meta: dict[str, dict[str, Any]] | None = None,
+    limit: int | None = None,
+    omit_defaults: bool = False,
 ) -> dict[str, Any]:
     """Paginated, budget-aware JSON rendering of a task list.
 
@@ -591,14 +700,21 @@ def paginate_tasks_json(
     even when the children aren't in `tasks` (e.g. a filtered "due today"
     list whose parents' subtasks have no due date). When omitted, the map
     is built from `tasks` itself.
+
+    `limit` caps the page size (the budget still applies on top); `total`
+    reflects the full `tasks` length regardless of `limit` or `budget`.
     """
     meta = child_meta if child_meta is not None else _build_child_meta(tasks)
     result = paginate_json(
         tasks,
         offset=offset,
-        format_item=lambda t: format_task_json(t, tz_name, content_max_chars=content_max_chars, child_meta=meta),
+        format_item=lambda t: format_task_json(
+            t, tz_name, content_max_chars=content_max_chars,
+            child_meta=meta, omit_defaults=omit_defaults,
+        ),
         budget=budget,
         item_key="tasks",
+        limit=limit,
     )
     if any(t.get("content_truncated") for t in result["tasks"]):
         result["_content_hint"] = (
@@ -1154,7 +1270,7 @@ def format_response(
     if response_format == ResponseFormat.MARKDOWN:
         result = markdown_formatter(data)
     else:
-        result = json.dumps(json_formatter(data), indent=2, default=str)
+        result = json.dumps(json_formatter(data), separators=(",", ":"), default=str)
 
     # Check character limit
     if len(result) > CHARACTER_LIMIT:

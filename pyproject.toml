@@ -47,6 +47,12 @@ dependencies = [
     # TickTick's anti-bot which 429s plain Python HTTP clients. See
     # api/v2/client.py and docs/ARCHITECTURE.md §4.
     "curl_cffi>=0.7.0",
+    # IANA time-zone database for zoneinfo.ZoneInfo. The MCP layer builds
+    # ZoneInfo(TICKTICK_TIMEZONE) for date filters and rendering; that DB is
+    # absent on Windows and not guaranteed in minimal Linux images, so vendor
+    # it to keep timezone handling working everywhere (no-op where the OS
+    # already ships it).
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
