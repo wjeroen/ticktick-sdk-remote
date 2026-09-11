@@ -114,6 +114,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from ticktick_sdk.client import TickTickClient
 from ticktick_sdk.settings import get_settings
 from ticktick_sdk.tools.inputs import (
+    name_the_zone,
     ResponseFormat,
     StatisticsSection,
     # Task inputs - list-based for batch operations
@@ -210,6 +211,18 @@ logger = logging.getLogger(__name__)
 
 # Load user timezone from settings (set TICKTICK_TIMEZONE env var, e.g. "Europe/Brussels")
 USER_TIMEZONE = get_settings().timezone
+
+
+def _zone_in_doc(fn):
+    """Name TICKTICK_TIMEZONE's current value in a tool's description.
+
+    The model reading the tool list cannot see environment variables. Place
+    this below ``@mcp.tool``: decorators run bottom-up, so the docstring is
+    rewritten before the tool registers it as its description.
+    """
+    if fn.__doc__:
+        fn.__doc__ = name_the_zone(fn.__doc__)
+    return fn
 
 # =============================================================================
 # Constants
@@ -641,6 +654,7 @@ def handle_error(e: Exception, operation: str) -> str:
         "openWorldHint": True,
     },
 )
+@_zone_in_doc
 async def ticktick_create_tasks(params: CreateTasksInput, ctx: Context) -> str:
     """
     Create one or more tasks in TickTick.
@@ -776,6 +790,7 @@ async def ticktick_create_tasks(params: CreateTasksInput, ctx: Context) -> str:
         "openWorldHint": True,
     },
 )
+@_zone_in_doc
 async def ticktick_get_task(params: TaskGetInput, ctx: Context) -> str:
     """
     Get a task by its ID.
@@ -792,6 +807,11 @@ async def ticktick_get_task(params: TaskGetInput, ctx: Context) -> str:
     Returns:
         Task details including: id, project_id, title, content, kind, status,
         priority, dates, tags, parent_id, child_ids, and checklist items.
+
+        Dates: an all-day task shows its date as a plain `2026-09-11`, the day
+        the TickTick app shows. Use it as it is: do not convert it to another
+        zone, even when `time_zone` names a different one. Timed tasks show
+        their time in TICKTICK_TIMEZONE.
 
         A trashed task comes back with in_trash: true (markdown: an "In trash"
         line); the field is omitted when the task is not trashed. Trash is a
@@ -838,6 +858,7 @@ async def ticktick_get_task(params: TaskGetInput, ctx: Context) -> str:
         "openWorldHint": True,
     },
 )
+@_zone_in_doc
 async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
     """
     List tasks with flexible filtering.
@@ -912,9 +933,11 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
     `ticktick_get_task` for one task's complete, unabridged fields.
 
     Dates: all-day tasks show `start_date` / `due_date` as a plain date
-    (`2026-09-11`), the day the TickTick app shows. Timed tasks show an ISO
-    timestamp in TICKTICK_TIMEZONE, or in the task's own zone when
-    `is_floating` is true.
+    (`2026-09-11`), the day the TickTick app shows. Use that date as it is:
+    do not convert it to another zone, even when `time_zone` names a
+    different one. Timed tasks show an ISO timestamp with its offset in
+    TICKTICK_TIMEZONE (`2026-09-10T17:00:00-07:00` is 17:00 at UTC-7), or in
+    the task's own zone when `is_floating` is true.
     """
     try:
         client = get_client(ctx)
@@ -1087,6 +1110,7 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         "openWorldHint": True,
     },
 )
+@_zone_in_doc
 async def ticktick_update_tasks(params: UpdateTasksInput, ctx: Context) -> str:
     """
     Update one or more tasks.
@@ -1494,6 +1518,7 @@ async def ticktick_unparent_tasks(params: UnparentTasksInput, ctx: Context) -> s
         "openWorldHint": True,
     },
 )
+@_zone_in_doc
 async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
     """
     Search active tasks by text and/or structured filters.
@@ -1537,9 +1562,11 @@ async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
     `ticktick_get_task` for one task's complete, unabridged fields.
 
     Dates: all-day tasks show `start_date` / `due_date` as a plain date
-    (`2026-09-11`), the day the TickTick app shows. Timed tasks show an ISO
-    timestamp in TICKTICK_TIMEZONE, or in the task's own zone when
-    `is_floating` is true.
+    (`2026-09-11`), the day the TickTick app shows. Use that date as it is:
+    do not convert it to another zone, even when `time_zone` names a
+    different one. Timed tasks show an ISO timestamp with its offset in
+    TICKTICK_TIMEZONE (`2026-09-10T17:00:00-07:00` is 17:00 at UTC-7), or in
+    the task's own zone when `is_floating` is true.
     """
     try:
         client = get_client(ctx)
@@ -3377,6 +3404,7 @@ async def ticktick_delete_habit(params: HabitDeleteInput, ctx: Context) -> str:
         "openWorldHint": True,
     },
 )
+@_zone_in_doc
 async def ticktick_checkin_habits(params: CheckinHabitsInput, ctx: Context) -> str:
     """
     Check in one or more habits for today or past dates.

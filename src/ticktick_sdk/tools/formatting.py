@@ -53,18 +53,18 @@ def format_task_date(
     """One of a task's start/due dates, as the TickTick app shows it.
 
     All-day tasks give a plain ``YYYY-MM-DD``, read in the task's own zone
-    (see ``Task.home_zone``). Timed tasks give ``YYYY-MM-DD HH:MM``: a
-    fixed-time task in ``tz_name`` (where the user is), a floating task at its
-    own clock time. The detail view adds the zone abbreviation, or
-    "(floating)". When ``is_all_day`` is unknown, rows show the date only.
+    (see ``Task.home_zone``). Timed tasks give ``YYYY-MM-DD HH:MM`` plus the
+    zone, so a reader never has to guess it: a fixed-time task in ``tz_name``
+    (where the user is) with its abbreviation, e.g. ``17:00 PDT``, and a
+    floating task at its own clock time with ``(floating)``. When
+    ``is_all_day`` is unknown, rows show the date only and the detail view
+    shows the time with its zone.
     """
     local = task.local(value, tz_name)
     if local is None:
         return None
     if task.is_all_day or (task.is_all_day is None and not detail):
         return local.strftime("%Y-%m-%d")
-    if not detail:
-        return local.strftime("%Y-%m-%d %H:%M")
     suffix = "(floating)" if task.is_floating else local.strftime("%Z")
     return f"{local.strftime('%Y-%m-%d %H:%M')} {suffix}".strip()
 

@@ -23,10 +23,24 @@ from typing import Optional, List, Literal
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 
+from ticktick_sdk.settings import get_settings
+
+
+# The model reading these descriptions cannot see environment variables, so
+# the first mention of TICKTICK_TIMEZONE in each description names its value.
+# Descriptions are built when the server starts, and changing the variable on
+# Railway restarts the server, so the value shown is always the one in use.
+ZONE_LABEL = f"TICKTICK_TIMEZONE (now {get_settings().timezone})"
+
+
+def name_the_zone(text: str) -> str:
+    """Replace the first TICKTICK_TIMEZONE in ``text`` with ``ZONE_LABEL``."""
+    return text.replace("TICKTICK_TIMEZONE", ZONE_LABEL, 1)
+
 
 # How caller-supplied dates are read, and which day a task is on. Shared by
 # every date field so the tool descriptions state one rule.
-_CREATE_DATE_RULE = (
+_CREATE_DATE_RULE = name_the_zone(
     "A plain date ('2026-09-11') means midnight of that day, which is what an "
     "all-day task needs. A date and time without an offset "
     "('2026-09-11T17:00:00') is read in time_zone if you pass one, otherwise "
@@ -34,7 +48,7 @@ _CREATE_DATE_RULE = (
     "('2026-09-11T17:00:00-07:00') is used exactly. When you set a date and "
     "no time_zone, the task gets TICKTICK_TIMEZONE."
 )
-_UPDATE_DATE_RULE = (
+_UPDATE_DATE_RULE = name_the_zone(
     "A plain date ('2026-09-11') means midnight of that day, which is what an "
     "all-day task needs. Dates and times without an offset are read in "
     "time_zone if you pass one. Otherwise all-day and floating tasks use "
@@ -42,7 +56,7 @@ _UPDATE_DATE_RULE = (
     "tasks use TICKTICK_TIMEZONE. A value with an offset is used exactly. An "
     "unreadable value is rejected."
 )
-_DAY_RULE = (
+_DAY_RULE = name_the_zone(
     "Today is the date in TICKTICK_TIMEZONE. A task counts on the day the "
     "TickTick app shows it: all-day tasks by their date in their own zone, "
     "timed tasks by TICKTICK_TIMEZONE."
@@ -606,12 +620,12 @@ class TaskListInput(BaseMCPInput):
     # Date range (for completed/abandoned status)
     from_date: Optional[str] = Field(
         default=None,
-        description="Start date for completed/abandoned queries (YYYY-MM-DD), inclusive, treated as 00:00 in TICKTICK_TIMEZONE. Must be paired with to_date. Providing only one is ignored. Overrides 'days' when both are set.",
+        description=name_the_zone("Start date for completed/abandoned queries (YYYY-MM-DD), inclusive, treated as 00:00 in TICKTICK_TIMEZONE. Must be paired with to_date. Providing only one is ignored. Overrides 'days' when both are set."),
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     to_date: Optional[str] = Field(
         default=None,
-        description="End date for completed/abandoned queries (YYYY-MM-DD), inclusive, treated as 23:59:59 in TICKTICK_TIMEZONE. Must be paired with from_date.",
+        description=name_the_zone("End date for completed/abandoned queries (YYYY-MM-DD), inclusive, treated as 23:59:59 in TICKTICK_TIMEZONE. Must be paired with from_date."),
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     days: int = Field(
@@ -715,12 +729,12 @@ class SearchInput(BaseMCPInput):
     )
     created_before: Optional[str] = Field(
         default=None,
-        description="Only tasks created on or before this date (YYYY-MM-DD), in TICKTICK_TIMEZONE.",
+        description=name_the_zone("Only tasks created on or before this date (YYYY-MM-DD), in TICKTICK_TIMEZONE."),
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     created_after: Optional[str] = Field(
         default=None,
-        description="Only tasks created on or after this date (YYYY-MM-DD), in TICKTICK_TIMEZONE.",
+        description=name_the_zone("Only tasks created on or after this date (YYYY-MM-DD), in TICKTICK_TIMEZONE."),
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     sort: TaskSort = Field(
@@ -1354,7 +1368,7 @@ class HabitCheckinItem(BaseModel):
     )
     checkin_date: Optional[str] = Field(
         default=None,
-        description=(
+        description=name_the_zone(
             "Date to check in for (YYYY-MM-DD format). "
             "If not provided, checks in for today in TICKTICK_TIMEZONE. "
             "Use a past date to backdate the check-in."

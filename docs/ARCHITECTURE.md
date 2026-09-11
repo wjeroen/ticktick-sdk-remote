@@ -965,6 +965,15 @@ short operator-facing version).
     UTC clock. Nothing reads the machine's local clock, which is UTC on Railway
     and anything on a local stdio install.
 
+    The model using the tools cannot see environment variables, so tool
+    descriptions name the zone: `name_the_zone` (in `tools/inputs.py`) turns
+    the first `TICKTICK_TIMEZONE` in a text into `TICKTICK_TIMEZONE (now
+    America/Los_Angeles)`. Input field descriptions use it directly, and tool
+    docstrings get it through the `_zone_in_doc` decorator in `server.py`,
+    which sits below `@mcp.tool` so it rewrites the docstring before FastMCP
+    reads it as the description. The read tools (`list_tasks`, `search_tasks`,
+    `get_task`) also say not to convert an all-day date to another zone.
+
     Stored values seen in practice: the app writes midnight in the task's zone
     (Brussels summer: `22:00Z` the day before). Values this server wrote before
     2026-09-10 are midnight UTC (`00:00Z`), which still read as the intended day
@@ -1245,13 +1254,15 @@ failed child fetch degrades to a bare id.
 **Task list row format (markdown).** Each row renders, omitting empty fields:
 
 ```
-- [PRIORITY] [NOTE] [PINNED] [DONE|ABANDONED] [RRULE] **Title** (`id`) | Project: Name | Due: YYYY-MM-DD[ HH:MM] | Tags: a, b | Child of: `parent_id` | N children
+- [PRIORITY] [NOTE] [PINNED] [DONE|ABANDONED] [RRULE] **Title** (`id`) | Project: Name | Due: YYYY-MM-DD[ HH:MM ZONE] | Tags: a, b | Child of: `parent_id` | N children
 ```
 
 `[PRIORITY]` is `[HIGH]`/`[MEDIUM]`/`[LOW]`/`[NONE]`; `[PINNED]`/`[DONE]`/
 `[ABANDONED]` appear only when applicable (active is the implicit default).
 `[NOTE]` marks note-kind tasks. `Due:` is the day the TickTick app shows: a
-plain date for all-day tasks, plus `HH:MM` for timed tasks (see quirk 11).
+plain date for all-day tasks, plus `HH:MM` and the zone for timed tasks
+(`17:00 PDT`, or `07:00 (floating)`), so a reader never guesses the zone (see
+quirk 11).
 The recurrence flag is the task's rule shown verbatim, minus the `RRULE:`
 prefix and any `WKST=` part (which only names the first day of the week and
 never moves an occurrence): `RRULE:FREQ=DAILY;INTERVAL=8;WKST=MO` renders as

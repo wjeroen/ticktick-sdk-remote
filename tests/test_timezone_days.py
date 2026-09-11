@@ -237,7 +237,7 @@ class TestDisplay:
 
     def test_row_timed_task_shows_the_time_where_the_user_is(self):
         timed = _task("m", "Call", _utc(2026, 9, 11, 0), BXL, all_day=False)
-        assert "| Due: 2026-09-10 17:00" in format_task_row_markdown(timed, LA)
+        assert "| Due: 2026-09-10 17:00 PDT" in format_task_row_markdown(timed, LA)
 
     def test_row_marks_notes(self):
         assert "[NOTE] **Full Calendar**" in format_task_row_markdown(FULL_CAL, LA)
@@ -255,7 +255,7 @@ class TestDisplay:
     def test_floating_task_display(self):
         run = _task("n", "Morning run", _utc(2026, 9, 11, 5), BXL,
                     all_day=False, floating=True)
-        assert "| Due: 2026-09-11 07:00" in format_task_row_markdown(run, LA)
+        assert "| Due: 2026-09-11 07:00 (floating)" in format_task_row_markdown(run, LA)
         assert "2026-09-11 07:00 (floating)" in format_task_markdown(run, LA)
         payload = format_task_json(run, LA, omit_defaults=True)
         assert payload["due_date"] == "2026-09-11T07:00:00+02:00"
@@ -491,3 +491,29 @@ class TestTodayFollowsTheUser:
 
         stamp = api._v2_client.create_habit_checkin.call_args.kwargs["checkin_stamp"]
         assert stamp == 20260910  # the server clock would have said 20260911
+
+
+
+# =============================================================================
+# Tool descriptions name the zone and say not to convert all-day dates
+# =============================================================================
+
+
+async def test_tool_descriptions_name_the_current_zone():
+    from ticktick_sdk.settings import get_settings
+
+    label = f"TICKTICK_TIMEZONE (now {get_settings().timezone})"
+    tools = {t.name: t for t in await server.mcp.list_tools()}
+    for name in ("ticktick_list_tasks", "ticktick_search_tasks", "ticktick_get_task",
+                 "ticktick_create_tasks", "ticktick_update_tasks",
+                 "ticktick_checkin_habits"):
+        # Once per description, so it does not clutter the text.
+        assert tools[name].description.count(label) == 1, name
+    assert label in str(tools["ticktick_update_tasks"].inputSchema)
+    assert label in str(tools["ticktick_list_tasks"].inputSchema)
+
+
+async def test_read_tools_say_not_to_convert_all_day_dates():
+    tools = {t.name: t for t in await server.mcp.list_tools()}
+    for name in ("ticktick_list_tasks", "ticktick_search_tasks", "ticktick_get_task"):
+        assert "do not convert" in tools[name].description, name
