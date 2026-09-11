@@ -40,13 +40,6 @@ def format_datetime(dt: datetime | None, tz_name: str = "UTC") -> str:
     return convert_tz(dt, tz_name).strftime("%Y-%m-%d %H:%M %Z").strip()
 
 
-def format_date(dt: datetime | None, tz_name: str = "UTC") -> str:
-    """Format a date for human-readable display."""
-    if dt is None:
-        return "Not set"
-    return convert_tz(dt, tz_name).strftime("%Y-%m-%d")
-
-
 def format_task_date(
     task: Task, value: datetime | None, tz_name: str, *, detail: bool = False
 ) -> str | None:
