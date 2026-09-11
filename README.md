@@ -3,16 +3,18 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A remote [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) server for [TickTick](https://ticktick.com), designed to run on [Railway](https://railway.app) so you can use it from **Claude.ai**, **Claude Mobile** (iOS/Android), and any MCP-compatible client — no local setup needed.
+A remote [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) server for [TickTick](https://ticktick.com), designed to run on [Railway](https://railway.app) so you can use it from **Claude.ai**, **Claude Mobile** (iOS/Android), and any MCP-compatible client, no local setup needed. Prefer not to host anything? It also runs **locally** over stdio for Claude Desktop and Claude Code: see [Run locally](#run-locally-instead-claude-desktop-stdio).
 
-Forked from [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mirzabicer/ticktick-sdk). Includes full support for [Dida365 (滴答清单)](https://dida365.com).
+Forked from [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mirzabicer/ticktick-sdk) (local-only, no commits since Jan 2026) and substantially extended. The short version: remote HTTP deployment with auth, filters and honest pagination on every task status, trash visibility, all-day dates that match the TickTick app even while you travel, updates that no longer wipe fields, and graceful V1 fallback with clear diagnostics when TickTick blocks V2 login. Full list: [What this fork adds](#what-this-fork-adds). Includes full support for [Dida365 (滴答清单)](https://dida365.com).
 
 > **Developers:** for how the internals work — architecture, V1/V2 routing, data models, API quirks, response formatting/pagination, and using the Python SDK directly — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Table of Contents
 
 - [Quick Start (Deploy to Railway)](#quick-start-deploy-to-railway)
+- [Run locally (Claude Desktop, stdio)](#run-locally-instead-claude-desktop-stdio)
 - [Features](#features)
+- [What this fork adds](#what-this-fork-adds)
 - [Available MCP Tools (44 Total)](#available-mcp-tools-44-total)
 - [Example Conversations](#example-conversations)
 - [Health Check & Monitoring](#health-check--monitoring)
@@ -60,7 +62,7 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 | `TICKTICK_ACCESS_TOKEN` | Yes | OAuth2 access token (Step 2) |
 | `TICKTICK_USERNAME` | Yes | Your TickTick email address |
 | `TICKTICK_PASSWORD` | Yes | Your TickTick password |
-| `TICKTICK_TIMEZONE` | **Recommended** | Your local timezone for correct date display (default: `UTC`). Without this, all-day tasks may show the wrong date — see note below. |
+| `TICKTICK_TIMEZONE` | **Recommended** | The timezone you are in (default: `UTC`). It sets "today", the times of timed tasks, and how dates you send without a timezone are read. See the note below. |
 | `TICKTICK_HOST` | No | API host: `ticktick.com` (default) or `dida365.com` (Chinese version) |
 | `TICKTICK_TIMEOUT` | No | Request timeout in seconds (default: `30`) |
 | `TICKTICK_DEVICE_ID` | **Strongly recommended** | Stable device id for V2 API (24-char hex). If unset, a fresh random id is generated every redeploy — see note below. |
@@ -73,7 +75,9 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 
 > **`TICKTICK_DEVICE_ID`:** TickTick tracks the devices logging into your account. Without this env var, every Railway redeploy invents a new random device id, so each redeploy looks like *"a stranger on a new device just logged in with your password"* — which can trigger TickTick's anti-bot CAPTCHA wall (`need_captcha`) and break V2 sign-on. Pick any stable 24-character hex string (e.g. the value printed in your first deploy's logs as `TICKTICK_DEVICE_ID is not set... auto-generated: <value>`) and paste it into Railway.
 
-> **Timezone:** TickTick stores all-day task dates as midnight in your local timezone, expressed as UTC. Without `TICKTICK_TIMEZONE`, a task due March 14 in Brussels appears as March 13. Set this to your [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) — the "TZ identifier" column on that page. Common examples: `Europe/Brussels`, `Europe/London`, `America/New_York`, `America/Chicago`, `America/Los_Angeles`, `Asia/Tokyo`, `Asia/Shanghai`, `Australia/Sydney`.
+> **Timezone:** Set `TICKTICK_TIMEZONE` to your [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones), the "TZ identifier" column on that page. Common examples: `Europe/Brussels`, `Europe/London`, `America/New_York`, `America/Chicago`, `America/Los_Angeles`, `Asia/Tokyo`, `Asia/Shanghai`, `Australia/Sydney`. When you travel, change it to where you are, like your phone does.
+>
+> **All-day tasks are plain dates.** TickTick saves every date as an exact moment plus the task's own timezone, and the app shows an all-day task on its date in that zone, wherever your phone is. This server does the same: all-day tasks show as `2026-09-11` with no time, and they stay on the same day when you change `TICKTICK_TIMEZONE`. To set one, send a plain date like `2026-09-11`. A time without a timezone, like `2026-09-11T17:00:00`, means 17:00 in `TICKTICK_TIMEZONE`. Timed tasks show their zone (`17:00 PDT` in lists), and the tool descriptions tell the model which zone `TICKTICK_TIMEZONE` currently is, since it cannot see your environment variables.
 
 > ⚠️ **This server is single-user, so anyone who can reach `/mcp` acts as the account owner**, with full read, write, and delete access to their TickTick data. If you deploy it on a public URL, set `MCP_SECRET_PATH` (below). With neither `MCP_SECRET_PATH` nor `MCP_BEARER_TOKEN` set, the server is completely open and logs a warning saying so at startup. Full reasoning and alternatives: [`docs/SECURING_THE_SERVER.md`](docs/SECURING_THE_SERVER.md).
 
@@ -108,8 +112,6 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 
 > **Changing `MCP_SECRET_PATH` later** changes the URL, and a connector's URL generally cannot be edited in place, so you will need to remove the connector and add it again.
 
-#### Claude Desktop / Claude Code (Local Alternative)
-
 ### Run locally instead (Claude Desktop, stdio)
 
 You can also run this server **on your own machine** over stdio, which Claude
@@ -137,6 +139,12 @@ throttled. (See "Debugging V2 auth" in `docs/ARCHITECTURE.md` §4.)
    Use the full path to `uv` if Claude Desktop can't find it on PATH, and double
    backslashes on Windows. Then fully quit and reopen Claude Desktop.
 
+5. For **Claude Code** instead of Claude Desktop, one command does the same:
+
+   ```bash
+   claude mcp add ticktick-local -- uv run --directory /full/path/to/this/repo ticktick-sdk stdio
+   ```
+
 The `ticktick-sdk stdio` subcommand (or `python -m ticktick_sdk` still serves
 HTTP for Railway) runs the same 44 tools over stdio; logs go to stderr so stdout
 stays clean for the protocol.
@@ -159,8 +167,9 @@ stays clean for the protocol.
 Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mirzabicer/ticktick-sdk). Most items are explained in more detail in the sections below.
 
 **Deployment & hosting**
-- [x] Remote HTTP server (streamable-http) for Railway deployment, replacing upstream's stdio-only local MCP
+- [x] Remote HTTP server (streamable-http) for Railway deployment. Upstream was local-stdio-only; local stdio still works here too ([Run locally](#run-locally-instead-claude-desktop-stdio))
 - [x] Bearer token authentication for the HTTP transport
+- [x] `MCP_SECRET_PATH` secret-URL middleware to protect a public deployment (Claude.ai usually cannot send auth headers), plus per-tool-call logging
 - [x] `/health` endpoint for platform monitoring
 - [x] Railway deployment files (Procfile, Dockerfile)
 
@@ -178,24 +187,31 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 - [x] `has_due_date` filter — find scheduled or unscheduled tasks
 - [x] `kind` filter — accepts one kind or a list, e.g. `kind=["TEXT","CHECKLIST"]` to drop notes from a listing. Applies to every status
 - [x] `from_date`/`to_date` now honored for completed/abandoned status (previously silently ignored)
+- [x] `project_id`, `tag`, and `priority` filters now apply to **every** status, completed/abandoned/deleted included (previously silently ignored outside `status="active"`, so a per-project completed query returned all projects' tasks). When any of these filters is active, the tool over-fetches from TickTick (at least 500, capped at 1000) so matches aren't crowded out by other projects' tasks, and the fetch window always covers the requested page (`limit + offset`), fixing empty second pages on completed/abandoned/deleted listings. One extra task is always probed past the window so a saturated window keeps `next_offset` non-null and paging converges on the true end (found live: a full window used to report itself as the complete result). Contract enforced by a filter x status test matrix (`tests/test_list_filter_contract.py`)
+
+**Task content & description**
+- [x] Checklist `description` is now readable and writable end to end: `ticktick_get_task` shows it (JSON `description` field, markdown "Description" section), list views include it capped like `content`, and `ticktick_update_tasks` accepts a `description` field. Previously it was create-only and no view ever displayed it, so anything written there was invisible through the tools
+- [x] `content` and `description` accept up to 60,000 chars. This cap is this server's own validation rule, chosen by the operator; TickTick's own limit is 164,130 chars, the same for task content, note content, and checklist descriptions (operator-tested in the app, 2026-08-19; API probes confirmed storage far beyond the old 10k/5k caps with no truncation). `description` is a checklist feature: the apps show it only on checklist-kind tasks, while on other kinds the API stores the field but nothing displays it
 
 **Pagination & response sizing**
 - [x] Budget-aware pagination across **all** list-returning tools (`list_tasks`, `search_tasks`, `list_projects`, `list_folders`, `list_tags`, `list_columns`, `habits`) — pass `offset`, response surfaces `next_offset`
 - [x] `total` always reports the **true match count**, independent of `limit`, and `next_offset` is non-null whenever more results remain. (Previously a small `limit` made `search_tasks`/`list_tasks` pre-slice the list, so `total` echoed the page size and `next_offset` went null — a false "this is everything." `limit` is now the page size, enforced inside the paginator, not a cap on the count.)
-- [x] Per-task `content` capped at 1000 chars in JSON list views (with `content_truncated` flag + `_content_hint` pointing at `ticktick_get_task` for the full text)
+- [x] Per-task `content` and `description` capped at 1000 chars in JSON list views (with `content_truncated` / `description_truncated` flags + `_content_hint` pointing at `ticktick_get_task` for the full text)
 - [x] Exact size-checking — no more zero-task truncated responses (and a single over-budget item is still emitted one-per-page so paging can't stall)
 - [x] **Compact JSON** output (no pretty-print whitespace) and a **40,000-char** budget (was 25k), so far more fits per response. The char budget is well under the strictest documented client limit (Claude Code's 25k-**token** cap); see `docs/ARCHITECTURE.md` §9
 - [x] **`list_tasks`/`search_tasks` JSON omits default-valued fields** to save space (absent = default; the convention is spelled out in each tool's description). `ticktick_get_task` stays full-fidelity as the escape hatch. Always present: `id`, `project_id`, `title`, `priority` (+label), `status` (+label), `time_zone`
+- [x] **Trash visibility (`in_trash`)** — a trashed task keeps status "Active" in TickTick (trash is a separate flag), which used to make it indistinguishable from a live task. `ticktick_get_task` JSON now returns `in_trash: true` for a binned task (confirmed live 2026-07-20); `ticktick_update_tasks` JSON adds `in_trash: true` to any updated task that was in the trash at edit time (the pre-edit state, computed for free from the update's own pre-fetch); and `list_tasks(status="deleted")` flags binned rows. Markdown shows an "In trash" line / a `[TRASH]` row flag. The field is **only present when a task is trashed** (blank/absent otherwise, everywhere, no `in_trash: false` clutter). Trashed tasks still never appear under `status="active"` or in `search_tasks`; `status="deleted"` is the only way to list them, and updates on trashed tasks still succeed and leave the task in the trash rather than restoring it (tested 2026-07-20: a trashed task, updated, stayed binned)
 
 **Task search** (`ticktick_search_tasks`)
 - [x] Newest-first by default (`sort=created_desc`) plus a `sort` param (`created_*`, `modified_*`, `due_*`, `priority_desc`, `title_asc`) — previously results were oldest-first, which truncated the newest matches away under a limit
 - [x] Structured filters: `project_id`, `kind` (TEXT/NOTE/CHECKLIST, one or a list like `["TEXT","CHECKLIST"]`), `tag`, `priority`, and `due_before`/`due_after`/`created_before`/`created_after`
 - [x] `query` is now optional — omit it for a pure filter lookup (e.g. "latest NOTE in project X" via `project_id` + `kind=NOTE` + `limit=1`)
 - [x] Optional `sort` on `ticktick_list_tasks` too (defaults to the existing per-status order)
+- [x] `limit` accepts up to 500, matching `list_tasks` (was 100, which rejected a uniform `limit=200`)
 
 **Task list & detail rendering**
 - [x] `[HIGH]` / `[MEDIUM]` / `[LOW]` / `[NONE]` priority labels visible in markdown list rows
-- [x] `[PINNED]` / `[DONE]` / `[ABANDONED]` / `[DAILY|WEEKLY|MONTHLY|YEARLY|REPEATS]` status flags in list rows
+- [x] `[PINNED]` / `[DONE]` / `[ABANDONED]` status flags in list rows, plus the full recurrence rule (`[FREQ=DAILY;INTERVAL=8]`) so cadences that differ never look alike
 - [x] Parent/children relationships shown inline (`Child of: <id>`, `N children`)
 - [x] Project name (not just ID) shown in multi-project list views and in detail view
 - [x] Recurrence rule, all-day flag, and non-default time zone surfaced in detail view
@@ -203,7 +219,9 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 - [x] Child IDs listed in detail view (matching JSON's `child_ids`)
 
 **Bug fixes**
-- [x] Timezone handling: all-day tasks no longer off by one day (uses `TICKTICK_TIMEZONE`)
+- [x] All-day tasks show on the same day as in the TickTick app, even while you travel (read in each task's own zone), and plain dates you send land on that exact day in every timezone
+- [x] `pin_tasks` no longer wipes dates and other fields. The V2 endpoint replaces the whole task, so pin/unpin now re-sends the full task, the same way TickTick's own web client does
+- [x] Batch operations validate that target task and parent IDs exist instead of silently reporting success on wrong IDs
 - [x] `batch_update_tasks` no longer wipes `repeat_flag` / `is_all_day` / `time_zone` on sparse partial updates
 - [x] `batch_update_tasks` also preserves recurrence-anchor fields (`repeatFrom`, `repeatFirstDate`, `repeatTaskId`, `exDate`) — without these, TickTick keeps the RRULE but silently kills the chain (no next occurrence) when a recurring task's due date is moved
 - [x] V2 wire-format datetime conversion no longer drifts by +N hours when input has a non-UTC tzinfo
@@ -212,6 +230,7 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 **Project conventions**
 - [x] `CLAUDE.md` with project instructions for Claude Code sessions
 - [x] `TODO.md` for cross-session task tracking
+- [x] Roughly 1,400 lines of upstream dead code removed (including an unused routing table), and the test suite grew from 309 to 472 test functions
 
 ---
 
@@ -224,7 +243,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 |------|-------------|
 | `ticktick_create_tasks` | Create 1-50 tasks with titles, dates, tags, etc. |
 | `ticktick_get_task` | Get task details by ID |
-| `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter; supports `due_before` / `due_after` for date-range filtering — combine both for a range; `kind` filter, one or a list; optional `sort`). **Paginated** — pass `offset` to continue; `total` is the true count. |
+| `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter; `project_id` / `tag` / `priority` / `kind` filters work on **every** status; `due_before` / `due_after` for date ranges, combine both for a range; optional `sort`). **Paginated**: pass `offset` to continue; `total` is the true count. |
 | `ticktick_update_tasks` | Update 1-100 tasks (includes column assignment) |
 | `ticktick_complete_tasks` | Complete 1-100 tasks |
 | `ticktick_delete_tasks` | Delete 1-100 tasks (moves to trash) |

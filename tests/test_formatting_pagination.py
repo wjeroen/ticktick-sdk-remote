@@ -453,3 +453,41 @@ class TestOmitDefaults:
         assert out["total_children"] == 2
         assert out["children_hidden"] == 2
         assert "_children_hint" in out
+
+
+class TestDescriptionRendering:
+    """The checklist description (`desc`) is displayed, and capped like
+    content in list views so a huge desc can't blow the response budget."""
+
+    def test_detail_json_shows_full_description(self):
+        t = Task(id="a" * 24, project_id="p", title="T", desc="d" * 5000)
+        out = format_task_json(t)
+        assert out["description"] == "d" * 5000
+        assert "description_truncated" not in out
+
+    def test_list_json_caps_description(self):
+        t = Task(id="a" * 24, project_id="p", title="T", desc="x" * 50)
+        out = format_task_json(t, content_max_chars=10)
+        assert out["description"] == "x" * 10 + "…"
+        assert out["description_truncated"] is True
+
+    def test_omit_defaults_drops_empty_description(self):
+        t = Task(id="a" * 24, project_id="p", title="T")
+        out = format_task_json(t, omit_defaults=True)
+        assert "description" not in out
+
+    def test_omit_defaults_keeps_present_description(self):
+        t = Task(id="a" * 24, project_id="p", title="T", desc="shopping notes")
+        out = format_task_json(t, omit_defaults=True)
+        assert out["description"] == "shopping notes"
+
+    def test_markdown_detail_shows_description_section(self):
+        t = Task(id="a" * 24, project_id="p", title="T", desc="the desc body")
+        out = format_task_markdown(t)
+        assert "### Description" in out
+        assert "the desc body" in out
+
+    def test_markdown_detail_omits_empty_description_section(self):
+        t = Task(id="a" * 24, project_id="p", title="T")
+        out = format_task_markdown(t)
+        assert "### Description" not in out

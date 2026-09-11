@@ -23,6 +23,45 @@ from typing import Optional, List, Literal
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 
+from ticktick_sdk.settings import get_settings
+
+
+# The model reading these descriptions cannot see environment variables, so
+# the first mention of TICKTICK_TIMEZONE in each description names its value.
+# Descriptions are built when the server starts, and changing the variable on
+# Railway restarts the server, so the value shown is always the one in use.
+ZONE_LABEL = f"TICKTICK_TIMEZONE (now {get_settings().timezone})"
+
+
+def name_the_zone(text: str) -> str:
+    """Replace the first TICKTICK_TIMEZONE in ``text`` with ``ZONE_LABEL``."""
+    return text.replace("TICKTICK_TIMEZONE", ZONE_LABEL, 1)
+
+
+# How caller-supplied dates are read, and which day a task is on. Shared by
+# every date field so the tool descriptions state one rule.
+_CREATE_DATE_RULE = name_the_zone(
+    "A plain date ('2026-09-11') means midnight of that day, which is what an "
+    "all-day task needs. A date and time without an offset "
+    "('2026-09-11T17:00:00') is read in time_zone if you pass one, otherwise "
+    "in TICKTICK_TIMEZONE. A value with an offset "
+    "('2026-09-11T17:00:00-07:00') is used exactly. When you set a date and "
+    "no time_zone, the task gets TICKTICK_TIMEZONE."
+)
+_UPDATE_DATE_RULE = name_the_zone(
+    "A plain date ('2026-09-11') means midnight of that day, which is what an "
+    "all-day task needs. Dates and times without an offset are read in "
+    "time_zone if you pass one. Otherwise all-day and floating tasks use "
+    "their own zone (the TickTick app reads them in that zone), and other "
+    "tasks use TICKTICK_TIMEZONE. A value with an offset is used exactly. An "
+    "unreadable value is rejected."
+)
+_DAY_RULE = name_the_zone(
+    "Today is the date in TICKTICK_TIMEZONE. A task counts on the day the "
+    "TickTick app shows it: all-day tasks by their date in their own zone, "
+    "timed tasks by TICKTICK_TIMEZONE."
+)
+
 
 class ResponseFormat(str, Enum):
     """Output format for tool responses."""
@@ -105,12 +144,16 @@ class TaskCreateItem(BaseModel):
     content: Optional[str] = Field(
         default=None,
         description="Task notes/content (supports markdown)",
-        max_length=10000,
+        # Operator-chosen cap. TickTick's own limit is 164,130 chars, the
+        # same for content and checklist descriptions (tested 2026-08-19).
+        max_length=60000,
     )
     description: Optional[str] = Field(
         default=None,
         description="Checklist description",
-        max_length=5000,
+        # Operator-chosen cap. TickTick's own limit is 164,130 chars, the
+        # same for content and checklist descriptions (tested 2026-08-19).
+        max_length=60000,
     )
     priority: Optional[str] = Field(
         default=None,
@@ -119,11 +162,11 @@ class TaskCreateItem(BaseModel):
     )
     start_date: Optional[str] = Field(
         default=None,
-        description="Start date in ISO format (e.g., '2025-01-15T09:00:00' or '2025-01-15')",
+        description="Start date. " + _CREATE_DATE_RULE,
     )
     due_date: Optional[str] = Field(
         default=None,
-        description="Due date in ISO format (e.g., '2025-01-15T17:00:00' or '2025-01-15')",
+        description="Due date. " + _CREATE_DATE_RULE,
     )
     all_day: Optional[bool] = Field(
         default=None,
@@ -208,7 +251,16 @@ class TaskUpdateItem(BaseModel):
     content: Optional[str] = Field(
         default=None,
         description="New task content",
-        max_length=10000,
+        # Operator-chosen cap. TickTick's own limit is 164,130 chars, the
+        # same for content and checklist descriptions (tested 2026-08-19).
+        max_length=60000,
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="New checklist description",
+        # Operator-chosen cap. TickTick's own limit is 164,130 chars, the
+        # same for content and checklist descriptions (tested 2026-08-19).
+        max_length=60000,
     )
     priority: Optional[str] = Field(
         default=None,
@@ -217,11 +269,11 @@ class TaskUpdateItem(BaseModel):
     )
     start_date: Optional[str] = Field(
         default=None,
-        description="New start date in ISO format",
+        description="New start date. " + _UPDATE_DATE_RULE,
     )
     due_date: Optional[str] = Field(
         default=None,
-        description="New due date in ISO format",
+        description="New due date. " + _UPDATE_DATE_RULE,
     )
     all_day: Optional[bool] = Field(
         default=None,
@@ -497,13 +549,19 @@ class TaskListInput(BaseMCPInput):
             "- 'active': Current/pending tasks (default)\n"
             "- 'completed': Completed tasks (use days or from_date/to_date)\n"
             "- 'abandoned': Abandoned/won't-do tasks (use days or from_date/to_date)\n"
-            "- 'deleted': Trashed tasks"
+            "- 'deleted': Tasks in the trash/bin (deleted but recoverable). This "
+            "is the ONLY way to see trashed tasks. They never appear under "
+            "'active' or in ticktick_search_tasks. Trashed tasks come back with "
+            "in_trash: true."
         ),
     )
     # Existing filters
     project_id: Optional[str] = Field(
         default=None,
-        description="Filter by project ID",
+        description=(
+            "Filter by project ID. Works with every status "
+            "(active/completed/abandoned/deleted)."
+        ),
         pattern=r"^(inbox\d+|[a-f0-9]{24})$",
     )
     column_id: Optional[str] = Field(
@@ -517,11 +575,14 @@ class TaskListInput(BaseMCPInput):
     )
     tag: Optional[str] = Field(
         default=None,
-        description="Filter by tag name",
+        description="Filter by tag name. Works with every status.",
     )
     priority: Optional[str] = Field(
         default=None,
-        description="Filter by priority: 'none', 'low', 'medium', 'high'",
+        description=(
+            "Filter by priority: 'none', 'low', 'medium', 'high'. "
+            "Works with every status."
+        ),
         pattern=r"^(none|low|medium|high)$",
     )
     kind: Optional[List[Literal["TEXT", "NOTE", "CHECKLIST"]]] = Field(
@@ -536,20 +597,20 @@ class TaskListInput(BaseMCPInput):
     )
     due_today: Optional[bool] = Field(
         default=None,
-        description="Filter to only tasks due today (for active status)",
+        description="Only tasks due today (active status). " + _DAY_RULE,
     )
     overdue: Optional[bool] = Field(
         default=None,
-        description="Filter to only overdue tasks (for active status)",
+        description="Only tasks due before today (active status). " + _DAY_RULE,
     )
     due_before: Optional[str] = Field(
         default=None,
-        description="Show active tasks due on or before this date (YYYY-MM-DD). Example: '2026-03-16' shows everything due up to and including March 16.",
+        description="Show active tasks due on or before this date (YYYY-MM-DD). Example: '2026-03-16' shows everything due up to and including March 16. " + _DAY_RULE,
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     due_after: Optional[str] = Field(
         default=None,
-        description="Show active tasks due on or after this date (YYYY-MM-DD). Example: '2026-03-16' shows everything due from March 16 onwards. Combine with due_before for a range (e.g. due_after='2026-03-16' + due_before='2026-03-20' = tasks due March 16-20 inclusive).",
+        description="Show active tasks due on or after this date (YYYY-MM-DD). Example: '2026-03-16' shows everything due from March 16 onwards. Combine with due_before for a range (e.g. due_after='2026-03-16' + due_before='2026-03-20' = tasks due March 16-20 inclusive). " + _DAY_RULE,
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     has_due_date: Optional[bool] = Field(
@@ -559,12 +620,12 @@ class TaskListInput(BaseMCPInput):
     # Date range (for completed/abandoned status)
     from_date: Optional[str] = Field(
         default=None,
-        description="Start date for completed/abandoned queries (YYYY-MM-DD), inclusive, treated as 00:00 in TICKTICK_TIMEZONE. Must be paired with to_date — providing only one is ignored. Overrides 'days' when both are set.",
+        description=name_the_zone("Start date for completed/abandoned queries (YYYY-MM-DD), inclusive, treated as 00:00 in TICKTICK_TIMEZONE. Must be paired with to_date. Providing only one is ignored. Overrides 'days' when both are set."),
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     to_date: Optional[str] = Field(
         default=None,
-        description="End date for completed/abandoned queries (YYYY-MM-DD), inclusive, treated as 23:59:59 in TICKTICK_TIMEZONE. Must be paired with from_date.",
+        description=name_the_zone("End date for completed/abandoned queries (YYYY-MM-DD), inclusive, treated as 23:59:59 in TICKTICK_TIMEZONE. Must be paired with from_date."),
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     days: int = Field(
@@ -598,7 +659,7 @@ class TaskListInput(BaseMCPInput):
     )
     offset: int = Field(
         default=0,
-        description="Zero-based offset into the filtered task list. The response includes 'next_offset' (or a footer in markdown) when more tasks remain — call again with that value to fetch the next page.",
+        description="Zero-based offset into the filtered task list. The response includes 'next_offset' (or a footer in markdown) when more tasks remain. Call again with that value to fetch the next page.",
         ge=0,
     )
     response_format: ResponseFormat = Field(
@@ -629,7 +690,7 @@ class SearchInput(BaseMCPInput):
         default=None,
         description=(
             "Text to match against task titles and content (case-insensitive "
-            "substring). Optional — omit to filter without a text query."
+            "substring). Optional, omit to filter without a text query."
         ),
         max_length=200,
     )
@@ -658,22 +719,22 @@ class SearchInput(BaseMCPInput):
     )
     due_before: Optional[str] = Field(
         default=None,
-        description="Only tasks due on or before this date (YYYY-MM-DD), in TICKTICK_TIMEZONE.",
+        description="Only tasks due on or before this date (YYYY-MM-DD). " + _DAY_RULE,
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     due_after: Optional[str] = Field(
         default=None,
-        description="Only tasks due on or after this date (YYYY-MM-DD), in TICKTICK_TIMEZONE.",
+        description="Only tasks due on or after this date (YYYY-MM-DD). " + _DAY_RULE,
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     created_before: Optional[str] = Field(
         default=None,
-        description="Only tasks created on or before this date (YYYY-MM-DD), in TICKTICK_TIMEZONE.",
+        description=name_the_zone("Only tasks created on or before this date (YYYY-MM-DD), in TICKTICK_TIMEZONE."),
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     created_after: Optional[str] = Field(
         default=None,
-        description="Only tasks created on or after this date (YYYY-MM-DD), in TICKTICK_TIMEZONE.",
+        description=name_the_zone("Only tasks created on or after this date (YYYY-MM-DD), in TICKTICK_TIMEZONE."),
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     sort: TaskSort = Field(
@@ -689,12 +750,14 @@ class SearchInput(BaseMCPInput):
         description=(
             "Maximum tasks per page. The response also respects a hard size "
             "budget, so a page may contain fewer than 'limit'; when more match, "
-            "'next_offset' is set (or a markdown footer is shown) — call again "
+            "'next_offset' is set (or a markdown footer is shown), call again "
             "with it to fetch the next page. 'total' always reports the true "
             "match count regardless of 'limit'."
         ),
         ge=1,
-        le=100,
+        # 500 matches list_tasks. It was 100, which rejected routines that
+        # pass a uniform limit=200 to both tools.
+        le=500,
     )
     offset: int = Field(
         default=0,
@@ -1305,9 +1368,9 @@ class HabitCheckinItem(BaseModel):
     )
     checkin_date: Optional[str] = Field(
         default=None,
-        description=(
+        description=name_the_zone(
             "Date to check in for (YYYY-MM-DD format). "
-            "If not provided, checks in for today. "
+            "If not provided, checks in for today in TICKTICK_TIMEZONE. "
             "Use a past date to backdate the check-in."
         ),
         pattern=r"^\d{4}-\d{2}-\d{2}$",

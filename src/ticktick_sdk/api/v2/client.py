@@ -308,7 +308,7 @@ class TickTickV2Client(BaseTickTickClient):
         """
         Complete 2FA authentication with a TOTP code.
 
-        Scaffolding for the planned 2FA support (see TODO.md) — implemented but
+        Scaffolding for the planned 2FA support (see TODO.md), implemented but
         NOT yet wired into the sign-on flow. For a headless deployment a real
         TOTP path would also need a way to obtain the code (e.g. a
         TICKTICK_TOTP_SECRET env var to generate it); note that the
@@ -1418,7 +1418,7 @@ class TickTickV2Client(BaseTickTickClient):
         """
         from datetime import datetime
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         now_str = now.strftime("%Y-%m-%dT%H:%M:%S.000+0000")
 
         habit: HabitCreateV2 = {
@@ -1508,7 +1508,7 @@ class TickTickV2Client(BaseTickTickClient):
 
         habit: HabitUpdateV2 = {
             "id": habit_id,
-            "modifiedTime": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
+            "modifiedTime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
         }
 
         if name is not None:
