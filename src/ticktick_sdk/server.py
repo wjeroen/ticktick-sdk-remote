@@ -279,11 +279,27 @@ def truncate_response(
 # so offset-based pagination would otherwise risk duplicates or gaps. We apply
 # an explicit sort before paginating.
 
+def _today() -> date:
+    """Today's date where the user is (TICKTICK_TIMEZONE)."""
+    return datetime.now(ZoneInfo(USER_TIMEZONE)).date()
+
+
+def _due_day(task) -> date | None:
+    """The day a task is due, as the TickTick app shows it.
+
+    All-day and floating tasks use their own zone, timed tasks use
+    TICKTICK_TIMEZONE. See ``Task.due_day``. Every due-date filter goes through
+    this, so due_today, overdue, due_before, and due_after share one day.
+    """
+    return task.due_day(USER_TIMEZONE)
+
+
 def _active_sort_key(task) -> tuple:
-    """Active tasks: by due_date ascending (None last), then by id."""
-    if task.due_date is not None:
-        return (0, task.due_date, task.id or "")
-    return (1, datetime.max.replace(tzinfo=timezone.utc), task.id or "")
+    """Active tasks: by due day ascending (None last), then due moment, then id."""
+    day = _due_day(task)
+    if day is not None:
+        return (0, day, task.due_date, task.id or "")
+    return (1, date.max, datetime.max.replace(tzinfo=timezone.utc), task.id or "")
 
 
 def _completed_sort_key(task) -> tuple:
@@ -649,8 +665,10 @@ async def ticktick_create_tasks(params: CreateTasksInput, ctx: Context) -> str:
                 - kind (str): Task type - 'TEXT' (standard task, default), 'NOTE' (note),
                   or 'CHECKLIST' (checklist with subtask items)
                 - priority (str): 'none', 'low', 'medium', 'high'
-                - start_date (str): Start date in ISO format (REQUIRED for recurrence)
-                - due_date (str): Due date in ISO format
+                - start_date (str): Start date (REQUIRED for recurrence). Send a plain
+                  date like '2026-09-11' for all-day tasks.
+                - due_date (str): Due date, same format. Dates and times without an
+                  offset are read in time_zone if given, otherwise TICKTICK_TIMEZONE.
                 - time_zone (str): IANA timezone (e.g., 'America/New_York')
                 - all_day (bool): Whether task is all-day (no specific time)
                 - tags (list[str]): Tag names to apply
@@ -840,12 +858,15 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
             - kind (list or str): Only these task kinds - 'TEXT', 'NOTE', 'CHECKLIST'.
               Pass a list like ['TEXT','CHECKLIST'] to exclude notes. A single string
               also works. Applies to every status.
-            - due_today (bool): Only tasks due today (active only, uses TICKTICK_TIMEZONE)
-            - overdue (bool): Only overdue tasks (active only, uses TICKTICK_TIMEZONE)
-            - due_before (str): Active tasks due on or before this date, e.g. '2026-03-16' (uses TICKTICK_TIMEZONE)
-            - due_after (str): Active tasks due on or after this date, e.g. '2026-03-16' (uses TICKTICK_TIMEZONE).
+            - due_today (bool): Only tasks due today (active only)
+            - overdue (bool): Only overdue tasks (active only)
+            - due_before (str): Active tasks due on or before this date, e.g. '2026-03-16'
+            - due_after (str): Active tasks due on or after this date, e.g. '2026-03-16'.
               Combine with due_before for a date range (e.g. due_after='2026-03-16' + due_before='2026-03-20'
               returns tasks due March 16-20 inclusive).
+              All four share one day rule: today is the date in TICKTICK_TIMEZONE,
+              and a task counts on the day the TickTick app shows it (all-day tasks
+              by their date in their own zone, timed tasks by TICKTICK_TIMEZONE).
             - has_due_date (bool): If true, only tasks with a due date. If false, only tasks without one
               (good for finding ad-hoc/unscheduled tasks). Omit for no filtering.
             - from_date (str): Start date for completed/abandoned (YYYY-MM-DD)
@@ -884,10 +905,16 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
     `completed_time` also means the task is not completed); missing `progress`
     = 0; missing `is_pinned` = false; missing `is_all_day` = false (not an
     all-day task); missing `repeat_flag` = no recurrence; missing `parent_id` =
-    top-level (no parent); missing `tags` / `children` / `items` = empty.
+    top-level (no parent); missing `tags` / `children` / `items` = empty;
+    missing `is_floating` = fixed time.
     `id`, `project_id`, `title`, `priority` (with `priority_label`), `status`
     (with `status_label`), and `time_zone` are always present. Use
     `ticktick_get_task` for one task's complete, unabridged fields.
+
+    Dates: all-day tasks show `start_date` / `due_date` as a plain date
+    (`2026-09-11`), the day the TickTick app shows. Timed tasks show an ISO
+    timestamp in TICKTICK_TIMEZONE, or in the task's own zone when
+    `is_floating` is true.
     """
     try:
         client = get_client(ctx)
@@ -936,20 +963,23 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
                 tasks = [t for t in tasks if t.column_id == params.column_id]
 
             if params.due_today:
-                today = datetime.now(ZoneInfo(USER_TIMEZONE)).date()
-                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() == today]
+                today = _today()
+                tasks = [t for t in tasks if _due_day(t) == today]
 
             if params.overdue:
-                today = datetime.now(ZoneInfo(USER_TIMEZONE)).date()
-                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() < today and not t.is_completed]
+                today = _today()
+                tasks = [
+                    t for t in tasks
+                    if (d := _due_day(t)) is not None and d < today and not t.is_completed
+                ]
 
             if params.due_before:
                 due_before_date = date.fromisoformat(params.due_before)
-                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() <= due_before_date]
+                tasks = [t for t in tasks if (d := _due_day(t)) is not None and d <= due_before_date]
 
             if params.due_after:
                 due_after_date = date.fromisoformat(params.due_after)
-                tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(ZoneInfo(USER_TIMEZONE)).date() >= due_after_date]
+                tasks = [t for t in tasks if (d := _due_day(t)) is not None and d >= due_after_date]
 
             if params.has_due_date is True:
                 tasks = [t for t in tasks if t.due_date is not None]
@@ -1021,7 +1051,7 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         # `sort` overrides the per-status default; otherwise use the natural
         # order for the status.
         if params.sort is not None:
-            tasks.sort(key=task_sort_key(params.sort))
+            tasks.sort(key=task_sort_key(params.sort, USER_TIMEZONE))
         elif params.status == "active":
             tasks.sort(key=_active_sort_key)
         elif params.status in ("completed", "abandoned"):
@@ -1076,8 +1106,11 @@ async def ticktick_update_tasks(params: UpdateTasksInput, ctx: Context) -> str:
                 - description (str): New checklist description (CHECKLIST kind)
                 - kind (str): Change task type - 'TEXT', 'NOTE', or 'CHECKLIST'
                 - priority (str): 'none', 'low', 'medium', 'high'
-                - start_date (str): Start date in ISO format
-                - due_date (str): Due date in ISO format
+                - start_date (str): Start date. A plain date like '2026-09-11' for
+                  all-day tasks.
+                - due_date (str): Due date, same format. Without an offset, all-day
+                  and floating tasks are read in their own zone, others in
+                  TICKTICK_TIMEZONE, unless time_zone is given in the same update.
                 - time_zone (str): IANA timezone (e.g., 'America/New_York')
                 - all_day (bool): Whether task is all-day
                 - tags (list[str]): New tags (replaces existing tags)
@@ -1497,10 +1530,16 @@ async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
     `completed_time` also means the task is not completed); missing `progress`
     = 0; missing `is_pinned` = false; missing `is_all_day` = false (not an
     all-day task); missing `repeat_flag` = no recurrence; missing `parent_id` =
-    top-level (no parent); missing `tags` / `children` / `items` = empty.
+    top-level (no parent); missing `tags` / `children` / `items` = empty;
+    missing `is_floating` = fixed time.
     `id`, `project_id`, `title`, `priority` (with `priority_label`), `status`
     (with `status_label`), and `time_zone` are always present. Use
     `ticktick_get_task` for one task's complete, unabridged fields.
+
+    Dates: all-day tasks show `start_date` / `due_date` as a plain date
+    (`2026-09-11`), the day the TickTick app shows. Timed tasks show an ISO
+    timestamp in TICKTICK_TIMEZONE, or in the task's own zone when
+    `is_floating` is true.
     """
     try:
         client = get_client(ctx)
@@ -1537,14 +1576,15 @@ async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
             target_priority = priority_map.get(params.priority, 0)
             tasks = [t for t in tasks if t.priority == target_priority]
 
-        # Date-range filters (interpreted in the user's timezone).
+        # Date-range filters. Due dates use the day the TickTick app shows
+        # (see _due_day). Created dates are real moments, read in the user's zone.
         tz = ZoneInfo(USER_TIMEZONE)
         if params.due_before:
             d = date.fromisoformat(params.due_before)
-            tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(tz).date() <= d]
+            tasks = [t for t in tasks if (dd := _due_day(t)) is not None and dd <= d]
         if params.due_after:
             d = date.fromisoformat(params.due_after)
-            tasks = [t for t in tasks if t.due_date and t.due_date.astimezone(tz).date() >= d]
+            tasks = [t for t in tasks if (dd := _due_day(t)) is not None and dd >= d]
         if params.created_before:
             d = date.fromisoformat(params.created_before)
             tasks = [t for t in tasks if t.created_time and t.created_time.astimezone(tz).date() <= d]
@@ -1554,7 +1594,7 @@ async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
 
         # Sort (default newest-first), then paginate the FULL list (no
         # pre-slice) so `total` is accurate and `next_offset` works.
-        tasks.sort(key=task_sort_key(params.sort))
+        tasks.sort(key=task_sort_key(params.sort, USER_TIMEZONE))
 
         title = f"Search Results: '{params.query}'" if params.query else "Search Results"
         return await _render_task_page(

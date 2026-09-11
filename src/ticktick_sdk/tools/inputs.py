@@ -24,6 +24,31 @@ from typing import Optional, List, Literal
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 
+# How caller-supplied dates are read, and which day a task is on. Shared by
+# every date field so the tool descriptions state one rule.
+_CREATE_DATE_RULE = (
+    "A plain date ('2026-09-11') means midnight of that day, which is what an "
+    "all-day task needs. A date and time without an offset "
+    "('2026-09-11T17:00:00') is read in time_zone if you pass one, otherwise "
+    "in TICKTICK_TIMEZONE. A value with an offset "
+    "('2026-09-11T17:00:00-07:00') is used exactly. When you set a date and "
+    "no time_zone, the task gets TICKTICK_TIMEZONE."
+)
+_UPDATE_DATE_RULE = (
+    "A plain date ('2026-09-11') means midnight of that day, which is what an "
+    "all-day task needs. Dates and times without an offset are read in "
+    "time_zone if you pass one. Otherwise all-day and floating tasks use "
+    "their own zone (the TickTick app reads them in that zone), and other "
+    "tasks use TICKTICK_TIMEZONE. A value with an offset is used exactly. An "
+    "unreadable value is rejected."
+)
+_DAY_RULE = (
+    "Today is the date in TICKTICK_TIMEZONE. A task counts on the day the "
+    "TickTick app shows it: all-day tasks by their date in their own zone, "
+    "timed tasks by TICKTICK_TIMEZONE."
+)
+
+
 class ResponseFormat(str, Enum):
     """Output format for tool responses."""
 
@@ -123,11 +148,11 @@ class TaskCreateItem(BaseModel):
     )
     start_date: Optional[str] = Field(
         default=None,
-        description="Start date in ISO format (e.g., '2025-01-15T09:00:00' or '2025-01-15')",
+        description="Start date. " + _CREATE_DATE_RULE,
     )
     due_date: Optional[str] = Field(
         default=None,
-        description="Due date in ISO format (e.g., '2025-01-15T17:00:00' or '2025-01-15')",
+        description="Due date. " + _CREATE_DATE_RULE,
     )
     all_day: Optional[bool] = Field(
         default=None,
@@ -230,11 +255,11 @@ class TaskUpdateItem(BaseModel):
     )
     start_date: Optional[str] = Field(
         default=None,
-        description="New start date in ISO format",
+        description="New start date. " + _UPDATE_DATE_RULE,
     )
     due_date: Optional[str] = Field(
         default=None,
-        description="New due date in ISO format",
+        description="New due date. " + _UPDATE_DATE_RULE,
     )
     all_day: Optional[bool] = Field(
         default=None,
@@ -558,20 +583,20 @@ class TaskListInput(BaseMCPInput):
     )
     due_today: Optional[bool] = Field(
         default=None,
-        description="Filter to only tasks due today (for active status)",
+        description="Only tasks due today (active status). " + _DAY_RULE,
     )
     overdue: Optional[bool] = Field(
         default=None,
-        description="Filter to only overdue tasks (for active status)",
+        description="Only tasks due before today (active status). " + _DAY_RULE,
     )
     due_before: Optional[str] = Field(
         default=None,
-        description="Show active tasks due on or before this date (YYYY-MM-DD). Example: '2026-03-16' shows everything due up to and including March 16.",
+        description="Show active tasks due on or before this date (YYYY-MM-DD). Example: '2026-03-16' shows everything due up to and including March 16. " + _DAY_RULE,
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     due_after: Optional[str] = Field(
         default=None,
-        description="Show active tasks due on or after this date (YYYY-MM-DD). Example: '2026-03-16' shows everything due from March 16 onwards. Combine with due_before for a range (e.g. due_after='2026-03-16' + due_before='2026-03-20' = tasks due March 16-20 inclusive).",
+        description="Show active tasks due on or after this date (YYYY-MM-DD). Example: '2026-03-16' shows everything due from March 16 onwards. Combine with due_before for a range (e.g. due_after='2026-03-16' + due_before='2026-03-20' = tasks due March 16-20 inclusive). " + _DAY_RULE,
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     has_due_date: Optional[bool] = Field(
@@ -680,12 +705,12 @@ class SearchInput(BaseMCPInput):
     )
     due_before: Optional[str] = Field(
         default=None,
-        description="Only tasks due on or before this date (YYYY-MM-DD), in TICKTICK_TIMEZONE.",
+        description="Only tasks due on or before this date (YYYY-MM-DD). " + _DAY_RULE,
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     due_after: Optional[str] = Field(
         default=None,
-        description="Only tasks due on or after this date (YYYY-MM-DD), in TICKTICK_TIMEZONE.",
+        description="Only tasks due on or after this date (YYYY-MM-DD). " + _DAY_RULE,
         pattern=r"^\d{4}-\d{2}-\d{2}$",
     )
     created_before: Optional[str] = Field(

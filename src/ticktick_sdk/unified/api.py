@@ -283,7 +283,12 @@ class UnifiedTickTickAPI:
         # General
         timeout: float = 30.0,
         device_id: str | None = None,
+        default_timezone: str = "UTC",
     ) -> None:
+        # Zone for dates sent without an offset (TICKTICK_TIMEZONE in the MCP
+        # server). See _write_zone for when a task's own zone is used instead.
+        self._default_timezone = default_timezone
+
         # Store credentials for lazy initialization
         self._v1_credentials = {
             "client_id": client_id,
@@ -895,9 +900,21 @@ class UnifiedTickTickAPI:
         if project_id is None:
             raise TickTickConfigurationError("No project ID provided and inbox ID unknown")
 
-        # Format dates
-        start_str = Task.format_datetime(start_date, "v2") if start_date else None
-        due_str = Task.format_datetime(due_date, "v2") if due_date else None
+        # Dates: a plain date, or a time without an offset, is read in the zone
+        # from _write_zone, and the task is created in that zone when none is given.
+        zone = self._write_zone(
+            explicit_zone=time_zone, wall_clock=bool(is_all_day), task_zone=time_zone
+        )
+        start_str = (
+            Task.format_datetime(self._write_datetime(start_date, zone, "start_date"), "v2")
+            if start_date else None
+        )
+        due_str = (
+            Task.format_datetime(self._write_datetime(due_date, zone, "due_date"), "v2")
+            if due_date else None
+        )
+        if time_zone is None and (start_str or due_str):
+            time_zone = zone
 
         # V2 is REQUIRED (not optional fallback)
         if not self._router.has_v2:
@@ -1316,6 +1333,42 @@ class UnifiedTickTickAPI:
     # Batch Task Operations (V2 only)
     # =========================================================================
 
+    def _default_tz(self) -> str:
+        """Zone for dates sent without an offset (TICKTICK_TIMEZONE in the MCP server)."""
+        return getattr(self, "_default_timezone", "UTC")
+
+    def _write_zone(
+        self, *, explicit_zone: str | None, wall_clock: bool, task_zone: str | None
+    ) -> str:
+        """Zone that gives a date or time sent without an offset its meaning.
+
+        1. A zone named in the same request wins.
+        2. All-day and floating tasks use their own zone, because the TickTick
+           app reads them in that zone (see ``Task.home_zone``).
+        3. Otherwise the default zone, where the user is.
+        """
+        if Task.zone_or_none(explicit_zone):
+            return explicit_zone  # type: ignore[return-value]
+        if wall_clock and Task.zone_or_none(task_zone):
+            return task_zone  # type: ignore[return-value]
+        return self._default_tz()
+
+    @staticmethod
+    def _write_datetime(value: Any, zone: str, field: str) -> datetime:
+        """Resolve a caller-supplied date for sending, or raise a clear error.
+
+        Raising matters: an unreadable value used to become None, and a None
+        date in an update tells TickTick to clear the date.
+        """
+        resolved = Task.resolve_datetime(value, zone)
+        if resolved is None:
+            raise TickTickAPIError(
+                f"Could not read {field} {value!r}. Send a plain date "
+                "(YYYY-MM-DD) or an ISO date and time.",
+                details={"field": field, "value": str(value)},
+            )
+        return resolved
+
     async def batch_create_tasks(
         self,
         tasks: list[dict[str, Any]],
@@ -1357,6 +1410,13 @@ class UnifiedTickTickAPI:
                 operation="batch_create_tasks",
             )
 
+        # Check every date before creating anything, so one unreadable value
+        # cannot leave the batch half-created.
+        for task_spec in tasks:
+            for field in ("start_date", "due_date"):
+                if task_spec.get(field):
+                    self._write_datetime(task_spec[field], "UTC", field)
+
         results: list[Task] = []
 
         # Process each task (V2 batch create doesn't support parent_id directly)
@@ -1371,13 +1431,26 @@ class UnifiedTickTickAPI:
             project_id = task_spec.get("project_id") or self._inbox_id
             parent_id = task_spec.get("parent_id")
 
-            # Format dates if provided
+            # Dates: a plain date, or a time without an offset, is read in the
+            # zone from _write_zone. When the caller names no zone, the task is
+            # created in that zone, so TickTick reads the date back the same way.
+            explicit_zone = task_spec.get("time_zone")
+            zone = self._write_zone(
+                explicit_zone=explicit_zone,
+                wall_clock=bool(task_spec.get("all_day")),
+                task_zone=explicit_zone,
+            )
             start_date = task_spec.get("start_date")
             due_date = task_spec.get("due_date")
-            if start_date and isinstance(start_date, datetime):
-                start_date = Task.format_datetime(start_date, "v2")
-            if due_date and isinstance(due_date, datetime):
-                due_date = Task.format_datetime(due_date, "v2")
+            if start_date:
+                start_date = Task.format_datetime(
+                    self._write_datetime(start_date, zone, "start_date"), "v2"
+                )
+            if due_date:
+                due_date = Task.format_datetime(
+                    self._write_datetime(due_date, zone, "due_date"), "v2"
+                )
+            time_zone = explicit_zone or (zone if (start_date or due_date) else None)
 
             # Prepare reminders
             reminders = task_spec.get("reminders")
@@ -1402,7 +1475,7 @@ class UnifiedTickTickAPI:
                 priority=priority,
                 start_date=start_date,
                 due_date=due_date,
-                time_zone=task_spec.get("time_zone"),
+                time_zone=time_zone,
                 is_all_day=task_spec.get("all_day"),
                 reminders=reminders,
                 repeat_flag=task_spec.get("recurrence"),
@@ -1512,20 +1585,29 @@ class UnifiedTickTickAPI:
                     key = priority.lower()
                     priority = priority_map[key] if key in priority_map else int(priority)
                 existing.priority = priority
-            if "start_date" in update and update["start_date"] is not None:
-                start_date = update["start_date"]
-                if isinstance(start_date, str):
-                    start_date = Task.parse_datetime(start_date)
-                existing.start_date = start_date
-            if "due_date" in update and update["due_date"] is not None:
-                due_date = update["due_date"]
-                if isinstance(due_date, str):
-                    due_date = Task.parse_datetime(due_date)
-                existing.due_date = due_date
-            if "time_zone" in update and update["time_zone"] is not None:
-                existing.time_zone = update["time_zone"]
+            # Zone and all-day flag first: they decide what a date sent
+            # without an offset means (see _write_zone).
+            explicit_zone = update.get("time_zone")
+            if explicit_zone is not None:
+                existing.time_zone = explicit_zone
             if "all_day" in update and update["all_day"] is not None:
                 existing.is_all_day = update["all_day"]
+            zone = self._write_zone(
+                explicit_zone=explicit_zone,
+                wall_clock=existing.is_wall_clock,
+                task_zone=existing.time_zone,
+            )
+            wrote_date = False
+            if "start_date" in update and update["start_date"] is not None:
+                existing.start_date = self._write_datetime(update["start_date"], zone, "start_date")
+                wrote_date = True
+            if "due_date" in update and update["due_date"] is not None:
+                existing.due_date = self._write_datetime(update["due_date"], zone, "due_date")
+                wrote_date = True
+            # A dated task with no usable zone gets the zone its date was
+            # written in, so TickTick and the app read the date back the same way.
+            if wrote_date and not Task.zone_or_none(existing.time_zone):
+                existing.time_zone = zone
             if "tags" in update and update["tags"] is not None:
                 existing.tags = update["tags"]
             if "recurrence" in update and update["recurrence"] is not None:

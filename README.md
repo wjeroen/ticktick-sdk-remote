@@ -5,7 +5,7 @@
 
 A remote [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) server for [TickTick](https://ticktick.com), designed to run on [Railway](https://railway.app) so you can use it from **Claude.ai**, **Claude Mobile** (iOS/Android), and any MCP-compatible client, no local setup needed. Prefer not to host anything? It also runs **locally** over stdio for Claude Desktop and Claude Code: see [Run locally](#run-locally-instead-claude-desktop-stdio).
 
-Forked from [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mirzabicer/ticktick-sdk) (local-only, no commits since Jan 2026) and substantially extended. The short version: remote HTTP deployment with auth, filters and honest pagination on every task status, trash visibility, timezone-correct all-day dates, updates that no longer wipe fields, and graceful V1 fallback with clear diagnostics when TickTick blocks V2 login. Full list: [What this fork adds](#what-this-fork-adds). Includes full support for [Dida365 (滴答清单)](https://dida365.com).
+Forked from [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mirzabicer/ticktick-sdk) (local-only, no commits since Jan 2026) and substantially extended. The short version: remote HTTP deployment with auth, filters and honest pagination on every task status, trash visibility, all-day dates that match the TickTick app even while you travel, updates that no longer wipe fields, and graceful V1 fallback with clear diagnostics when TickTick blocks V2 login. Full list: [What this fork adds](#what-this-fork-adds). Includes full support for [Dida365 (滴答清单)](https://dida365.com).
 
 > **Developers:** for how the internals work — architecture, V1/V2 routing, data models, API quirks, response formatting/pagination, and using the Python SDK directly — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -62,7 +62,7 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 | `TICKTICK_ACCESS_TOKEN` | Yes | OAuth2 access token (Step 2) |
 | `TICKTICK_USERNAME` | Yes | Your TickTick email address |
 | `TICKTICK_PASSWORD` | Yes | Your TickTick password |
-| `TICKTICK_TIMEZONE` | **Recommended** | Your local timezone for correct date display (default: `UTC`). Without this, all-day tasks may show the wrong date — see note below. |
+| `TICKTICK_TIMEZONE` | **Recommended** | The timezone you are in (default: `UTC`). It sets "today", the times of timed tasks, and how dates you send without a timezone are read. See the note below. |
 | `TICKTICK_HOST` | No | API host: `ticktick.com` (default) or `dida365.com` (Chinese version) |
 | `TICKTICK_TIMEOUT` | No | Request timeout in seconds (default: `30`) |
 | `TICKTICK_DEVICE_ID` | **Strongly recommended** | Stable device id for V2 API (24-char hex). If unset, a fresh random id is generated every redeploy — see note below. |
@@ -75,7 +75,9 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 
 > **`TICKTICK_DEVICE_ID`:** TickTick tracks the devices logging into your account. Without this env var, every Railway redeploy invents a new random device id, so each redeploy looks like *"a stranger on a new device just logged in with your password"* — which can trigger TickTick's anti-bot CAPTCHA wall (`need_captcha`) and break V2 sign-on. Pick any stable 24-character hex string (e.g. the value printed in your first deploy's logs as `TICKTICK_DEVICE_ID is not set... auto-generated: <value>`) and paste it into Railway.
 
-> **Timezone:** TickTick stores all-day task dates as midnight in your local timezone, expressed as UTC. Without `TICKTICK_TIMEZONE`, a task due March 14 in Brussels appears as March 13. Set this to your [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) — the "TZ identifier" column on that page. Common examples: `Europe/Brussels`, `Europe/London`, `America/New_York`, `America/Chicago`, `America/Los_Angeles`, `Asia/Tokyo`, `Asia/Shanghai`, `Australia/Sydney`.
+> **Timezone:** Set `TICKTICK_TIMEZONE` to your [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones), the "TZ identifier" column on that page. Common examples: `Europe/Brussels`, `Europe/London`, `America/New_York`, `America/Chicago`, `America/Los_Angeles`, `Asia/Tokyo`, `Asia/Shanghai`, `Australia/Sydney`. When you travel, change it to where you are, like your phone does.
+>
+> **All-day tasks are plain dates.** TickTick saves every date as an exact moment plus the task's own timezone, and the app shows an all-day task on its date in that zone, wherever your phone is. This server does the same: all-day tasks show as `2026-09-11` with no time, and they stay on the same day when you change `TICKTICK_TIMEZONE`. To set one, send a plain date like `2026-09-11`. A time without a timezone, like `2026-09-11T17:00:00`, means 17:00 in `TICKTICK_TIMEZONE`.
 
 > ⚠️ **This server is single-user, so anyone who can reach `/mcp` acts as the account owner**, with full read, write, and delete access to their TickTick data. If you deploy it on a public URL, set `MCP_SECRET_PATH` (below). With neither `MCP_SECRET_PATH` nor `MCP_BEARER_TOKEN` set, the server is completely open and logs a warning saying so at startup. Full reasoning and alternatives: [`docs/SECURING_THE_SERVER.md`](docs/SECURING_THE_SERVER.md).
 
@@ -217,7 +219,7 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 - [x] Child IDs listed in detail view (matching JSON's `child_ids`)
 
 **Bug fixes**
-- [x] Timezone handling: all-day tasks no longer off by one day (uses `TICKTICK_TIMEZONE`)
+- [x] All-day tasks show on the same day as in the TickTick app, even while you travel (read in each task's own zone), and plain dates you send land on that exact day in every timezone
 - [x] `pin_tasks` no longer wipes dates and other fields. The V2 endpoint replaces the whole task, so pin/unpin now re-sends the full task, the same way TickTick's own web client does
 - [x] Batch operations validate that target task and parent IDs exist instead of silently reporting success on wrong IDs
 - [x] `batch_update_tasks` no longer wipes `repeat_flag` / `is_all_day` / `time_zone` on sparse partial updates

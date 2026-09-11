@@ -11,7 +11,7 @@ user-friendly interface with additional convenience methods.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from types import TracebackType
 from typing import Any, TypeVar
 
@@ -79,7 +79,11 @@ class TickTickClient:
         # General
         timeout: float = 30.0,
         device_id: str | None = None,
+        default_timezone: str = "UTC",
     ) -> None:
+        # Zone for "today" and for dates sent without an offset. The MCP server
+        # passes TICKTICK_TIMEZONE here through from_settings().
+        self._default_timezone = default_timezone
         self._api = UnifiedTickTickAPI(
             client_id=client_id,
             client_secret=client_secret,
@@ -91,6 +95,7 @@ class TickTickClient:
             v2_cookies=v2_cookies,
             timeout=timeout,
             device_id=device_id,
+            default_timezone=default_timezone,
         )
         self._initialized = False
 
@@ -122,6 +127,7 @@ class TickTickClient:
             v2_cookies=settings.get_v2_cookies(),
             timeout=settings.timeout,
             device_id=settings.device_id,
+            default_timezone=settings.timezone,
         )
 
     # =========================================================================
@@ -342,7 +348,7 @@ class TickTickClient:
         """
         if from_date is not None and to_date is not None:
             return await self._api.list_completed_tasks(from_date, to_date, limit)
-        to_dt = datetime.now()
+        to_dt = datetime.now(timezone.utc)
         from_dt = to_dt - timedelta(days=days)
         return await self._api.list_completed_tasks(from_dt, to_dt, limit)
 
@@ -418,7 +424,7 @@ class TickTickClient:
         """
         if from_date is not None and to_date is not None:
             return await self._api.list_abandoned_tasks(from_date, to_date, limit)
-        to_dt = datetime.now()
+        to_dt = datetime.now(timezone.utc)
         from_dt = to_dt - timedelta(days=days)
         return await self._api.list_abandoned_tasks(from_dt, to_dt, limit)
 
@@ -1329,31 +1335,41 @@ class TickTickClient:
         """
         Get tasks due today.
 
+        "Today" is the date in the client's default zone. A task counts on the
+        day the TickTick app shows it (see ``Task.due_day``): all-day tasks by
+        their date in their own zone, timed tasks by the default zone.
+
         Returns:
             List of tasks due today
         """
-        today = date.today()
+        tz = self._default_timezone
+        today = self._today()
         all_tasks = await self.get_all_tasks()
-        return [
-            task for task in all_tasks
-            if task.due_date and task.due_date.date() == today
-        ]
+        return [task for task in all_tasks if task.due_day(tz) == today]
 
     async def get_overdue_tasks(self) -> list[Task]:
         """
         Get overdue tasks.
 
+        Uses the same day rule as ``get_today_tasks``.
+
         Returns:
             List of overdue tasks
         """
-        today = date.today()
+        tz = self._default_timezone
+        today = self._today()
         all_tasks = await self.get_all_tasks()
         return [
             task for task in all_tasks
-            if task.due_date
-            and task.due_date.date() < today
+            if (day := task.due_day(tz)) is not None
+            and day < today
             and not task.is_completed
         ]
+
+    def _today(self) -> date:
+        """Today's date in the client's default zone (TICKTICK_TIMEZONE)."""
+        zone = Task.zone_or_none(self._default_timezone) or timezone.utc
+        return datetime.now(zone).date()
 
     async def get_tasks_by_tag(self, tag_name: str) -> list[Task]:
         """

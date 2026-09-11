@@ -165,12 +165,15 @@ instance, manages the async lifecycle (`connect()`/`disconnect()` and the
 most importantly **string→int priority coercion** (`"high"` → `5` via
 `{"none":0,"low":1,"medium":3,"high":5}`). It also provides convenience queries
 that are just filters over a full fetch (`get_today_tasks`, `get_overdue_tasks`,
-`search_tasks`, `get_tasks_by_tag`, `get_tasks_by_priority`).
+`search_tasks`, `get_tasks_by_tag`, `get_tasks_by_priority`). The today and
+overdue helpers use the same day rule as the MCP filters (quirk 11).
 
 Build it with `TickTickClient.from_settings()`, which reads `TickTickSettings`,
 calls `validate_all_ready()` (raises `TickTickConfigurationError` if a required
 credential is missing), and forwards everything (including the V2 cookie/token
-fallbacks and device id) into the unified API.
+fallbacks, device id, and `TICKTICK_TIMEZONE` as `default_timezone`) into the
+unified API. `default_timezone` (default `UTC`) is the zone for "today" and for
+dates sent without an offset.
 
 Method count is large (single-item + batch variants of every operation). The
 batch methods (`create_tasks`, `update_tasks`, `complete_tasks`, `delete_tasks`,
@@ -593,6 +596,14 @@ unknown API fields). It provides the shared helpers:
   would serialize as `18:00.000+0000` and TickTick would read it as 20:00. Naive
   datetimes are assumed UTC. (This is the fix behind the README's "no longer
   drifts by +N hours" bug note.)
+- `zone_or_none(name)`: the `ZoneInfo` for an IANA name, or `None` when the
+  name is empty or unknown.
+- `resolve_datetime(value, home_tz)`: turns a caller-supplied date into an exact
+  moment before it is sent. A plain date (`"2026-09-10"` or a `date`) becomes
+  midnight of that date in `home_tz`, a date and time without an offset is
+  wall-clock time in `home_tz`, and a value with an offset is returned
+  unchanged. Returns `None` when a string cannot be read. Every write path goes
+  through it (see quirk 11 for how `home_tz` is chosen).
 - `from_v1(data)` / `from_v2(data)` — thin `model_validate` wrappers; the richer
   models override them. (Serializing *back* to the wire isn't in the base —
   `Task.to_v2_dict()` handles tasks; other resources' V2 payloads are built
@@ -637,6 +648,12 @@ more, so there are no V1-only fields. Highlights:
   `pomodoro_summaries`.
 
 Computed properties: `is_completed`, `is_pinned`.
+
+Calendar methods, which encode the rule the TickTick app follows (quirk 11):
+`is_wall_clock` (all-day or floating), `home_zone(default_tz)` (the task's own
+zone for wall-clock tasks with a valid zone, else `default_tz`),
+`local(value, default_tz)` (one of the task's dates in its home zone), and
+`due_day(default_tz)` (the calendar day the app shows the task on).
 
 **`to_v2_dict(for_update=False)`** is where the tricky write behavior lives:
 
@@ -921,10 +938,29 @@ short operator-facing version).
     with `id2error` = partial batch failure; 500 with `errorCode` = a semantic
     error. The base client and batch checker decode these into typed exceptions.
 
-11. **Timezone for all-day tasks.** TickTick stores all-day dates as midnight in
-    your local zone expressed as UTC, so without `TICKTICK_TIMEZONE` an all-day
-    task can appear a day off. The MCP layer uses the configured timezone when
-    rendering/filtering dates. (Operator detail lives in the README.)
+11. **Which day a task is on.** TickTick stores every date as an exact moment
+    plus the task's own `timeZone`. The app shows an all-day task on the date
+    that moment has in the task's own zone, whatever zone the phone is in.
+    Verified against the app on 2026-09-10 with the phone in San Francisco: a
+    Europe/Brussels task stored at `2026-09-11T22:00Z` shows on Sept 12, although
+    that moment is still Sept 11 in San Francisco. TickTick documents
+    floating-time tasks as keeping their clock time the same way (not yet seen
+    in live data). Fixed-time tasks convert to the viewer's zone.
+
+    The server follows the same rule. "Today" is the date in
+    `TICKTICK_TIMEZONE`, every due filter compares against `Task.due_day`, and
+    display goes through `format_task_date` / `task_date_json`, which print
+    all-day dates as plain `YYYY-MM-DD`. On writes, a plain date or a time
+    without an offset is read in the zone `UnifiedTickTickAPI._write_zone`
+    picks: a zone named in the same request, else the task's own zone for
+    all-day and floating tasks, else `TICKTICK_TIMEZONE`. A task created with a
+    date and no zone gets `TICKTICK_TIMEZONE`. An unreadable date raises
+    instead of becoming `None`, because a `None` date in an update clears it.
+
+    Stored values seen in practice: the app writes midnight in the task's zone
+    (Brussels summer: `22:00Z` the day before). Values this server wrote before
+    2026-09-10 are midnight UTC (`00:00Z`), which still read as the intended day
+    in zones at or east of UTC, and as the day before in zones west of it.
 
 ---
 
@@ -1099,22 +1135,23 @@ don't guarantee a stable order, `server.py` sorts before paginating so different
 offsets don't duplicate or skip items. `list_tasks` uses a per-status default
 (overridable via its optional `sort`); `search_tasks` defaults to newest-first:
 
-- `_active_sort_key`: active tasks by `due_date` ascending (undated last), then
-  `id`. (`list_tasks` active default.)
+- `_active_sort_key`: active tasks by due day as the app shows it (undated
+  last), then due moment, then `id`. (`list_tasks` active default.)
 - `_completed_sort_key`: completed/abandoned by `completed_time` descending
   (undated last), then `id`. (`list_tasks` completed/abandoned default.)
 - `_id_sort_key`: fallback by `id`. (`list_tasks` deleted default.)
-- `task_sort_key(sort)` (in `tools/formatting.py`): maps a `TaskSort` value
-  (`created_desc` default, plus `created_asc` / `modified_*` / `due_*` /
-  `priority_desc` / `title_asc`) to a key. Date sorts put missing dates last in
-  either direction; every key ends with `id` for stable ties. Used by
+- `task_sort_key(sort, tz_name)` (in `tools/formatting.py`): maps a `TaskSort`
+  value (`created_desc` default, plus `created_asc` / `modified_*` / `due_*` /
+  `priority_desc` / `title_asc`) to a key. `due_*` sorts order by the day the
+  app shows, then by moment. Date sorts put missing dates last in either
+  direction; every key ends with `id` for stable ties. Used by
   `search_tasks` always, and by `list_tasks` when its `sort` is set.
 
 **Search filtering.** `search_tasks` fetches the active-task list, builds the
 child-meta map from it, then applies (all optional) a case-insensitive
 title/content substring (`query`), structured filters (`project_id`, `kind`,
-`tag`, `priority`), and date ranges (`due_before` / `due_after` /
-`created_before` / `created_after`, in `TICKTICK_TIMEZONE`) before sorting and
+`tag`, `priority`), and date ranges (`due_before` / `due_after` by the day
+the app shows, `created_before` / `created_after` in `TICKTICK_TIMEZONE`) before sorting and
 paging. `query` is optional, so a pure filter lookup (e.g. latest `NOTE` in a
 project) is one call. **Scope: active tasks only** — completed/abandoned/trash
 aren't searched (tracked in `TODO.md`). Both `list_tasks` and `search_tasks`
@@ -1200,11 +1237,13 @@ failed child fetch degrades to a bare id.
 **Task list row format (markdown).** Each row renders, omitting empty fields:
 
 ```
-- [PRIORITY] [PINNED] [DONE|ABANDONED] [RRULE] **Title** (`id`) | Project: Name | Due: YYYY-MM-DD | Tags: a, b | Child of: `parent_id` | N children
+- [PRIORITY] [NOTE] [PINNED] [DONE|ABANDONED] [RRULE] **Title** (`id`) | Project: Name | Due: YYYY-MM-DD[ HH:MM] | Tags: a, b | Child of: `parent_id` | N children
 ```
 
 `[PRIORITY]` is `[HIGH]`/`[MEDIUM]`/`[LOW]`/`[NONE]`; `[PINNED]`/`[DONE]`/
 `[ABANDONED]` appear only when applicable (active is the implicit default).
+`[NOTE]` marks note-kind tasks. `Due:` is the day the TickTick app shows: a
+plain date for all-day tasks, plus `HH:MM` for timed tasks (see quirk 11).
 The recurrence flag is the task's rule shown verbatim, minus the `RRULE:`
 prefix and any `WKST=` part (which only names the first day of the week and
 never moves an occurrence): `RRULE:FREQ=DAILY;INTERVAL=8;WKST=MO` renders as
@@ -1481,7 +1520,7 @@ status="completed", days=14
 status="active", project_id="63563f0c24f4f791814f9308"
 ```
 
-> **Note:** `due_before` and `due_after` use your configured `TICKTICK_TIMEZONE` for the date comparison, so "due before March 16" means before the end of March 16 in your local timezone, and "due after March 16" means starting at the beginning of March 16.
+> **Note:** `due_today`, `overdue`, `due_before`, and `due_after` share one day rule. "Today" is the date in `TICKTICK_TIMEZONE`, and a task counts on the day the TickTick app shows it: all-day tasks by their date in their own zone, timed tasks by `TICKTICK_TIMEZONE` (quirk 11). Both bounds are inclusive.
 
 ### Projects & Folders
 
