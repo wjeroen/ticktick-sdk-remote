@@ -430,3 +430,64 @@ def test_from_settings_uses_ticktick_timezone():
     )
     client = TickTickClient.from_settings(settings)  # type: ignore[arg-type]
     assert client._api._default_tz() == LA
+
+
+# =============================================================================
+# "Today" follows the user, not the server clock
+# =============================================================================
+
+# 18:00 on Sept 10 in San Francisco, which is already Sept 11 in UTC. Railway's
+# clock is UTC, so a server date here used to be one day ahead of the user.
+_SF_EVENING = datetime(2026, 9, 11, 1, 0, tzinfo=timezone.utc)
+
+
+class _FrozenDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[override]
+        return _SF_EVENING.astimezone(tz) if tz else _SF_EVENING.replace(tzinfo=None)
+
+
+class _UtcServerDate(date):
+    """date.today() on a server whose clock is UTC, like Railway."""
+
+    @classmethod
+    def today(cls):  # type: ignore[override]
+        return _SF_EVENING.date()
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    import ticktick_sdk.unified.api as unified_api
+
+    monkeypatch.setattr(unified_api, "datetime", _FrozenDateTime)
+    monkeypatch.setattr(server, "datetime", _FrozenDateTime)
+    monkeypatch.setattr(unified_api, "date", _UtcServerDate)
+
+
+@pytest.mark.usefixtures("frozen_clock")
+class TestTodayFollowsTheUser:
+    def test_unified_api_today(self):
+        api = _api()
+        assert api._today() == date(2026, 9, 10)
+        api._default_timezone = "UTC"
+        assert api._today() == date(2026, 9, 11)
+
+    def test_server_today(self, monkeypatch):
+        monkeypatch.setattr(server, "USER_TIMEZONE", LA)
+        assert server._today() == date(2026, 9, 10)
+
+    async def test_habit_checkin_without_a_date_lands_on_the_users_today(self):
+        from ticktick_sdk.models import Habit
+
+        api = _api()
+        api.get_habit = AsyncMock(return_value=Habit(id="h" * 24, name="Water"))  # type: ignore[assignment]
+        api.get_habit_checkins = AsyncMock(return_value={})  # type: ignore[assignment]
+        api._v2_client.create_habit_checkin = AsyncMock(return_value={})
+        api._v2_client.update_habit = AsyncMock(
+            return_value={"id2etag": {"h" * 24: "e"}, "id2error": {}}
+        )
+
+        await api.checkin_habit("h" * 24)
+
+        stamp = api._v2_client.create_habit_checkin.call_args.kwargs["checkin_stamp"]
+        assert stamp == 20260910  # the server clock would have said 20260911

@@ -171,7 +171,7 @@ def _calculate_streak_from_checkins(
         return 0
 
     if reference_date is None:
-        reference_date = date.today()
+        reference_date = datetime.now(timezone.utc).date()
 
     # Build a set of completed check-in dates (status=2 means completed)
     # checkin_stamp is in YYYYMMDD format (int)
@@ -1040,7 +1040,7 @@ class UnifiedTickTickAPI:
                     "id": task_id,
                     "projectId": project_id,
                     "status": TaskStatus.COMPLETED,
-                    "completedTime": Task.format_datetime(datetime.now(), "v2"),
+                    "completedTime": Task.format_datetime(datetime.now(timezone.utc), "v2"),
                 }]
             )
             # Check for errors in batch response (shouldn't happen after verify)
@@ -1336,6 +1336,15 @@ class UnifiedTickTickAPI:
     def _default_tz(self) -> str:
         """Zone for dates sent without an offset (TICKTICK_TIMEZONE in the MCP server)."""
         return getattr(self, "_default_timezone", "UTC")
+
+    def _today(self) -> date:
+        """Today's date where the user is (the default zone), not the server's.
+
+        The server's own clock is usually UTC (Railway), which is already
+        tomorrow from 17:00 in San Francisco.
+        """
+        zone = Task.zone_or_none(self._default_tz()) or timezone.utc
+        return datetime.now(zone).date()
 
     def _write_zone(
         self, *, explicit_zone: str | None, wall_clock: bool, task_zone: str | None
@@ -1702,7 +1711,7 @@ class UnifiedTickTickAPI:
             "id": tid,
             "projectId": pid,
             "status": TaskStatus.COMPLETED,
-            "completedTime": Task.format_datetime(datetime.now(), "v2"),
+            "completedTime": Task.format_datetime(datetime.now(timezone.utc), "v2"),
         } for tid, pid in task_ids]
 
         response = await self._v2_client.batch_tasks(update=updates)  # type: ignore
@@ -2871,7 +2880,7 @@ class UnifiedTickTickAPI:
         # Calculate target start date if target_days > 0
         target_start_date = None
         if target_days > 0:
-            target_start_date = int(datetime.now().strftime("%Y%m%d"))
+            target_start_date = int(self._today().strftime("%Y%m%d"))
 
         # Determine if record_enable should be true (for numeric habits)
         record_enable = habit_type == "Real"
@@ -3020,7 +3029,7 @@ class UnifiedTickTickAPI:
         self._ensure_initialized()
 
         # Determine the target date
-        today = date.today()
+        today = self._today()
         target_date = checkin_date if checkin_date is not None else today
 
         # Get current habit to preserve its data
@@ -3132,8 +3141,8 @@ class UnifiedTickTickAPI:
             encouragement=original_habit.encouragement,
             total_checkins=original_habit.total_checkins,
             created_time=original_habit.created_time,
-            modified_time=datetime.now(),
-            archived_time=datetime.now(),
+            modified_time=datetime.now(timezone.utc),
+            archived_time=datetime.now(timezone.utc),
             habit_type=original_habit.habit_type,
             goal=original_habit.goal,
             step=original_habit.step,
@@ -3193,7 +3202,7 @@ class UnifiedTickTickAPI:
             encouragement=original_habit.encouragement,
             total_checkins=original_habit.total_checkins,
             created_time=original_habit.created_time,
-            modified_time=datetime.now(),
+            modified_time=datetime.now(timezone.utc),
             archived_time=None,  # Clear archived time
             habit_type=original_habit.habit_type,
             goal=original_habit.goal,
@@ -3288,7 +3297,7 @@ class UnifiedTickTickAPI:
             habit_checkins[habit_id].append(checkin)
 
         results: dict[str, Habit] = {}
-        today = date.today()
+        today = self._today()
 
         for habit_id, habit_checkin_list in habit_checkins.items():
             # Get original habit to preserve data

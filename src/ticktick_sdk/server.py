@@ -2879,7 +2879,7 @@ async def ticktick_focus_heatmap(params: FocusStatsInput, ctx: Context) -> str:
     try:
         client = get_client(ctx)
 
-        end_date = date.fromisoformat(params.end_date) if params.end_date else date.today()
+        end_date = date.fromisoformat(params.end_date) if params.end_date else _today()
         start_date = date.fromisoformat(params.start_date) if params.start_date else end_date - timedelta(days=params.days)
 
         data = await client.get_focus_heatmap(start_date, end_date)
@@ -2929,7 +2929,7 @@ async def ticktick_focus_by_tag(params: FocusStatsInput, ctx: Context) -> str:
     try:
         client = get_client(ctx)
 
-        end_date = date.fromisoformat(params.end_date) if params.end_date else date.today()
+        end_date = date.fromisoformat(params.end_date) if params.end_date else _today()
         start_date = date.fromisoformat(params.start_date) if params.start_date else end_date - timedelta(days=params.days)
 
         data = await client.get_focus_by_tag(start_date, end_date)
@@ -3395,7 +3395,8 @@ async def ticktick_checkin_habits(params: CheckinHabitsInput, ctx: Context) -> s
             - checkins (list): List of check-ins, each containing:
                 - habit_id (str): Habit ID (required)
                 - value (float): Check-in value (default: 1.0)
-                - checkin_date (str): Date to check in for (YYYY-MM-DD, optional)
+                - checkin_date (str): Date to check in for (YYYY-MM-DD, optional,
+                  default today in TICKTICK_TIMEZONE)
 
     Returns:
         Updated habits with new totals.
@@ -3417,7 +3418,7 @@ async def ticktick_checkin_habits(params: CheckinHabitsInput, ctx: Context) -> s
 
         if params.response_format == ResponseFormat.MARKDOWN:
             lines = [f"# {len(results)} Habit Check-in(s) Recorded", ""]
-            today_str = date.today().isoformat()
+            today_str = _today().isoformat()
 
             for habit_id, habit in results.items():
                 # Find the corresponding checkin data

@@ -957,6 +957,14 @@ short operator-facing version).
     date and no zone gets `TICKTICK_TIMEZONE`. An unreadable date raises
     instead of becoming `None`, because a `None` date in an update clears it.
 
+    Every other "today" (habit check-ins without a date, a new habit's target
+    start date, the default end date of focus stats) is also the date in
+    `TICKTICK_TIMEZONE`, through `_today()` in `server.py`,
+    `UnifiedTickTickAPI`, and `TickTickClient`. Timestamps the server stamps
+    itself (`completedTime`, habit `createdTime` / `modifiedTime`) use an exact
+    UTC clock. Nothing reads the machine's local clock, which is UTC on Railway
+    and anything on a local stdio install.
+
     Stored values seen in practice: the app writes midnight in the task's zone
     (Brussels summer: `22:00Z` the day before). Values this server wrote before
     2026-09-10 are midnight UTC (`00:00Z`), which still read as the intended day

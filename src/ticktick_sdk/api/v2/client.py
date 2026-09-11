@@ -1418,7 +1418,7 @@ class TickTickV2Client(BaseTickTickClient):
         """
         from datetime import datetime
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         now_str = now.strftime("%Y-%m-%dT%H:%M:%S.000+0000")
 
         habit: HabitCreateV2 = {
@@ -1508,7 +1508,7 @@ class TickTickV2Client(BaseTickTickClient):
 
         habit: HabitUpdateV2 = {
             "id": habit_id,
-            "modifiedTime": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
+            "modifiedTime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
         }
 
         if name is not None:

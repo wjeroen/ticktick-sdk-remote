@@ -1356,7 +1356,7 @@ class HabitCheckinItem(BaseModel):
         default=None,
         description=(
             "Date to check in for (YYYY-MM-DD format). "
-            "If not provided, checks in for today. "
+            "If not provided, checks in for today in TICKTICK_TIMEZONE. "
             "Use a past date to backdate the check-in."
         ),
         pattern=r"^\d{4}-\d{2}-\d{2}$",

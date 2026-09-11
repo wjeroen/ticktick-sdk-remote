@@ -1016,7 +1016,7 @@ class TickTickClient:
             Heatmap data
         """
         if end_date is None:
-            end_date = date.today()
+            end_date = self._today()
         if start_date is None:
             start_date = end_date - timedelta(days=days)
         return await self._api.get_focus_heatmap(start_date, end_date)
@@ -1039,7 +1039,7 @@ class TickTickClient:
             Dict of tag -> duration in seconds
         """
         if end_date is None:
-            end_date = date.today()
+            end_date = self._today()
         if start_date is None:
             start_date = end_date - timedelta(days=days)
         return await self._api.get_focus_by_tag(start_date, end_date)
