@@ -1139,7 +1139,6 @@ class UnifiedTickTickAPI:
 
     async def list_deleted_tasks(
         self,
-        start: int = 0,
         limit: int = 100,
     ) -> list[Task]:
         """
@@ -1148,14 +1147,13 @@ class UnifiedTickTickAPI:
         V2-only operation.
 
         Args:
-            start: Pagination offset
             limit: Maximum results
 
         Returns:
             List of deleted tasks
         """
         self._ensure_initialized()
-        data = await self._v2_client.get_deleted_tasks(start, limit)  # type: ignore
+        data = await self._v2_client.get_deleted_tasks(limit)  # type: ignore
         return [Task.from_v2(t) for t in data.get("tasks", [])]
 
     async def move_task(

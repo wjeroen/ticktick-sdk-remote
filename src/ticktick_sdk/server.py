@@ -237,6 +237,11 @@ DEFAULT_TASK_LIMIT = 50
 DEFAULT_PROJECT_LIMIT = 100
 MAX_TASK_LIMIT = 200
 
+# How many tasks ticktick_list_tasks reads from TickTick's completed,
+# abandoned, and trash endpoints on every call, whatever the offset. Capped to
+# stay polite to TickTick.
+CLOSED_FETCH_WINDOW = 1000
+
 
 # =============================================================================
 # Truncation Helper
@@ -320,11 +325,6 @@ def _completed_sort_key(task) -> tuple:
     if task.completed_time is not None:
         return (0, -task.completed_time.timestamp(), task.id or "")
     return (1, 0.0, task.id or "")
-
-
-def _id_sort_key(task) -> tuple:
-    """Fallback: by id only."""
-    return (task.id or "",)
 
 
 # =============================================================================
@@ -915,10 +915,11 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         - Only tasks with a due date: status="active", has_due_date=True
         - Actionable tasks only (no notes): status="active", kind=["TEXT", "CHECKLIST"]
 
-    Filter note: for completed/abandoned/deleted, the project_id/tag/priority/
-    kind filters are applied to a window of up to 1000 recent tasks fetched
-    from TickTick, so an extremely large date range with thousands of closed
-    tasks may miss the oldest matches. Narrow the date range if that matters.
+    Window note: completed/abandoned/deleted listings read up to 1000
+    recent tasks from TickTick (for completed/abandoned, within the date
+    range). Filters, sort, `total`, and paging all work on that set, so a
+    date range with more than 1000 closed tasks misses the oldest ones.
+    Narrow the date range if that matters.
 
     Field defaults: fields at their default are omitted to save space. A field
     absent from a task is at its default: missing `content` = no notes; missing
@@ -946,26 +947,16 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         all_child_meta: dict[str, dict[str, Any]] | None = None
 
         # The completed/abandoned/deleted endpoints return a capped window of
-        # recent tasks; the status-agnostic filters below and offset paging
-        # then slice that window further in memory. Size the window so the
-        # requested page actually exists (limit + offset) and so filtered
-        # matches aren't crowded out by tasks from other projects (floor of
-        # 500 when any filter is active). Capped at 1000 to stay polite to
-        # TickTick.
-        has_post_filter = bool(
-            params.project_id or params.tag or params.priority or params.kind
-        )
-        fetch_limit = params.limit + params.offset
-        if has_post_filter:
-            fetch_limit = max(fetch_limit, 500)
-        fetch_limit = min(fetch_limit, 1000)
-        # Probe one task past the window. If TickTick fills the whole probe,
-        # the window saturated and more tasks exist server-side; the extra
-        # task keeps next_offset non-null, so paging keeps walking (the
-        # window grows with offset) instead of presenting a truncated window
-        # as the complete result (verified live 2026-07-22: a saturated
-        # window reported total=145/next_offset=null when 150 existed).
-        fetch_limit += 1
+        # recent tasks. The status-agnostic filters, the sort, and offset
+        # paging below all run on that window in memory, the same way the
+        # active list is fetched whole and paged in memory. The window has
+        # the same size on every call, whatever the offset, so every page
+        # sorts the same set of tasks and no page repeats or skips a task. A
+        # window that grows with the offset breaks paging: the extra, older
+        # tasks sort to the front and shift every task down by one page.
+        # One task is fetched past the window as a probe: when TickTick
+        # returns it, more tasks exist than the window holds.
+        fetch_limit = CLOSED_FETCH_WINDOW + 1
 
         if params.status == "active":
             tasks = await client.get_all_tasks()
@@ -1072,15 +1063,15 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         # Deterministic sort so paginated calls return a stable order
         # (TickTick's list endpoints don't guarantee one). An explicit
         # `sort` overrides the per-status default; otherwise use the natural
-        # order for the status.
+        # order for the status. status="deleted" keeps the order TickTick's
+        # trash endpoint returns, and the fixed fetch window above makes that
+        # order the same on every page.
         if params.sort is not None:
             tasks.sort(key=task_sort_key(params.sort, USER_TIMEZONE))
         elif params.status == "active":
             tasks.sort(key=_active_sort_key)
         elif params.status in ("completed", "abandoned"):
             tasks.sort(key=_completed_sort_key)
-        else:
-            tasks.sort(key=_id_sort_key)
 
         # Hand the FULL sorted list to the paginator (no pre-slice): `limit`
         # caps the page size there, so `total` stays the true count and

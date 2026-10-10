@@ -750,15 +750,14 @@ class MockUnifiedAPI:
 
     async def list_deleted_tasks(
         self,
-        start: int = 0,
         limit: int = 100,
     ) -> list[Task]:
         """Mock list deleted tasks (trash)."""
-        self._record_call("list_deleted_tasks", (start,), {"limit": limit})
+        self._record_call("list_deleted_tasks", (), {"limit": limit})
         self._check_failure("list_deleted_tasks")
 
         # Return pre-configured deleted tasks (converted from raw dict data)
-        return [Task.from_v2(t) for t in self.deleted_tasks[start:start + limit]]
+        return [Task.from_v2(t) for t in self.deleted_tasks[:limit]]
 
     async def move_task(
         self,

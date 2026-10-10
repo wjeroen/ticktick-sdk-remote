@@ -640,7 +640,8 @@ class TaskListInput(BaseMCPInput):
         description=(
             "Optional explicit sort order. When omitted, the natural order for "
             "the status is used (active: due date ascending, undated last; "
-            "completed/abandoned: most recently completed first; deleted: by id). "
+            "completed/abandoned: most recently completed first; deleted: the "
+            "order TickTick's trash returns). "
             "Options: created_desc, created_asc, modified_desc, modified_asc, "
             "due_desc, due_asc, priority_desc, title_asc."
         ),
@@ -652,7 +653,9 @@ class TaskListInput(BaseMCPInput):
             "Maximum tasks per page. The response also respects a hard size "
             "budget, so a page may contain fewer than 'limit'; when more match, "
             "'next_offset' (JSON) or a markdown footer signals there is another "
-            "page. 'total' always reports the true count regardless of 'limit'."
+            "page. 'total' always reports the true count regardless of 'limit' "
+            "(for completed/abandoned/deleted, the count inside the window of "
+            "recent tasks described in the tool description)."
         ),
         ge=1,
         le=500,

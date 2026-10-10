@@ -777,21 +777,22 @@ class TickTickV2Client(BaseTickTickClient):
 
     async def get_deleted_tasks(
         self,
-        start: int = 0,
         limit: int = 500,
     ) -> TrashResponseV2:
         """
         Get deleted tasks (trash).
 
+        Always reads from the start of the trash. Callers page in memory, like
+        the completed and abandoned listings.
+
         Args:
-            start: Start offset
             limit: Maximum results
 
         Returns:
             Trash response with tasks
         """
         params = {
-            "start": str(start),
+            "start": "0",
             "limit": str(limit),
         }
         response = await self._get_json(

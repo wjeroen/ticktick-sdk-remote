@@ -809,7 +809,7 @@ go through **batch** endpoints. `verify_authentication()` pings the sync endpoin
 | Task | `move_task(s)` | `POST /batch/taskProject` |
 | Task | `set_task_parent` / `unset_task_parent` | `POST /batch/taskParent` |
 | Task | `get_completed_tasks` / `get_abandoned_tasks` | `GET /project/all/closed?…&status=Completed\|Abandoned` (dates `YYYY-MM-DD hh:mm:ss`) |
-| Task | `get_deleted_tasks(start, limit)` | `GET /project/all/trash/pagination` |
+| Task | `get_deleted_tasks(limit)` | `GET /project/all/trash/pagination` (always sent with `start=0`, callers page in memory) |
 | Project | `batch_projects(add, update, delete)` | `POST /batch/project` |
 | Folder | `batch_project_groups(add, update, delete)` | `POST /batch/projectGroup` |
 | Column | `get_columns(project_id)` | `GET /column/project/{projectId}` |
@@ -1149,14 +1149,18 @@ it False** (full fidelity), so `get_task` is the unabridged escape hatch.
 
 **Deterministic ordering before paging.** Because TickTick's list endpoints
 don't guarantee a stable order, `server.py` sorts before paginating so different
-offsets don't duplicate or skip items. `list_tasks` uses a per-status default
+offsets don't duplicate or skip items. This only works because every page sorts
+the same set of tasks (see the fixed window under "Status-agnostic filters"
+below). `list_tasks` uses a per-status default
 (overridable via its optional `sort`); `search_tasks` defaults to newest-first:
 
 - `_active_sort_key`: active tasks by due day as the app shows it (undated
   last), then due moment, then `id`. (`list_tasks` active default.)
 - `_completed_sort_key`: completed/abandoned by `completed_time` descending
   (undated last), then `id`. (`list_tasks` completed/abandoned default.)
-- `_id_sort_key`: fallback by `id`. (`list_tasks` deleted default.)
+- No sort key for `list_tasks` deleted: it keeps the order TickTick's trash
+  endpoint returns. The fixed fetch window makes that order the same on every
+  page.
 - `task_sort_key(sort, tz_name)` (in `tools/formatting.py`): maps a `TaskSort`
   value (`created_desc` default, plus `created_asc` / `modified_*` / `due_*` /
   `priority_desc` / `title_asc`) to a key. `due_*` sorts order by the day the
@@ -1190,19 +1194,25 @@ to every status (active/completed/abandoned/deleted). They used to live only in
 the active branch, which silently ignored them for the other statuses (a
 per-project completed query returned ALL projects' tasks). Because the
 closed/trash endpoints return a capped window and can't filter server-side,
-`ticktick_list_tasks` sizes the fetch window before filtering: at least
-`limit + offset` (so the requested page exists in the window), widened to a
-floor of 500 when any of those filters is active (so matches aren't crowded out
-by other projects' tasks), capped at 1000, plus **one probe task past the
-window**. The probe detects saturation: if TickTick fills the entire window,
-more tasks exist server-side, and the extra task keeps `next_offset` non-null
-so paging keeps walking (the window grows with `offset`) and converges on the
-true end instead of presenting a truncated window as complete (verified live
-2026-07-22: without the probe, a saturated window reported `total=145` and
-`next_offset=null` when 150 tasks existed). `column_id` and the due-date filters
-remain active-only by design and are documented as such in the tool schema. The
-cross-status contract is enforced by `tests/test_list_filter_contract.py`, a
-parametrized filter x status matrix; add any future status-agnostic filter
+`ticktick_list_tasks` fetches a **fixed window** on every call:
+`CLOSED_FETCH_WINDOW` (1000) tasks plus **one probe task past the window**,
+whatever the `limit`, `offset`, or filters. Filters, sort, and paging then run
+on that window in memory, the same way the active list is fetched whole and
+paged in memory, so the model sees the same paging contract on every status:
+stable pages, `total` = the count inside the window, `next_offset` null only at
+the end. The window must not depend on `offset`. A window that grows with the
+offset breaks paging whenever the sort differs from TickTick's own order: the
+extra, older tasks sort to the front and shift every task down by one page
+(seen live 2026-10-09: `status=deleted, limit=10` returned the same 10 tasks at
+offsets 10 and 20, and `completed` with `sort=created_asc` repeated rows the
+same way). The probe marks saturation: when TickTick returns it, more tasks
+exist than the window holds, and `total` reads 1001. TickTick accepts the
+1001-task limit on all three endpoints (checked live 2026-10-09: 613 completed
+and 259 abandoned in 90 days, 491 in the trash). `column_id` and the due-date
+filters remain active-only by design and are documented as such in the tool
+schema. The cross-status contract is enforced by
+`tests/test_list_filter_contract.py`, a parametrized filter x status matrix
+plus fixed-window and paging-walk tests; add any future status-agnostic filter
 there.
 
 **Trash flag (`in_trash`).** TickTick soft-deletes: a trashed task keeps its

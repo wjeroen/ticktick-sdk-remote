@@ -11,12 +11,11 @@ encodes the cross-status filter contract as a parametrized matrix; any
 future filter that claims to be status-agnostic should be added here.
 
 Also covers the fetch-window rules for the capped closed/trash endpoints:
-- the requested page must exist in the window (limit + offset),
-- an active post-filter widens the window to at least 500,
-- the window never exceeds 1000 (plus the +1 saturation probe),
-- one task is always probed past the window, so a saturated window keeps
-  next_offset non-null and paging converges on the true end instead of
-  presenting a truncated window as complete.
+- every call fetches the same window (CLOSED_FETCH_WINDOW plus a +1
+  saturation probe), whatever the limit, offset, or filters,
+- so walking next_offset visits every task exactly once, even when the sort
+  order differs from the order TickTick returns tasks in,
+- and a saturated window reports the probe in `total`.
 """
 
 from __future__ import annotations
@@ -136,48 +135,44 @@ async def test_filters_combine(status):
 
 
 @pytest.mark.parametrize("status", FETCHED_STATUSES)
-async def test_plain_fetch_covers_requested_page(status):
-    # Page 2 must exist inside the fetched window: limit + offset (+1 probe).
-    # Fetching only `limit` used to make every page after the first come back
-    # empty.
+@pytest.mark.parametrize(
+    "limit,offset,filters",
+    [
+        (50, 0, {}),
+        (50, 50, {}),
+        (5, 0, {"project_id": PROJ}),
+        (500, 900, {"project_id": PROJ}),
+    ],
+)
+async def test_fetch_window_is_the_same_on_every_call(status, limit, offset, filters):
+    # A window sized by limit + offset changed with every page, so each page
+    # sorted a different set of tasks and paging repeated and skipped tasks.
     client = MatrixFakeClient(_matrix_tasks())
     await server.ticktick_list_tasks(
-        TaskListInput(status=status, limit=50, offset=50, response_format="json"),
+        TaskListInput(status=status, limit=limit, offset=offset,
+                      response_format="json", **filters),
         _ctx(client),
     )
-    assert client.fetch_limits == [101]
+    assert client.fetch_limits == [server.CLOSED_FETCH_WINDOW + 1]
 
 
-@pytest.mark.parametrize("status", FETCHED_STATUSES)
-async def test_post_filter_widens_fetch_window(status):
-    # With a filter active, fetching only `limit` tasks across all projects
-    # would let other projects' tasks crowd out the matches. Floor of 500
-    # (+1 probe).
-    client = MatrixFakeClient(_matrix_tasks())
-    await server.ticktick_list_tasks(
-        TaskListInput(status=status, project_id=PROJ, limit=5, response_format="json"),
-        _ctx(client),
-    )
-    assert client.fetch_limits == [501]
+class TickTickOrderFakeClient(MatrixFakeClient):
+    """Honors the requested limit like real TickTick and returns the highest
+    ids first, the reverse of the default sort for these statuses. A bigger
+    window then adds tasks that sort to the front, as on the live trash."""
 
-
-async def test_fetch_window_capped_at_1000():
-    client = MatrixFakeClient(_matrix_tasks())
-    await server.ticktick_list_tasks(
-        TaskListInput(status="completed", project_id=PROJ, limit=500, offset=900,
-                      response_format="json"),
-        _ctx(client),
-    )
-    assert client.fetch_limits == [1001]
-
-
-class SaturatingFakeClient(MatrixFakeClient):
-    """Honors the requested limit like real TickTick: returns at most `limit`
-    tasks, so a window smaller than the task set comes back saturated."""
+    def _window(self, limit):
+        self.fetch_limits.append(limit)
+        return sorted(self._tasks, key=lambda t: t.id, reverse=True)[:limit]
 
     async def get_completed_tasks(self, days=7, limit=100, from_date=None, to_date=None):
-        self.fetch_limits.append(limit)
-        return list(self._tasks)[:limit]
+        return self._window(limit)
+
+    async def get_abandoned_tasks(self, days=7, limit=100, from_date=None, to_date=None):
+        return self._window(limit)
+
+    async def get_deleted_tasks(self, limit=100):
+        return self._window(limit)
 
 
 def _many_tasks(n: int) -> list[Task]:
@@ -186,36 +181,41 @@ def _many_tasks(n: int) -> list[Task]:
     ]
 
 
-async def test_saturated_window_keeps_next_offset_non_null():
-    # Live repro (2026-07-22): 150 tasks in range, limit=5 offset=140 fetched
-    # exactly 145 and reported total=145/next_offset=null, presenting the
-    # truncated window as complete. The +1 probe returns one extra task, so
-    # next_offset stays non-null and the pager knows to keep going.
-    client = SaturatingFakeClient(_many_tasks(150))
-    out = await server.ticktick_list_tasks(
-        TaskListInput(status="completed", limit=5, offset=140, response_format="json"),
-        _ctx(client),
-    )
-    d = json.loads(out)
-    assert d["count"] == 5
-    assert d["next_offset"] is not None  # pre-probe: null <-- the lie
-
-
-async def test_paging_a_saturated_window_converges_on_true_end():
-    # Walking next_offset grows the window each page and must terminate at
-    # the real total with every task seen exactly once.
-    client = SaturatingFakeClient(_many_tasks(150))
-    seen, offset, guard = [], 0, 0
+async def _walk(client, **params) -> tuple[list[str], dict]:
+    """Follow next_offset from offset 0 and collect every task id shown."""
+    seen, offset, guard, page = [], 0, 0, {}
     while offset is not None and guard < 100:
         out = await server.ticktick_list_tasks(
-            TaskListInput(status="completed", limit=50, offset=offset,
-                          response_format="json"),
+            TaskListInput(offset=offset, response_format="json", **params),
             _ctx(client),
         )
-        d = json.loads(out)
-        seen.extend(t["id"] for t in d["tasks"])
-        offset = d["next_offset"]
+        page = json.loads(out)
+        seen.extend(t["id"] for t in page["tasks"])
+        offset = page["next_offset"]
         guard += 1
+    return seen, page
+
+
+@pytest.mark.parametrize("status", FETCHED_STATUSES)
+@pytest.mark.parametrize("sort", [None, "created_asc"])
+async def test_paging_visits_every_task_once(status, sort):
+    # Live repro (2026-10-09): status='deleted', limit=10 returned the same 10
+    # tasks at offsets 10 and 20, with total reading 11, 21, 31 while the
+    # trash held 491. status='completed' with sort='created_asc' repeated
+    # rows the same way.
+    client = TickTickOrderFakeClient(_many_tasks(150))
+    seen, last = await _walk(client, status=status, limit=10, sort=sort)
     assert len(seen) == 150
     assert len(set(seen)) == 150
-    assert d["total"] == 150  # exact once the window outgrows the data
+    assert last["total"] == 150
+
+
+async def test_saturated_window_counts_the_probe(monkeypatch):
+    # More tasks exist than the window holds: TickTick returns the probe task
+    # too, so total reads one more than the window.
+    monkeypatch.setattr(server, "CLOSED_FETCH_WINDOW", 20)
+    client = TickTickOrderFakeClient(_many_tasks(150))
+    seen, last = await _walk(client, status="deleted", limit=10)
+    assert set(client.fetch_limits) == {21}
+    assert last["total"] == 21
+    assert len(set(seen)) == 21

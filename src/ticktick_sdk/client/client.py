@@ -441,7 +441,7 @@ class TickTickClient:
         Returns:
             List of deleted tasks
         """
-        return await self._api.list_deleted_tasks(0, limit)
+        return await self._api.list_deleted_tasks(limit)
 
     # =========================================================================
     # Projects

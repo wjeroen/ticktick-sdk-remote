@@ -352,6 +352,18 @@ async def test_list_tasks_deleted_forces_in_trash():
     assert d["tasks"][0]["in_trash"] is True
 
 
+async def test_list_tasks_deleted_keeps_trash_order():
+    # Without an explicit sort, the trash listing shows tasks in the order
+    # TickTick's trash endpoint returns them, not re-sorted by id.
+    ids = ["c" * 24, "a" * 24, "b" * 24]
+    binned = [Task(id=i, project_id=PROJ, title=i[0]) for i in ids]
+    out = await server.ticktick_list_tasks(
+        TaskListInput(status="deleted", response_format="json"),
+        _ctx(_TrashFakeClient(binned)),
+    )
+    assert [t["id"] for t in json.loads(out)["tasks"]] == ids
+
+
 async def test_active_list_never_flags_in_trash():
     # Active tasks are never trashed (verified live: no leak), so in_trash is
     # never set on the active listing.
