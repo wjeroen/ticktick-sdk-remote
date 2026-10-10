@@ -1063,15 +1063,20 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         # Deterministic sort so paginated calls return a stable order
         # (TickTick's list endpoints don't guarantee one). An explicit
         # `sort` overrides the per-status default; otherwise use the natural
-        # order for the status. status="deleted" keeps the order TickTick's
-        # trash endpoint returns, and the fixed fetch window above makes that
-        # order the same on every page.
+        # order for the status. The trash shows the most recently modified
+        # tasks first, which puts recent deletions on top (checked live
+        # 2026-10-09: the top 10 matched the tasks TickTick itself picks
+        # first when asked for only 11). TickTick's own trash order groups
+        # tasks by project, oldest created first, so a recent deletion could
+        # sit anywhere in it.
         if params.sort is not None:
             tasks.sort(key=task_sort_key(params.sort, USER_TIMEZONE))
         elif params.status == "active":
             tasks.sort(key=_active_sort_key)
         elif params.status in ("completed", "abandoned"):
             tasks.sort(key=_completed_sort_key)
+        elif params.status == "deleted":
+            tasks.sort(key=task_sort_key("modified_desc", USER_TIMEZONE))
 
         # Hand the FULL sorted list to the paginator (no pre-slice): `limit`
         # caps the page size there, so `total` stays the true count and

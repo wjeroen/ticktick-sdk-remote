@@ -1158,9 +1158,12 @@ below). `list_tasks` uses a per-status default
   last), then due moment, then `id`. (`list_tasks` active default.)
 - `_completed_sort_key`: completed/abandoned by `completed_time` descending
   (undated last), then `id`. (`list_tasks` completed/abandoned default.)
-- No sort key for `list_tasks` deleted: it keeps the order TickTick's trash
-  endpoint returns. The fixed fetch window makes that order the same on every
-  page.
+- `task_sort_key("modified_desc")`: `list_tasks` deleted default, so recent
+  deletions come first. TickTick's own trash order groups tasks by project,
+  oldest created first, which hides recent deletions in a large trash. When
+  asked for only a few tasks, TickTick picks the most recently modified ones
+  (checked live 2026-10-09: the top 10 by `modified_desc` matched the 11
+  tasks TickTick returned for `limit=11`).
 - `task_sort_key(sort, tz_name)` (in `tools/formatting.py`): maps a `TaskSort`
   value (`created_desc` default, plus `created_asc` / `modified_*` / `due_*` /
   `priority_desc` / `title_asc`) to a key. `due_*` sorts order by the day the

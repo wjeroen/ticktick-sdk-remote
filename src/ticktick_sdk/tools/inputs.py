@@ -640,8 +640,8 @@ class TaskListInput(BaseMCPInput):
         description=(
             "Optional explicit sort order. When omitted, the natural order for "
             "the status is used (active: due date ascending, undated last; "
-            "completed/abandoned: most recently completed first; deleted: the "
-            "order TickTick's trash returns). "
+            "completed/abandoned: most recently completed first; deleted: most "
+            "recently modified first, so recent deletions come first). "
             "Options: created_desc, created_asc, modified_desc, modified_asc, "
             "due_desc, due_asc, priority_desc, title_asc."
         ),
