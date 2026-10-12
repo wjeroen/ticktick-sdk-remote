@@ -1209,7 +1209,16 @@ extra, older tasks sort to the front and shift every task down by one page
 (seen live 2026-10-09: `status=deleted, limit=10` returned the same 10 tasks at
 offsets 10 and 20, and `completed` with `sort=created_asc` repeated rows the
 same way). The probe marks saturation: when TickTick returns it, more tasks
-exist than the window holds, and `total` reads 1001. TickTick accepts the
+exist than the window holds. The check runs on the raw fetch, before the
+filters, because a filter usually drops the probe (seen live 2026-07-27:
+completed + one project over a wide range returned `total=20,
+next_offset=null` while older matches existed). A saturated listing is marked
+on every page, the last one included: JSON starts with `complete: false` and a
+`_window_hint` (built by `_window_hint` in `server.py`), markdown with an
+"Incomplete:" line. For completed/abandoned the hint tells the model to use a
+shorter date range or a `to_date` at the oldest `completed_time` shown.
+`complete` is omitted when nothing is missing, and `_render_task_page` shrinks
+the page budget by the hint's size. TickTick accepts the
 1001-task limit on all three endpoints (checked live 2026-10-09: 613 completed
 and 259 abandoned in 90 days, 491 in the trash). `column_id` and the due-date
 filters remain active-only by design and are documented as such in the tool

@@ -15,7 +15,9 @@ Also covers the fetch-window rules for the capped closed/trash endpoints:
   saturation probe), whatever the limit, offset, or filters,
 - so walking next_offset visits every task exactly once, even when the sort
   order differs from the order TickTick returns tasks in,
-- and a saturated window reports the probe in `total`.
+- and a saturated window marks every page incomplete (`complete: false`
+  plus `_window_hint` in JSON, an "Incomplete:" line in markdown), even
+  when a filter drops the probe task.
 """
 
 from __future__ import annotations
@@ -210,12 +212,63 @@ async def test_paging_visits_every_task_once(status, sort):
     assert last["total"] == 150
 
 
-async def test_saturated_window_counts_the_probe(monkeypatch):
-    # More tasks exist than the window holds: TickTick returns the probe task
-    # too, so total reads one more than the window.
+def _mixed_tasks(n: int) -> list[Task]:
+    """n tasks, alternating between PROJ and OTHER_PROJ."""
+    return [
+        Task(id=f"{i:024x}", project_id=PROJ if i % 2 else OTHER_PROJ, title=f"T{i}")
+        for i in range(n)
+    ]
+
+
+@pytest.mark.parametrize("status", FETCHED_STATUSES)
+@pytest.mark.parametrize("filters", [{}, {"project_id": PROJ}])
+async def test_saturated_window_marks_every_page_incomplete(monkeypatch, status, filters):
+    # Live repro (2026-07-27): completed + one project over a wide range
+    # returned total=20, next_offset=null while older matches existed. The
+    # filter dropped the probe task, so nothing showed the window was full.
     monkeypatch.setattr(server, "CLOSED_FETCH_WINDOW", 20)
-    client = TickTickOrderFakeClient(_many_tasks(150))
-    seen, last = await _walk(client, status="deleted", limit=10)
-    assert set(client.fetch_limits) == {21}
-    assert last["total"] == 21
-    assert len(set(seen)) == 21
+    client = TickTickOrderFakeClient(_mixed_tasks(150))
+    pages, offset = [], 0
+    while offset is not None:
+        out = await server.ticktick_list_tasks(
+            TaskListInput(status=status, limit=5, offset=offset,
+                          response_format="json", **filters),
+            _ctx(client),
+        )
+        pages.append(json.loads(out))
+        offset = pages[-1]["next_offset"]
+    assert len(pages) > 1
+    for page in pages:
+        assert page["complete"] is False
+        assert "21" in page["_window_hint"]
+    assert pages[-1]["next_offset"] is None  # the last page still warns
+
+    md = await server.ticktick_list_tasks(
+        TaskListInput(status=status, response_format="markdown", **filters),
+        _ctx(client),
+    )
+    assert md.splitlines()[2].startswith("**Incomplete:**")
+
+
+@pytest.mark.parametrize("status", FETCHED_STATUSES)
+async def test_window_with_room_left_is_not_flagged(status):
+    client = MatrixFakeClient(_matrix_tasks())
+    out = await server.ticktick_list_tasks(
+        TaskListInput(status=status, response_format="json"), _ctx(client),
+    )
+    d = json.loads(out)
+    assert "complete" not in d and "_window_hint" not in d
+    md = await server.ticktick_list_tasks(
+        TaskListInput(status=status, response_format="markdown"), _ctx(client),
+    )
+    assert "Incomplete" not in md
+
+
+async def test_active_list_is_never_flagged(monkeypatch):
+    # The active list is fetched whole, so a long list is still complete.
+    monkeypatch.setattr(server, "CLOSED_FETCH_WINDOW", 20)
+    out = await server.ticktick_list_tasks(
+        TaskListInput(status="active", response_format="json"),
+        _ctx(MatrixFakeClient(_mixed_tasks(150))),
+    )
+    assert "complete" not in json.loads(out)

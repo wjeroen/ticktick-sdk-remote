@@ -490,6 +490,7 @@ async def _render_task_page(
     response_format: ResponseFormat,
     title: str,
     child_meta: dict[str, dict[str, Any]] | None,
+    window_hint: str | None = None,
 ) -> str:
     """Render one page of an already-sorted task list (markdown or JSON).
 
@@ -499,10 +500,16 @@ async def _render_task_page(
     the page size and the response budget caps it further. The JSON path does
     not touch ``client`` (so it is unit-testable with ``client=None``); the
     markdown path uses it only to build the project-name map.
+
+    ``window_hint`` marks a result that misses tasks TickTick has (see
+    ``_window_hint``). JSON then starts with ``complete: false`` and a
+    ``_window_hint``, markdown with an "Incomplete:" line. The page budget
+    shrinks by the hint's size so the response still fits.
     """
+    budget = CHARACTER_LIMIT - (len(window_hint) + 100 if window_hint else 0)
     if response_format == ResponseFormat.MARKDOWN:
         project_names = await build_project_name_map(client, tasks)
-        return paginate_tasks_markdown(
+        page = paginate_tasks_markdown(
             tasks,
             title=title,
             offset=offset,
@@ -510,17 +517,49 @@ async def _render_task_page(
             tz_name=USER_TIMEZONE,
             project_names=project_names,
             child_meta=child_meta,
+            budget=budget,
         )
-    return json.dumps(
-        paginate_tasks_json(
-            tasks,
-            offset=offset,
-            limit=limit,
-            tz_name=USER_TIMEZONE,
-            child_meta=child_meta,
-            omit_defaults=True,  # list/search views drop default-valued fields
-        ),
-        separators=(",", ":"),
+        if window_hint:
+            heading, _, rest = page.partition("\n")
+            page = f"{heading}\n\n**Incomplete:** {window_hint}\n{rest}"
+        return page
+    result = paginate_tasks_json(
+        tasks,
+        offset=offset,
+        limit=limit,
+        tz_name=USER_TIMEZONE,
+        child_meta=child_meta,
+        omit_defaults=True,  # list/search views drop default-valued fields
+        budget=budget,
+    )
+    if window_hint:
+        result = {"complete": False, "_window_hint": window_hint, **result}
+    return json.dumps(result, separators=(",", ":"))
+
+
+def _window_hint(status: str, fetched: int, filtered: bool) -> str:
+    """Warning for a completed/abandoned/deleted listing whose fetch window
+    filled up, so TickTick has older tasks this listing never read."""
+    if status == "deleted":
+        missing = (
+            "some matching trashed tasks may be missing" if filtered
+            else "some trashed tasks are missing"
+        )
+        return (
+            f"The trash holds more tasks than this listing reads. It read "
+            f"{fetched} of them, so {missing} from this result, even on the "
+            f"last page."
+        )
+    missing = (
+        "older matching tasks may be missing" if filtered
+        else "older tasks are missing"
+    )
+    return (
+        f"TickTick has more {status} tasks in this date range than this "
+        f"listing reads. It read the {fetched} most recent, so {missing} from "
+        f"this result, even on the last page. To reach them, call again with "
+        f"a shorter date range, or with to_date set to the oldest "
+        f"completed_time in this result."
     )
 
 
@@ -917,9 +956,13 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
 
     Window note: completed/abandoned/deleted listings read up to 1000
     recent tasks from TickTick (for completed/abandoned, within the date
-    range). Filters, sort, `total`, and paging all work on that set, so a
-    date range with more than 1000 closed tasks misses the oldest ones.
-    Narrow the date range if that matters.
+    range). Filters, sort, `total`, and paging all work on that set. When
+    TickTick has more, the response says so on every page: JSON starts with
+    `complete: false` and a `_window_hint`, markdown with an "Incomplete:"
+    line. The result then misses older tasks, even on the last page, so
+    follow the hint (a shorter date range, or an earlier to_date) before
+    treating the list or its `total` as complete. `complete` is omitted when
+    nothing is missing.
 
     Field defaults: fields at their default are omitted to save space. A field
     absent from a task is at its default: missing `content` = no notes; missing
@@ -955,7 +998,8 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         # window that grows with the offset breaks paging: the extra, older
         # tasks sort to the front and shift every task down by one page.
         # One task is fetched past the window as a probe: when TickTick
-        # returns it, more tasks exist than the window holds.
+        # returns it, more tasks exist than the window holds, and the
+        # response carries a window hint (see _window_hint).
         fetch_limit = CLOSED_FETCH_WINDOW + 1
 
         if params.status == "active":
@@ -1039,6 +1083,19 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
         else:
             tasks = await client.get_all_tasks()
 
+        # The probe came back, so the window is full and TickTick has older
+        # tasks this listing never read. Checked before the filters below,
+        # because a filter usually drops the probe and would hide this.
+        window_hint = None
+        if params.status != "active" and len(tasks) > CLOSED_FETCH_WINDOW:
+            window_hint = _window_hint(
+                params.status,
+                len(tasks),
+                filtered=bool(
+                    params.project_id or params.tag or params.priority or params.kind
+                ),
+            )
+
         # Status-agnostic filters run AFTER the status-specific fetch so they
         # apply to every status (a completed or trashed task still has a
         # project, tags, a priority, and a kind). The closed/trash endpoints
@@ -1090,6 +1147,7 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
             response_format=params.response_format,
             title=title,
             child_meta=all_child_meta,
+            window_hint=window_hint,
         )
 
     except Exception as e:
