@@ -7,12 +7,18 @@ and utility methods used by all unified models.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import re
+from datetime import date, datetime, time, timezone
 from typing import Any, ClassVar, Self
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from ticktick_sdk.constants import DATETIME_FORMAT_V1, DATETIME_FORMAT_V2
+
+
+# A bare calendar date, as callers send for all-day tasks.
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class TickTickModel(BaseModel):
@@ -72,6 +78,57 @@ class TickTickModel(BaseModel):
 
         return None
 
+    @staticmethod
+    def zone_or_none(name: str | None) -> ZoneInfo | None:
+        """Return the IANA zone for ``name``, or None when it is empty or unknown."""
+        if not name:
+            return None
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            return None
+
+    @classmethod
+    def resolve_datetime(
+        cls, value: str | datetime | date | None, home_tz: str | None
+    ) -> datetime | None:
+        """Turn a caller-supplied date or time into an exact moment.
+
+        TickTick stores every date as an exact moment, so a value without an
+        offset needs a zone before it can be sent. ``home_tz`` supplies it:
+
+        - A plain date (``"2026-09-10"`` or a ``date``) becomes midnight of that
+          date in ``home_tz``. For an all-day task, pass the task's own zone:
+          the TickTick app shows an all-day task on the date its stored moment
+          has in the task's own zone, not in the zone of the viewing device.
+        - A date and time without an offset is wall-clock time in ``home_tz``.
+        - A value with an offset (or a trailing ``Z``) is already exact and is
+          returned unchanged.
+
+        An empty or unknown ``home_tz`` falls back to UTC. Returns None when a
+        string cannot be read as a date.
+        """
+        if value is None:
+            return None
+        zone = cls.zone_or_none(home_tz) or timezone.utc
+
+        if isinstance(value, datetime):
+            parsed: datetime = value
+        elif isinstance(value, date):
+            return datetime.combine(value, time(0), tzinfo=zone)
+        else:
+            text = value.strip()
+            if _DATE_ONLY.match(text):
+                return datetime.combine(date.fromisoformat(text), time(0), tzinfo=zone)
+            maybe = cls.parse_datetime(text)
+            if maybe is None:
+                return None
+            parsed = maybe
+
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=zone)
+        return parsed
+
     @classmethod
     def format_datetime(cls, value: datetime | None, for_api: str = "v2") -> str | None:
         """Format a datetime for API submission."""
@@ -85,7 +142,7 @@ class TickTickModel(BaseModel):
         if for_api == "v1":
             return value.strftime(DATETIME_FORMAT_V1)
         # DATETIME_FORMAT_V2 hardcodes "+0000" but strftime does not convert
-        # the timezone — it just appends the literal suffix. Convert to UTC
+        # the timezone, it just appends the literal suffix. Convert to UTC
         # first so the wall-clock time in the string actually matches +0000.
         # Without this, a datetime like 18:00+02:00 would serialize as
         # "18:00.000+0000" and TickTick would read it as 20:00 Brussels.

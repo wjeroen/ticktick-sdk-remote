@@ -7,7 +7,7 @@ V1 and V2 API task representations.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timezone
 from typing import Any, Self
 
 from pydantic import Field, field_validator
@@ -195,6 +195,44 @@ class Task(TickTickModel):
         """Check if the task is pinned."""
         return self.pinned_time is not None
 
+    # Calendar semantics. TickTick stores every date as an exact moment plus
+    # the task's own time zone. The app shows all-day tasks, and tasks set to
+    # "floating time", as they read in that own zone, so their date (and a
+    # floating task's clock time) does not move when the viewer changes zone.
+    # Verified for all-day tasks against the app on 2026-09-10: a task stored
+    # at 2026-09-11T22:00Z with zone Europe/Brussels shows on Sept 12 while
+    # the phone is in San Francisco, where that moment is still Sept 11.
+
+    @property
+    def is_wall_clock(self) -> bool:
+        """True for all-day and floating tasks, which keep their own calendar."""
+        return bool(self.is_all_day) or bool(self.is_floating)
+
+    def home_zone(self, default_tz: str) -> str:
+        """The zone this task's dates are read in.
+
+        The task's own zone for all-day and floating tasks, when it is a valid
+        IANA name. Otherwise ``default_tz``, which is the zone of the person
+        reading (TICKTICK_TIMEZONE in the MCP server).
+        """
+        if self.is_wall_clock and self.zone_or_none(self.time_zone):
+            return self.time_zone  # type: ignore[return-value]
+        return default_tz
+
+    def local(self, value: datetime | None, default_tz: str) -> datetime | None:
+        """One of this task's dates, as it reads in the task's home zone."""
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        zone = self.zone_or_none(self.home_zone(default_tz)) or timezone.utc
+        return value.astimezone(zone)
+
+    def due_day(self, default_tz: str) -> date | None:
+        """The calendar day this task is due, as the TickTick app shows it."""
+        local = self.local(self.due_date, default_tz)
+        return local.date() if local else None
+
     # V1/V2 conversion methods
     @classmethod
     def from_v1(cls, data: dict[str, Any]) -> Self:
@@ -256,7 +294,7 @@ class Task(TickTickModel):
         # Recurrence anchors. The V2 batch/task endpoint resets any field
         # absent from the body, so we must round-trip these from the
         # pre-fetched task or TickTick can't compute the next occurrence
-        # (the RRULE survives but its anchor in the chain is lost — symptom:
+        # (the RRULE survives but its anchor in the chain is lost. Symptom:
         # moving a recurring task to a new due date silently kills the series).
         if self.repeat_from is not None:
             data["repeatFrom"] = self.repeat_from
