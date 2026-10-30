@@ -170,6 +170,7 @@ from ticktick_sdk.tools.formatting import (
     paginate_markdown,
     paginate_json,
     task_sort_key,
+    child_meta_entry,
     paginate_projects_markdown,
     paginate_projects_json,
     paginate_tags_markdown,
@@ -443,7 +444,12 @@ async def build_child_meta_for_task(
     client: TickTickClient, task
 ) -> dict[str, dict[str, Any]] | None:
     """Detail-view helper: fetch each child task in parallel so the
-    formatter can show title + priority for every subtask.
+    formatter can show title, priority, status and the trash flag for every
+    subtask.
+
+    The detail view lists every child whatever its status, so the status and
+    trash flag have to travel with it: without them a completed or trashed
+    subtask reads as active.
 
     Returns None when the task has no children. Failed fetches are skipped
     silently, the formatter will fall back to bare IDs for those.
@@ -459,7 +465,7 @@ async def build_child_meta_for_task(
     for cid, child in zip(task.child_ids, results):
         if isinstance(child, Exception):
             continue
-        meta[cid] = {"title": child.title, "priority": child.priority}
+        meta[cid] = child_meta_entry(child)
     return meta
 
 
@@ -847,6 +853,12 @@ async def ticktick_get_task(params: TaskGetInput, ctx: Context) -> str:
         Task details including: id, project_id, title, content, kind, status,
         priority, dates, tags, parent_id, child_ids, and checklist items.
 
+        Children: every subtask is listed, whatever its status, and each one
+        shows its own status. Markdown marks a completed subtask `[DONE]`, an
+        abandoned one `[ABANDONED]` and a trashed one `[TRASH]`, and no flag
+        means active. JSON children carry `status` and `status_label`, plus
+        `in_trash: true` on a trashed subtask.
+
         Dates: an all-day task shows its date as a plain `2026-09-11`, the day
         the TickTick app shows. Use it as it is: do not convert it to another
         zone, even when `time_zone` names a different one. Timed tasks show
@@ -1004,15 +1016,12 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
 
         if params.status == "active":
             tasks = await client.get_all_tasks()
-            # Capture {id: {title, priority}} from the FULL list before
-            # filtering, so subtasks resolve to title + priority even when
-            # filtered out (e.g. subtasks with no due date won't appear in a
-            # "due today" result, but the parent's children field still
+            # Capture {id: child_meta_entry} from the FULL list
+            # before filtering, so subtasks resolve to title + priority even
+            # when filtered out (e.g. subtasks with no due date won't appear
+            # in a "due today" result, but the parent's children field still
             # shows them).
-            all_child_meta = {
-                t.id: {"title": t.title, "priority": t.priority}
-                for t in tasks if t.id
-            }
+            all_child_meta = {t.id: child_meta_entry(t) for t in tasks if t.id}
 
             # Active-only filters. Kanban columns and due-date semantics only
             # exist for live tasks; the status-agnostic filters (project, tag,
@@ -1626,13 +1635,10 @@ async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
         client = get_client(ctx)
         tasks = await client.get_all_tasks()
 
-        # Capture {id: {title, priority}} from the FULL active list before
-        # filtering, so child references still resolve to title + priority
-        # even when the child itself is filtered out of the results.
-        all_child_meta = {
-            t.id: {"title": t.title, "priority": t.priority}
-            for t in tasks if t.id
-        }
+        # Capture {id: child_meta_entry} from the FULL active list
+        # before filtering, so child references still resolve to title +
+        # priority even when the child itself is filtered out of the results.
+        all_child_meta = {t.id: child_meta_entry(t) for t in tasks if t.id}
 
         # Text match (optional).
         if params.query:

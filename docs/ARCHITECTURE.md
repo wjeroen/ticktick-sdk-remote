@@ -1263,15 +1263,23 @@ pointing at `ticktick_get_task`. The checklist `description` gets the same cap
 truncates. (Raising the cap trades fewer tasks per page against the fixed
 response budget, content-heavy lists just paginate sooner.)
 
-**Subtask enrichment.** List views build a `{child_id: {title, priority}}` meta
-map from the same fetch, so children render with title + priority and **no extra
-API calls** — markdown as indented sub-bullets, JSON as
-`{id, title, priority_label}`. The meta map is filtered by the query's status, so
-children of a different status are dropped; when that happens JSON adds
-`total_children`/`children_hidden`/`_children_hint` and markdown appends an
-"N more subtasks hidden" suffix. The **detail** view instead fetches each child
-concurrently (one `get_task` per child) so it can show the same enriched rows; a
-failed child fetch degrades to a bare id.
+**Subtask enrichment.** List views build a
+`{child_id: {title, priority, status, in_trash}}` meta map from the same fetch,
+so children render with title, priority, status and the trash flag and **no
+extra API calls**. Every builder uses `child_meta_entry` in `tools/formatting.py`,
+so the map has one shape everywhere. Markdown renders children as indented
+sub-bullets, `[PRIORITY] [TRASH] [DONE|ABANDONED] title (id)`, with each flag only
+when it applies (`child_flags`, built on the same `status_flag` helper the task
+rows use, so no flag means active). JSON renders
+`{id, title, priority_label, status, status_label}`, plus `in_trash: true` on a
+trashed child (omitted otherwise, like the task-level flag). A trashed child keeps
+its status, so the trash flag is the only sign it is binned. The meta map is filtered by
+the query's status, so children of a different status are dropped; when that
+happens JSON adds `total_children`/`children_hidden`/`_children_hint` and markdown
+appends an "N more subtasks hidden" suffix. The **detail** view instead fetches
+each child concurrently (one `get_task` per child) and lists every child whatever
+its status, which is why the flags matter most there: without them a completed
+or trashed subtask reads as active. A failed child fetch degrades to a bare id.
 
 **Task list row format (markdown).** Each row renders, omitting empty fields:
 

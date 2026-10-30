@@ -217,6 +217,7 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 - [x] Recurrence rule, all-day flag, and non-default time zone surfaced in detail view
 - [x] `is_pinned` exposed in JSON output
 - [x] Child IDs listed in detail view (matching JSON's `child_ids`)
+- [x] Every subtask shows its own status: markdown puts `[DONE]` / `[ABANDONED]` next to a closed subtask and `[TRASH]` next to a trashed one (no flag means active), and each JSON child carries `status` + `status_label`, plus `in_trash: true` when trashed. `ticktick_get_task` lists every subtask whatever its status, and it used to show a completed one exactly like an open one
 
 **Bug fixes**
 - [x] All-day tasks show on the same day as in the TickTick app, even while you travel (read in each task's own zone), and plain dates you send land on that exact day in every timezone

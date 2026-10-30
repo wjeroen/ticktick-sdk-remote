@@ -94,6 +94,27 @@ def status_label(status: int) -> str:
     return labels.get(status, "Unknown")
 
 
+def status_flag(status: int | None) -> str:
+    """Markdown flag for a non-active status, with a trailing space.
+
+    Active gives an empty string: ``[ACTIVE]`` on every row is noise, so a
+    missing flag means active. Used by task rows and by child rows.
+    """
+    if status == -1:
+        return "[ABANDONED] "
+    if status in (1, 2):
+        return "[DONE] "
+    return ""
+
+
+def child_flags(meta: dict[str, Any]) -> str:
+    """Markdown flags for one child row, in task-row order: ``[TRASH]``, then
+    ``[DONE]`` / ``[ABANDONED]``. An active child that is not trashed gets
+    none, so a child without flags reads like a task row without flags."""
+    trash = "[TRASH] " if meta.get("in_trash") else ""
+    return trash + status_flag(meta.get("status", 0))
+
+
 # Dropped from the displayed rule. WKST only names which weekday a week starts
 # on, so it never changes which dates the rule produces.
 _RRULE_NOISE_PARAMS = {"WKST"}
@@ -371,8 +392,9 @@ def format_task_markdown(
     the ID.
 
     When `child_meta` is provided (`{child_id: {"title": str, "priority":
-    int}}`), each child row shows `[PRIORITY] title (\`id\`)`. Without it,
-    children render as bare IDs.
+    int, "status": int, "in_trash": bool}}`, see `child_meta_entry`), each
+    child row shows `[PRIORITY] [TRASH] [DONE|ABANDONED] title (\`id\`)`, with
+    each flag only when it applies. Without it, children render as bare IDs.
     """
     lines = []
 
@@ -399,7 +421,7 @@ def format_task_markdown(
             if meta:
                 ind = priority_indicator(meta.get("priority", 0))
                 ctitle = meta.get("title") or "(No title)"
-                lines.append(f"  - {ind} {ctitle} (`{child_id}`)")
+                lines.append(f"  - {ind} {child_flags(meta)}{ctitle} (`{child_id}`)")
             else:
                 lines.append(f"  - `{child_id}`")
     lines.append(f"- **Status**: {status_label(task.status)}")
@@ -482,11 +504,13 @@ def format_task_json(
     Detail callers leave it False to get every field. Always kept either way:
     id, project_id, title, kind, priority(+label), status(+label), time_zone.
 
-    `child_meta` is `{child_id: {"title": str, "priority": int}}`. When
-    provided, the `children` array becomes a list of `{id, title,
-    priority_label}` objects; children not present in the map are dropped
-    (with `total_children`/`children_hidden` reported). When None (detail
-    view fallback), children are listed as bare `{id}` entries.
+    `child_meta` is `{child_id: {"title": str, "priority": int, "status":
+    int, "in_trash": bool}}` (see `child_meta_entry`). When provided, the
+    `children` array becomes a list of `{id, title, priority_label, status,
+    status_label}` objects, plus `in_trash: true` on a trashed child (omitted
+    otherwise, like the task-level flag); children not present in the map are dropped (with
+    `total_children`/`children_hidden` reported). When None (detail view
+    fallback), children are listed as bare `{id}` entries.
     """
     start_date = task_date_json(task, task.start_date, tz_name)
     due_date = task_date_json(task, task.due_date, tz_name)
@@ -516,10 +540,14 @@ def format_task_json(
         desc_truncated = True
 
     # Children: when child_meta is provided (list/search/detail contexts),
-    # render `{id, title, priority_label}`. Entries not in the map are dropped
-    # (they're a different status than the current filter, e.g. completed
-    # subtasks under an active-filtered parent). When child_meta is None,
-    # children are listed as bare `{id}` entries.
+    # render `{id, title, priority_label, status, status_label}`, plus
+    # `in_trash: true` on a trashed child. These matter most in the detail
+    # view, which shows every child whatever its status, so a completed or
+    # trashed child must not read as active. Entries not in
+    # the map are dropped (in list views they're a different status than the
+    # current filter, e.g. completed subtasks under an active-filtered
+    # parent). When child_meta is None, children are listed as bare `{id}`
+    # entries.
     total_children = len(task.child_ids or [])
     if task.child_ids and child_meta is not None:
         children = []
@@ -527,11 +555,17 @@ def format_task_json(
             meta = child_meta.get(cid)
             if meta is None:
                 continue
-            children.append({
+            cstatus = meta.get("status", 0)
+            child = {
                 "id": cid,
                 "title": meta.get("title"),
                 "priority_label": priority_label(meta.get("priority", 0)),
-            })
+                "status": cstatus,
+                "status_label": status_label(cstatus),
+            }
+            if meta.get("in_trash"):
+                child["in_trash"] = True
+            children.append(child)
     elif task.child_ids:
         children = [{"id": cid} for cid in task.child_ids]
     else:
@@ -622,21 +656,16 @@ def format_task_row_markdown(
 
     When `child_meta` is provided and the task has children, the row is
     followed by indented sub-bullets, one per resolvable child showing
-    `[PRIORITY] title (\`id\`)`. Children not in the map (different status
-    than the active filter) are counted as hidden in the row suffix.
+    `[PRIORITY] [TRASH] [DONE|ABANDONED] title (\`id\`)`, with each flag only
+    when it applies. Children not in the map (different status than the
+    active filter) are counted as hidden in the row suffix.
     Without `child_meta`, the row shows only the plain `| N children` count.
     """
     priority_str = priority_indicator(task.priority)
     note_str = "[NOTE] " if task.kind == "NOTE" else ""
     trash_str = "[TRASH] " if getattr(task, "deleted", 0) else ""
     pinned_str = "[PINNED] " if task.is_pinned else ""
-    # Only flag non-active statuses. [ACTIVE] on every row is noise.
-    if task.status == -1:
-        status_flag = "[ABANDONED] "
-    elif task.status in (1, 2):
-        status_flag = "[DONE] "
-    else:
-        status_flag = ""
+    status_str = status_flag(task.status)
     repeat_flag_str = repeat_flag_indicator(task.repeat_flag)
     task_title = task.title or "(No title)"
     due_str = f" | Due: {format_task_date(task, task.due_date, tz_name)}" if task.due_date else ""
@@ -665,7 +694,7 @@ def format_task_row_markdown(
                 continue
             cind = priority_indicator(meta.get("priority", 0))
             ctitle = meta.get("title") or "(No title)"
-            child_lines.append(f"  - {cind} {ctitle} (`{cid}`)")
+            child_lines.append(f"  - {cind} {child_flags(meta)}{ctitle} (`{cid}`)")
         if not child_lines and hidden > 0:
             children_suffix = f" | {hidden} subtasks (not in this filter)"
         elif hidden > 0:
@@ -674,7 +703,7 @@ def format_task_row_markdown(
         children_suffix = f" | {total_children} children"
 
     main_row = (
-        f"- {priority_str} {note_str}{trash_str}{pinned_str}{status_flag}{repeat_flag_str}**{task_title}** "
+        f"- {priority_str} {note_str}{trash_str}{pinned_str}{status_str}{repeat_flag_str}**{task_title}** "
         f"(`{task.id}`){project_str}{due_str}{progress_str}{tags_str}{parent_str}{children_suffix}"
     )
     if child_lines:
@@ -703,10 +732,25 @@ def format_tasks_markdown(
     return "\n".join(lines)
 
 
+def child_meta_entry(task: Task) -> dict[str, Any]:
+    """One task's entry in a `child_meta` map: what a parent's view shows
+    about this task as a child (title, priority flag, status flag, trash
+    flag).
+
+    Every place that builds a `child_meta` map uses this, so the map has one
+    shape everywhere."""
+    return {
+        "title": task.title,
+        "priority": task.priority,
+        "status": task.status,
+        "in_trash": bool(getattr(task, "deleted", 0)),
+    }
+
+
 def _build_child_meta(tasks: list[Task]) -> dict[str, dict[str, Any]]:
-    """Build a `{id: {title, priority}}` map from a task list, used to
+    """Build a `{id: child_meta_entry}` map from a task list, used to
     enrich child references when no explicit map was passed."""
-    return {t.id: {"title": t.title, "priority": t.priority} for t in tasks if t.id}
+    return {t.id: child_meta_entry(t) for t in tasks if t.id}
 
 
 def format_tasks_json(
@@ -723,8 +767,8 @@ def format_tasks_json(
     notes don't blow up batch responses with multi-kilobyte content fields.
     For budget-aware paginated output use `paginate_tasks_json` instead.
 
-    `child_meta` is `{id: {title, priority}}` for enriching child references
-    with title + priority_label. When omitted, it's built from `tasks` itself
+    `child_meta` is `{id: child_meta_entry}` for enriching child references
+    with title, priority, status and the trash flag. When omitted, it's built from `tasks` itself
     (which only helps when children happen to be in the same batch).
     """
     meta = child_meta if child_meta is not None else _build_child_meta(tasks)
@@ -800,7 +844,7 @@ def paginate_tasks_json(
     When any task hits the cap, a `_content_hint` is added at the top level
     pointing the caller at `ticktick_get_task` for the full text.
 
-    `child_meta` is `{id: {title, priority}}` for enriching child references
+    `child_meta` is `{id: child_meta_entry}` for enriching child references
     even when the children aren't in `tasks` (e.g. a filtered "due today"
     list whose parents' subtasks have no due date). When omitted, the map
     is built from `tasks` itself.

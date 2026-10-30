@@ -3,7 +3,8 @@ Tests for list-view formatting behavior: children rendering with titles +
 priority, pagination hints, and the budget-aware paginator.
 
 Covers:
-  - JSON children get `{id, title, priority_label}` from a child_meta map.
+  - JSON children get `{id, title, priority_label, status, status_label}`
+    from a child_meta map (status flags are covered in test_child_status.py).
   - Markdown list rows append children as indented sub-bullets with
     `[PRIORITY] title (id)`.
   - Markdown detail view shows children with priority + title when meta
@@ -63,9 +64,12 @@ class TestChildrenJsonRendering:
 
         out = format_task_json(parent, child_meta=meta)
 
+        # `_meta` sets no status, so the children fall back to active.
         assert out["children"] == [
-            {"id": "c1", "title": "Active 1", "priority_label": "High"},
-            {"id": "c2", "title": "Active 2", "priority_label": "Medium"},
+            {"id": "c1", "title": "Active 1", "priority_label": "High",
+             "status": 0, "status_label": "Active"},
+            {"id": "c2", "title": "Active 2", "priority_label": "Medium",
+             "status": 0, "status_label": "Active"},
         ]
         assert "total_children" not in out
 
