@@ -59,12 +59,16 @@
 
 - [ ] **Changing only `time_zone` on an all-day task moves its day (found 2026-09-10).** An update that sets `time_zone` without a new date keeps the stored moment, and the app then reads that moment in the new zone, which can land on a different date. Fix: when the zone changes on an all-day task and no date is sent, re-encode the task's current day as midnight in the new zone.
 - [ ] **Confirm floating-time handling against one real floating task.** Floating tasks are read and written at their own clock time (TickTick's help page describes this), but no floating task has been seen in live data yet. Create one timed task set to "Floating Time" in the app and check that `get_task` shows the same clock time as the app.
+- [ ] **V1 login failure halfway through `complete_tasks` (found 2026-11-01).** The V2 fallback then handles tasks V1 already completed, and for a recurring task its error says "Nothing was changed", which is false. Rare: the token must expire between two V1 calls of one tool call.
 - [ ] **stdio mode swallows startup errors (found 2026-07-28).** With incomplete config, `ticktick-sdk stdio` dies with only `Error: unhandled errors in a TaskGroup (1 sub-exception)` on stderr and never shows the helpful `TickTickConfigurationError` text ("Configuration incomplete ... missing TICKTICK_*" naming the exact env vars). A Claude Desktop user gets no clue what to fix. Unwrap the ExceptionGroup in `main_stdio` (or log the real exception in the lifespan) so the actionable message reaches stderr. Found during the 2026-07-28 local re-verification, where the message only surfaced via a direct `validate_all_ready()` probe.
 
 ### Testing
 
-- [ ] Run the full suite on Windows for the subtask status, complete and abandon changes (Termux cannot install pydantic-core, 2026-11-01)
-- [ ] Check live what `complete_tasks` does to a timed recurring task (not covered by the 2026-11-01 test)
+- [x] Run the full suite on Windows for the subtask status, complete and abandon changes: **711 passing** at `628c43d` (2026-11-01)
+- [x] Check live what `complete_tasks` does to a timed recurring task: the time of day stays the same, also across a clock change (2026-11-01)
+- [x] Check live that `complete_tasks` works on an Inbox task (2026-11-01)
+- [ ] Check live what `abandon_tasks` does to a timed recurring task (found 2026-11-01)
+- [ ] Add a test for the start date check in `_find_completed_copies` (removing the check fails no test, found 2026-11-01)
 
 ## Completed Recently ✅
 

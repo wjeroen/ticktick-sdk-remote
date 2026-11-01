@@ -996,7 +996,10 @@ short operator-facing version).
     on project, title and the occurrence's dates. If that step fails, the
     occurrence stays completed and the tool says so. Completing a parent leaves
     its open subtasks open. All verified live on 2026-11-01 with throwaway
-    all-day tasks. Not checked: timed recurring tasks.
+    all-day tasks. `/task/completeTasks` also keeps the clock time of a timed
+    task: a daily task due at 20:00 Pacific moved to 20:00 the next day, across
+    the end of daylight saving time (`-07:00` to `-08:00`). It also accepts
+    Inbox ids (`inbox{userId}`). Not checked: abandoning a timed recurring task.
 
 ---
 
