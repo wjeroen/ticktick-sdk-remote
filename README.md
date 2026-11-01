@@ -15,7 +15,7 @@ Forked from [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mirzabicer/tick
 - [Run locally (Claude Desktop, stdio)](#run-locally-instead-claude-desktop-stdio)
 - [Features](#features)
 - [What this fork adds](#what-this-fork-adds)
-- [Available MCP Tools (44 Total)](#available-mcp-tools-44-total)
+- [Available MCP Tools (44 Total)](#available-mcp-tools-45-total)
 - [Example Conversations](#example-conversations)
 - [Health Check & Monitoring](#health-check--monitoring)
 - [Troubleshooting](#troubleshooting)
@@ -146,14 +146,14 @@ throttled. (See "Debugging V2 auth" in `docs/ARCHITECTURE.md` §4.)
    ```
 
 The `ticktick-sdk stdio` subcommand (or `python -m ticktick_sdk` still serves
-HTTP for Railway) runs the same 44 tools over stdio; logs go to stderr so stdout
+HTTP for Railway) runs the same 45 tools over stdio; logs go to stderr so stdout
 stays clean for the protocol.
 
 ---
 
 ## Features
 
-- **44 MCP Tools**: Tasks, projects, folders, kanban columns, tags, habits, focus, user analytics, auth diagnostics
+- **45 MCP Tools**: Tasks, projects, folders, kanban columns, tags, habits, focus, user analytics, auth diagnostics
 - **Batch Operations**: All mutations accept lists (1-100 items) for bulk operations
 - **Remote Access**: Runs as an HTTP server with streamable-http transport
 - **Health Check**: `/health` endpoint for deployment platform monitoring
@@ -221,6 +221,9 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 
 **Bug fixes**
 - [x] All-day tasks show on the same day as in the TickTick app, even while you travel (read in each task's own zone), and plain dates you send land on that exact day in every timezone
+- [x] `complete_tasks` keeps every field and moves a repeating task to its next occurrence, as in the app. It used to wipe the start date, due date and repeat rule of every task it completed, which ended repeating series. Completion now goes through TickTick's official `completeTasks` call, which also works when V2 is down
+- [x] New `ticktick_abandon_tasks` for the app's "Won't Do". A repeating task keeps its series, and only the current occurrence is abandoned
+- [x] `complete_tasks`, `abandon_tasks`, `delete_tasks`, `move_tasks`, `set_task_parents` and `unparent_tasks` honor `response_format=json` (they used to accept it and reply in text)
 - [x] `pin_tasks` no longer wipes dates and other fields. The V2 endpoint replaces the whole task, so pin/unpin now re-sends the full task, the same way TickTick's own web client does
 - [x] Batch operations validate that target task and parent IDs exist instead of silently reporting success on wrong IDs
 - [x] `batch_update_tasks` no longer wipes `repeat_flag` / `is_all_day` / `time_zone` on sparse partial updates
@@ -235,7 +238,7 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 
 ---
 
-## Available MCP Tools (44 Total)
+## Available MCP Tools (45 Total)
 
 All mutation tools accept lists for batch operations (1-100 items).
 
@@ -246,7 +249,8 @@ All mutation tools accept lists for batch operations (1-100 items).
 | `ticktick_get_task` | Get task details by ID |
 | `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter; `project_id` / `tag` / `priority` / `kind` filters work on **every** status; `due_before` / `due_after` for date ranges, combine both for a range; optional `sort`). **Paginated**: pass `offset` to continue; `total` is the true count. |
 | `ticktick_update_tasks` | Update 1-100 tasks (includes column assignment) |
-| `ticktick_complete_tasks` | Complete 1-100 tasks |
+| `ticktick_complete_tasks` | Complete 1-100 tasks. A repeating task moves to its next date, as in the app |
+| `ticktick_abandon_tasks` | Abandon 1-100 tasks ("Won't Do"). A repeating task keeps its series |
 | `ticktick_delete_tasks` | Delete 1-100 tasks (moves to trash) |
 | `ticktick_move_tasks` | Move 1-50 tasks between projects |
 | `ticktick_set_task_parents` | Set parent-child relationships for 1-50 tasks |

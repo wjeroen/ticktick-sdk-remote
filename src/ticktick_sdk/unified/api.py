@@ -10,6 +10,7 @@ and converts between unified models and API-specific formats.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
 from types import TracebackType
@@ -24,6 +25,7 @@ from ticktick_sdk.exceptions import (
     TickTickAPIUnavailableError,
     TickTickAuthenticationError,
     TickTickConfigurationError,
+    TickTickError,
     TickTickForbiddenError,
     TickTickNotFoundError,
     TickTickQuotaExceededError,
@@ -50,6 +52,15 @@ from ticktick_sdk.unified.router import APIRouter
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound="UnifiedTickTickAPI")
+
+# TickTick's V1 batch calls take at most this many tasks per call.
+_V1_BATCH_SIZE = 50
+# The completed copy of a recurring task is looked up in the V1 completed list
+# by completion time. The margin covers clock differences with TickTick, and
+# the extra attempts cover a copy that takes a moment to appear.
+_COPY_LOOKUP_MARGIN = timedelta(minutes=5)
+_COPY_LOOKUP_ATTEMPTS = 3
+_COPY_LOOKUP_DELAY_SECONDS = 1.0
 
 
 # Error codes that map to NotFoundError in batch responses
@@ -1012,13 +1023,7 @@ class UnifiedTickTickAPI:
 
     async def complete_task(self, task_id: str, project_id: str) -> None:
         """
-        Mark a task as complete.
-
-        Uses V2 API primarily (better error handling).
-        Falls back to V1 only if V2 unavailable.
-
-        Note: V2 batch operations silently accept updates to nonexistent tasks,
-        so we verify the task exists first to provide proper error handling.
+        Mark a task as complete. See ``batch_complete_tasks``.
 
         Args:
             task_id: Task ID
@@ -1027,35 +1032,7 @@ class UnifiedTickTickAPI:
         Raises:
             TickTickNotFoundError: If the task does not exist
         """
-        self._ensure_initialized()
-
-        # Use V2 (primary) - better error handling
-        if self._router.has_v2:
-            # V2 batch API silently accepts updates to nonexistent tasks (returns
-            # empty etag but no error). Verify task exists first for proper errors.
-            await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if missing
-
-            response = await self._v2_client.batch_tasks(  # type: ignore
-                update=[{
-                    "id": task_id,
-                    "projectId": project_id,
-                    "status": TaskStatus.COMPLETED,
-                    "completedTime": Task.format_datetime(datetime.now(timezone.utc), "v2"),
-                }]
-            )
-            # Check for errors in batch response (shouldn't happen after verify)
-            _check_batch_response_errors(response, "complete_task", [task_id])
-            return
-
-        # Fallback to V1 only if V2 unavailable
-        if self._router.has_v1:
-            await self._v1_client.complete_task(project_id, task_id)  # type: ignore
-            return
-
-        raise TickTickAPIUnavailableError(
-            "Could not complete task",
-            operation="complete_task",
-        )
+        await self.batch_complete_tasks([(task_id, project_id)])
 
     async def delete_task(self, task_id: str, project_id: str) -> None:
         """
@@ -1673,6 +1650,132 @@ class UnifiedTickTickAPI:
         response = await self._v2_client.batch_tasks(delete=deletes)  # type: ignore
         return response
 
+    async def _fetch_unique_tasks(self, task_ids: list[tuple[str, str]]) -> list[Task]:
+        """Fetch each unique task once, in input order.
+
+        Doubles as the existence check: a missing task raises a real 404
+        before anything is written.
+
+        Raises:
+            TickTickNotFoundError: If any task does not exist.
+        """
+        tasks: dict[str, Task] = {}
+        for task_id, project_id in task_ids:
+            if task_id not in tasks:
+                tasks[task_id] = await self.get_task(task_id, project_id)
+        return list(tasks.values())
+
+    async def _v1_complete(self, tasks: list[Task], operation: str) -> None:
+        """Complete tasks through V1, one call per project and per 50 tasks.
+
+        Raises:
+            TickTickAPIError: If TickTick left a task out of its confirmation.
+        """
+        by_project: dict[str, list[str]] = {}
+        for task in tasks:
+            by_project.setdefault(task.project_id, []).append(task.id)
+
+        confirmed: set[str] = set()
+        for project_id, ids in by_project.items():
+            for start in range(0, len(ids), _V1_BATCH_SIZE):
+                chunk = ids[start:start + _V1_BATCH_SIZE]
+                confirmed.update(
+                    await self._v1_client.complete_tasks(project_id, chunk)  # type: ignore
+                )
+
+        missing = [task.id for task in tasks if task.id not in confirmed]
+        if missing:
+            raise TickTickAPIError(
+                f"{operation}: TickTick did not complete these tasks: "
+                f"{', '.join(missing)}. Any other task in this call was completed.",
+                api_version="v1",
+            )
+
+    async def _v1_update_in_chunks(self, updates: list[dict[str, Any]]) -> dict[str, str]:
+        """Send V1 task updates, 50 per call. Returns ``id2error`` for all of them."""
+        errors: dict[str, str] = {}
+        for start in range(0, len(updates), _V1_BATCH_SIZE):
+            chunk = updates[start:start + _V1_BATCH_SIZE]
+            response = await self._v1_client.batch_update_tasks(chunk)  # type: ignore
+            errors.update(response.get("id2error") or {})
+        return errors
+
+    async def _v2_close_tasks(
+        self, tasks: list[Task], status: TaskStatus, operation: str
+    ) -> None:
+        """Close non-recurring tasks through V2, the fallback when V1 cannot.
+
+        Because /batch/task REPLACES the task, this sends the full pre-fetched
+        task. A sparse {id, projectId, status, completedTime} body makes
+        TickTick wipe the start date, due date and repeat rule.
+        """
+        if not self._router.has_v2:
+            raise TickTickAPIUnavailableError(
+                f"Could not run {operation}: neither API is available",
+                operation=operation,
+            )
+        recurring = [
+            task.id for task in tasks
+            if task.repeat_flag and task.status == TaskStatus.ACTIVE
+        ]
+        if recurring:
+            raise self._recurring_needs_v1(recurring, operation)
+
+        now = datetime.now(timezone.utc)
+        updates: list[dict[str, Any]] = []
+        for task in tasks:
+            task.status = status
+            task.completed_time = now
+            update = task.to_v2_dict(for_update=True)
+            # to_v2_dict does not serialize columnId; keep the task in its
+            # kanban column.
+            if task.column_id:
+                update["columnId"] = task.column_id
+            updates.append(update)
+
+        response = await self._v2_client.batch_tasks(update=updates)  # type: ignore
+        _check_batch_response_errors(response, operation, [u["id"] for u in updates])
+
+    @staticmethod
+    def _recurring_needs_v1(
+        task_ids: list[str],
+        operation: str,
+        cause: TickTickError | None = None,
+    ) -> TickTickAPIUnavailableError:
+        """Error for recurring tasks that cannot be closed without V1.
+
+        Only V1 moves a recurring task to its next occurrence. Closing one
+        through V2 would end its series.
+        """
+        return TickTickAPIUnavailableError(
+            f"Could not run {operation} on repeating tasks {', '.join(task_ids)}: "
+            "that needs the V1 login, which is not working, and closing them "
+            "without it would end their series. Nothing was changed for them. "
+            "Refresh TICKTICK_ACCESS_TOKEN.",
+            operation=operation,
+            v1_error=cause,
+        )
+
+    async def _next_occurrences(self, tasks: list[Task]) -> list[Task]:
+        """Re-read closed recurring tasks, keeping those that are active again.
+
+        A series that reached its end stays closed and is left out. The close
+        already succeeded, so a failed read only drops the task from this
+        informational list.
+        """
+        occurrences: list[Task] = []
+        for task in tasks:
+            if not task.repeat_flag:
+                continue
+            try:
+                current = await self.get_task(task.id, task.project_id)
+            except TickTickError as exc:
+                logger.warning("Could not re-read recurring task %s: %s", task.id, exc)
+                continue
+            if current.status == TaskStatus.ACTIVE:
+                occurrences.append(current)
+        return occurrences
+
     async def batch_complete_tasks(
         self,
         task_ids: list[tuple[str, str]],
@@ -1680,41 +1783,194 @@ class UnifiedTickTickAPI:
         """
         Complete multiple tasks in a batch operation.
 
-        V2-only operation.
+        Uses TickTick's V1 completeTasks call, which keeps every field and
+        moves a recurring task to its next occurrence: the same id stays active
+        with new dates, and the finished occurrence becomes a new completed
+        task. Verified live 2026-11-01. V2 has no such behavior, because the
+        apps do that work themselves, so when V1 fails a non-recurring task is
+        closed through V2 and a recurring task raises an error.
 
         Args:
             task_ids: List of (task_id, project_id) tuples
 
         Returns:
-            Batch response with id2etag and id2error
+            Dict with ``completed`` (IDs), ``already_completed`` (IDs left as
+            they were) and ``next_occurrences`` (recurring tasks, re-read
+            after completing, with their new dates)
 
         Raises:
-            TickTickAPIUnavailableError: If V2 API is not available
+            TickTickAPIUnavailableError: If no API can complete the tasks
             TickTickNotFoundError: If any task does not exist
         """
         self._ensure_initialized()
 
-        if not self._router.has_v2:
-            raise TickTickAPIUnavailableError(
-                "V2 API is required for batch_complete_tasks",
-                operation="batch_complete_tasks",
+        operation = "batch_complete_tasks"
+        tasks = await self._fetch_unique_tasks(task_ids)
+        pending = [task for task in tasks if not TaskStatus.is_completed(task.status)]
+        already_completed = [task.id for task in tasks if TaskStatus.is_completed(task.status)]
+
+        if pending:
+            v1_error: TickTickAuthenticationError | None = None
+            if self._router.has_v1:
+                try:
+                    await self._v1_complete(pending, operation)
+                except TickTickAuthenticationError as exc:
+                    logger.warning("%s: V1 login failed, trying V2: %s", operation, exc)
+                    v1_error = exc
+            if v1_error is not None or not self._router.has_v1:
+                await self._v2_close_tasks(pending, TaskStatus.COMPLETED, operation)
+
+        return {
+            "completed": [task.id for task in pending],
+            "already_completed": already_completed,
+            "next_occurrences": await self._next_occurrences(pending),
+        }
+
+    async def _find_completed_copies(
+        self, tasks: list[Task], since: datetime
+    ) -> dict[str, Task]:
+        """Find the completed copy TickTick made of each just-completed recurring task.
+
+        The V1 completed list does not link a copy to its series (no
+        ``repeatTaskId`` in the reply, checked live 2026-11-01), so a copy is
+        matched on project, title and the dates of the finished occurrence.
+
+        Returns:
+            ``{recurring task id: its completed copy}``. A copy that was not
+            found is left out.
+        """
+        project_ids = sorted({task.project_id for task in tasks})
+        start = Task.format_datetime(since - _COPY_LOOKUP_MARGIN, "v2")
+        found: dict[str, Task] = {}
+
+        for attempt in range(_COPY_LOOKUP_ATTEMPTS):
+            if attempt:
+                await asyncio.sleep(_COPY_LOOKUP_DELAY_SECONDS)
+            end = Task.format_datetime(
+                datetime.now(timezone.utc) + _COPY_LOOKUP_MARGIN, "v2"
             )
+            rows = await self._v1_client.get_completed_tasks(  # type: ignore
+                project_ids, start, end
+            )
+            candidates = [Task.from_v1(row) for row in rows]
+            for task in tasks:
+                matches = [
+                    c for c in candidates
+                    if c.id != task.id
+                    and c.project_id == task.project_id
+                    and c.title == task.title
+                    and c.start_date == task.start_date
+                    and c.due_date == task.due_date
+                    and not c.repeat_flag
+                ]
+                if matches:
+                    found[task.id] = max(matches, key=lambda c: c.completed_time or since)
+            if len(found) == len(tasks):
+                break
+        return found
 
-        # V2 batch update silently accepts completes for tasks that no longer
-        # exist (empty etag, no id2error), so _check_batch_response_errors can't
-        # see them. Verify first to surface a real 404 (matches complete_task).
-        await self._verify_tasks_exist({tid for tid, _ in task_ids})
+    async def _abandon_recurring(self, tasks: list[Task]) -> list[str]:
+        """Abandon the current occurrence of recurring tasks, keeping the series.
 
-        updates = [{
-            "id": tid,
-            "projectId": pid,
-            "status": TaskStatus.COMPLETED,
-            "completedTime": Task.format_datetime(datetime.now(timezone.utc), "v2"),
-        } for tid, pid in task_ids]
+        Setting status -1 on a recurring task closes it and ends the series
+        (verified live 2026-11-01), so this completes it through V1, which
+        moves it to its next occurrence, then changes the completed copy to
+        abandoned. The copy then leaves the completed list and TickTick's
+        completion stats (also verified live).
 
-        response = await self._v2_client.batch_tasks(update=updates)  # type: ignore
-        _check_batch_response_errors(response, "batch_complete_tasks", [tid for tid, _ in task_ids])
-        return response
+        Returns:
+            IDs of tasks whose copy could not be changed. Those stay completed,
+            and their series still moved on.
+
+        Raises:
+            TickTickAPIUnavailableError: If the V1 login does not work
+        """
+        operation = "batch_abandon_tasks"
+        since = datetime.now(timezone.utc)
+        try:
+            await self._v1_complete(tasks, operation)
+        except TickTickAuthenticationError as exc:
+            raise self._recurring_needs_v1([task.id for task in tasks], operation, exc) from exc
+
+        try:
+            copies = await self._find_completed_copies(tasks, since)
+            errors = await self._v1_update_in_chunks([
+                {"id": copy.id, "projectId": copy.project_id, "status": int(TaskStatus.ABANDONED)}
+                for copy in copies.values()
+            ])
+        except TickTickError as exc:
+            logger.warning("%s: could not change completed copies: %s", operation, exc)
+            return [task.id for task in tasks]
+
+        return [
+            task.id for task in tasks
+            if task.id not in copies or copies[task.id].id in errors
+        ]
+
+    async def batch_abandon_tasks(
+        self,
+        task_ids: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        """
+        Abandon ("won't do") multiple tasks in a batch operation.
+
+        A non-recurring task gets status -1 through V1, or through V2 when V1
+        fails. A recurring task keeps its series, see ``_abandon_recurring``.
+        Recurring tasks go first, so a broken V1 login stops the call before
+        anything is written.
+
+        Args:
+            task_ids: List of (task_id, project_id) tuples
+
+        Returns:
+            Dict with ``abandoned`` (IDs), ``already_abandoned`` (IDs left as
+            they were), ``completed_instead`` (recurring task IDs whose
+            occurrence stayed completed) and ``next_occurrences`` (recurring
+            tasks, re-read after closing, with their new dates)
+
+        Raises:
+            TickTickAPIUnavailableError: If no API can abandon the tasks
+            TickTickNotFoundError: If any task does not exist
+        """
+        self._ensure_initialized()
+
+        operation = "batch_abandon_tasks"
+        tasks = await self._fetch_unique_tasks(task_ids)
+        pending = [task for task in tasks if task.status != TaskStatus.ABANDONED]
+        already_abandoned = [task.id for task in tasks if task.status == TaskStatus.ABANDONED]
+        recurring = [
+            task for task in pending
+            if task.repeat_flag and task.status == TaskStatus.ACTIVE
+        ]
+        recurring_ids = {task.id for task in recurring}
+        plain = [task for task in pending if task.id not in recurring_ids]
+
+        if recurring and not self._router.has_v1:
+            raise self._recurring_needs_v1(sorted(recurring_ids), operation)
+
+        completed_instead = await self._abandon_recurring(recurring) if recurring else []
+
+        if plain:
+            v1_error: TickTickAuthenticationError | None = None
+            if self._router.has_v1:
+                try:
+                    errors = await self._v1_update_in_chunks([
+                        {"id": task.id, "projectId": task.project_id, "status": int(TaskStatus.ABANDONED)}
+                        for task in plain
+                    ])
+                    _check_batch_response_errors({"id2error": errors}, operation)
+                except TickTickAuthenticationError as exc:
+                    logger.warning("%s: V1 login failed, trying V2: %s", operation, exc)
+                    v1_error = exc
+            if v1_error is not None or not self._router.has_v1:
+                await self._v2_close_tasks(plain, TaskStatus.ABANDONED, operation)
+
+        return {
+            "abandoned": [task.id for task in pending if task.id not in completed_instead],
+            "already_abandoned": already_abandoned,
+            "completed_instead": completed_instead,
+            "next_occurrences": await self._next_occurrences(recurring),
+        }
 
     async def batch_move_tasks(
         self,

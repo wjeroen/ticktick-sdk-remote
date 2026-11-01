@@ -690,13 +690,38 @@ class TickTickClient:
         """
         Complete one or more tasks.
 
+        A recurring task moves to its next occurrence: the same id stays
+        active, and the finished occurrence becomes a new completed task.
+
         Args:
             task_ids: List of (task_id, project_id) tuples
 
         Returns:
-            Batch response with id2etag and id2error
+            Dict with `completed` (IDs), `already_completed` (IDs) and
+            `next_occurrences` (recurring tasks with their new dates)
         """
         return await self._api.batch_complete_tasks(task_ids)
+
+    async def abandon_tasks(
+        self,
+        task_ids: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        """
+        Abandon ("won't do") one or more tasks.
+
+        A recurring task moves to its next occurrence, and only the current
+        occurrence is abandoned.
+
+        Args:
+            task_ids: List of (task_id, project_id) tuples
+
+        Returns:
+            Dict with `abandoned` (IDs), `already_abandoned` (IDs),
+            `completed_instead` (recurring task IDs whose occurrence stayed
+            completed) and `next_occurrences` (recurring tasks with their new
+            dates)
+        """
+        return await self._api.batch_abandon_tasks(task_ids)
 
     async def move_tasks(
         self,

@@ -394,9 +394,9 @@ Creates a task with daily recurrence using COUNT to limit number of occurrences.
 ### Notes on repeatFrom
 | Value | Meaning |
 |-------|---------|
-| "0" | Repeat from due date |
-| "1" | Repeat from start date |
-| "2" | Repeat from completion date |
+| "0" | Repeat from the original due/scheduled date |
+| "1" | Repeat from the completion date, keeping the original time of day |
+| "2" | Default calendar recurrence in the task's zone, skips expired occurrences |
 
 ---
 
@@ -471,7 +471,7 @@ Creates a task with indefinite daily recurrence (no end date or count limit).
 When completing an instance of a recurring task, the API creates a new completed task record and updates the parent task to the next occurrence.
 
 ### Observed Behavior (from "mark as wont do" HAR)
-The same pattern applies to both completing and marking as "won't do":
+The web client does this work itself in the `/batch/task` body below. A plain V2 status change does not: only V1 `/task/completeTasks` makes TickTick's server do it (verified live 2026-11-01, see ARCHITECTURE.md §8 quirk 12). The same pattern applies to both completing and marking as "won't do":
 
 1. **Add array**: Contains a new task with:
    - Same properties as the original
@@ -561,7 +561,7 @@ All requests share these common headers:
 | completedTime | string | No | Completion timestamp (ISO 8601) |
 | completedUserId | integer | No | User ID who completed the task |
 | repeatFlag | string | No | RRULE recurrence rule |
-| repeatFrom | string | No | Repeat calculation basis: "0"=due, "1"=start, "2"=completed |
+| repeatFrom | string | No | Repeat calculation basis: "0"=original date, "1"=completion date, "2"=calendar recurrence |
 | repeatTaskId | string | No | Parent recurring task ID (for completed instances) |
 | exDate | array | No | Exception dates for recurrence |
 | reminders | array | No | Array of reminder objects |
@@ -611,9 +611,9 @@ All requests share these common headers:
 ### repeatFrom Values
 | Value | Behavior |
 |-------|----------|
-| "0" | Calculate next occurrence from due date |
-| "1" | Calculate next occurrence from start date |
-| "2" | Calculate next occurrence from completion date |
+| "0" | Next occurrence follows the original due/scheduled date |
+| "1" | Next occurrence counts from the completion date, keeping the original time of day |
+| "2" | Default calendar recurrence in the task's zone, skips expired occurrences (the server's usual default) |
 
 ### RRULE Examples (repeatFlag)
 | RRULE | Description |

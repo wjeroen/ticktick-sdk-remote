@@ -823,11 +823,40 @@ class MockUnifiedAPI:
             if task_id not in self.tasks:
                 raise TickTickNotFoundError(f"Task not found: {task_id}")
 
+        completed = []
         for task_id, _project_id in task_ids:
             task = self.tasks[task_id]
             task.status = TaskStatus.COMPLETED
             task.completed_time = utc_now()
-        return {"id2etag": {}, "id2error": {}}
+            completed.append(task_id)
+        return {"completed": completed, "already_completed": [], "next_occurrences": []}
+
+    async def batch_abandon_tasks(
+        self,
+        task_ids: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        """Mock batch abandon tasks (mirrors production existence check)."""
+        self._record_call("batch_abandon_tasks", (task_ids,), {})
+        self._check_failure("batch_abandon_tasks")
+
+        from ticktick_sdk.exceptions import TickTickNotFoundError
+
+        for task_id in {tid for tid, _ in task_ids}:
+            if task_id not in self.tasks:
+                raise TickTickNotFoundError(f"Task not found: {task_id}")
+
+        abandoned = []
+        for task_id, _project_id in task_ids:
+            task = self.tasks[task_id]
+            task.status = TaskStatus.ABANDONED
+            task.completed_time = utc_now()
+            abandoned.append(task_id)
+        return {
+            "abandoned": abandoned,
+            "already_abandoned": [],
+            "completed_instead": [],
+            "next_occurrences": [],
+        }
 
     async def batch_delete_tasks(
         self,

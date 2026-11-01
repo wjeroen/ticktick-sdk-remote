@@ -2,7 +2,7 @@
 
 > **Audience:** developers and maintainers of this repo.
 > **Companion:** [`README.md`](../README.md) is the user/operator guide (Railway
-> deploy steps, the full env-var table, the 44-tool table, response-format and
+> deploy steps, the full env-var table, the 45-tool table, response-format and
 > pagination behavior as seen by an MCP client, example conversations, and
 > troubleshooting). This document is the **internals reference** — the *why* and
 > *how* behind the code. Where the README already covers something well (env
@@ -51,7 +51,7 @@ A remote MCP server for TickTick (and Dida365 / 滴答清单). It combines:
   user stats, "all tasks" listing, completed/abandoned/trash listing, etc.
 
 A unified layer hides the V1/V2 split behind one set of Pydantic models and one
-async API surface, and the MCP server turns that surface into 44 tools.
+async API surface, and the MCP server turns that surface into 45 tools.
 
 ### Entry point & runtime
 
@@ -70,7 +70,7 @@ async API surface, and the MCP server turns that surface into 44 tools.
 Claude.ai / Claude mobile / MCP client
         │  streamable-http  (POST /mcp)
         ▼
-FastMCP server (server.py)            ── 44 @mcp.tool functions, /health, optional bearer-auth middleware
+FastMCP server (server.py)            ── 45 @mcp.tool functions, /health, optional bearer-auth middleware
         │  one async TickTickClient, created at lifespan startup
         ▼
 TickTickClient (client/client.py)     ── friendly facade: convenience methods, string→enum coercion
@@ -97,7 +97,7 @@ listed here — they rot. Use your editor.)
 src/ticktick_sdk/
 ├── __init__.py        Public Python surface (TickTickClient, models, exceptions, settings).
 ├── __main__.py        `python -m ticktick_sdk` → server.main().
-├── server.py          The MCP server. All 44 @mcp.tool functions, /health, bearer-auth
+├── server.py          The MCP server. All 45 @mcp.tool functions, /health, bearer-auth
 │                      middleware, tool filtering, lifespan that builds the TickTickClient,
 │                      and the list-sort keys used before pagination.
 ├── cli.py             Argument parsing & the `ticktick-sdk` command (server / auth subcommands,
@@ -176,8 +176,8 @@ unified API. `default_timezone` (default `UTC`) is the zone for "today" and for
 dates sent without an offset.
 
 Method count is large (single-item + batch variants of every operation). The
-batch methods (`create_tasks`, `update_tasks`, `complete_tasks`, `delete_tasks`,
-`move_tasks`, `make_subtasks`, `unparent_subtasks`, `pin_tasks`/`unpin_tasks`,
+batch methods (`create_tasks`, `update_tasks`, `complete_tasks`, `abandon_tasks`,
+`delete_tasks`, `move_tasks`, `make_subtasks`, `unparent_subtasks`, `pin_tasks`/`unpin_tasks`,
 `checkin_habits`) are what the MCP server actually calls — the single-item
 methods exist for direct Python use.
 
@@ -557,9 +557,10 @@ self._router.has_v1: ...`). The authoritative per-operation behavior:
 | Operation(s) | Behavior |
 |---|---|
 | Most reads/writes (default) | **V2 first.** V2 carries richer data (tags, subtask links, pinning, more fields). |
-| `update_task`, `delete_task`, `complete_task` (single) | V2 when available, **fall back to V1** when not. |
+| `update_task`, `delete_task` (single) | V2 when available, **fall back to V1** when not. |
+| `complete_task`, `batch_complete_tasks`, `batch_abandon_tasks` | **V1 first**, because only V1 moves a recurring task to its next occurrence. If V1 fails, non-recurring tasks fall back to V2 with the full task, and recurring tasks raise `TickTickAPIUnavailableError`. See quirk 12. |
 | `create_task` | **V2 required** — raises `TickTickAPIUnavailableError` if V2 is down. No V1 fallback. |
-| **All batch task ops** (`batch_create_tasks`, `batch_update_tasks`, `batch_delete_tasks`, `batch_complete_tasks`, `batch_move_tasks`, `batch_set_task_parents`, `batch_unparent_tasks`, `batch_pin_tasks`) | **V2 required** — raise if V2 is down. |
+| **All batch task ops** (`batch_create_tasks`, `batch_update_tasks`, `batch_delete_tasks`, `batch_move_tasks`, `batch_set_task_parents`, `batch_unparent_tasks`, `batch_pin_tasks`) | **V2 required** — raise if V2 is down. |
 | `get_task` | V2 (no `project_id` needed). Falls back to V1 **only if** a `project_id` was supplied (V1 needs it); otherwise raises. |
 | `get_project_with_data` | **V1-only** (one call returns project + tasks + columns). |
 | List all / completed / abandoned / deleted tasks; move; subtasks (parent/child); tags; folders (project groups); kanban columns; habits; focus; user profile/status/statistics; sync | **V2-only** — no V1 equivalent. |
@@ -780,6 +781,9 @@ Auth helpers present: `set_access_token`, `get_authorization_url`,
 | `create_task(title, project_id, …)` | `POST /task` |
 | `update_task(task_id, project_id, …)` | `POST /task/{taskId}` (V1 uses POST, not PUT) |
 | `complete_task(project_id, task_id)` | `POST /project/{projectId}/task/{taskId}/complete` |
+| `complete_tasks(project_id, task_ids)` | `POST /task/completeTasks` (up to 50 tasks in one project; the reply lists the IDs it completed) |
+| `batch_update_tasks(updates)` | `POST /task/batch` (up to 50; merges, so fields left out keep their value) |
+| `get_completed_tasks(project_ids, start_date, end_date)` | `POST /task/completed` (up to 200) |
 | `delete_task(project_id, task_id)` | `DELETE /project/{projectId}/task/{taskId}` |
 | `get_projects()` | `GET /project` |
 | `get_project(project_id)` | `GET /project/{projectId}` |
@@ -876,12 +880,12 @@ must paper over:
    V2 batch operations also **silently ignore** nonexistent resources on some
    paths (an empty result, no `id2error`), so the unified layer fetches each
    referenced task first to produce a real `TickTickNotFoundError`:
-   - **Single-item ops** — `complete_task` / `delete_task` / `move_task` /
+   - **Single-item ops** — `delete_task` / `move_task` /
      `unset_task_parent` each `get_task()` before mutating.
-   - **Batch ops** — `batch_complete_tasks` / `batch_delete_tasks` /
+   - **Batch ops** — `batch_delete_tasks` /
      `batch_move_tasks` verify every (deduped) task via `_verify_tasks_exist`;
-     `batch_update_tasks` / `batch_pin_tasks` / `batch_unparent_tasks` get this
-     for free (they already fetch each task). The naive batches that *skip* the
+     `batch_update_tasks` / `batch_pin_tasks` / `batch_unparent_tasks` /
+     `batch_complete_tasks` / `batch_abandon_tasks` get this for free (they already fetch each task). The naive batches that *skip* the
      check are the ones to watch — they "succeed" against dead tasks.
    - **Reparenting is the subtle one:** `set_parent` silently "succeeds" against
      a deleted *parent*, so `set_task_parent` / `batch_set_task_parents` verify
@@ -979,6 +983,21 @@ short operator-facing version).
     2026-09-10 are midnight UTC (`00:00Z`), which still read as the intended day
     in zones at or east of UTC, and as the day before in zones west of it.
 
+12. **Closing a recurring task.** The apps make the next occurrence themselves
+    (see `docs/api-analysis/tasks-pin-api.md`), and a plain V2 status change
+    does not. V1 `POST /task/completeTasks` makes TickTick's server do it: the
+    same id stays active with new dates, the repeat rule stays, and the finished
+    occurrence becomes a new completed task with a new id and no repeat rule.
+    Status `-1` has no such behavior on either API. On a recurring task it closes
+    that task and ends the series, so `_abandon_recurring` completes it through
+    V1 and then sets `-1` on the completed copy, which removes the copy from the
+    completed list and the completion stats. The V1 completed list does not link
+    a copy to its series (no `repeatTaskId`), so `_find_completed_copies` matches
+    on project, title and the occurrence's dates. If that step fails, the
+    occurrence stays completed and the tool says so. All verified live on
+    2026-11-01 with throwaway all-day daily tasks. Not checked: timed tasks, and
+    a parent with open subtasks.
+
 ---
 
 ## 9. MCP server & tools
@@ -1002,14 +1021,14 @@ lives for the process and is reclaimed at exit. The device-id warnings are logge
 once, on the single build. This is the fix for the per-session re-auth storm
 described in [§4](#4-authentication--resilience).
 
-### The 44 tools
+### The 45 tools
 
-All 44 are `@mcp.tool` functions in `server.py`. The newest is
-`ticktick_auth_status`. Grouped (the README has the full table with
+All 45 are `@mcp.tool` functions in `server.py`. The newest is
+`ticktick_abandon_tasks`. Grouped (the README has the full table with
 descriptions):
 
-- **Tasks (11):** `create_tasks`, `get_task`, `list_tasks`, `update_tasks`,
-  `complete_tasks`, `delete_tasks`, `move_tasks`, `set_task_parents`,
+- **Tasks (12):** `create_tasks`, `get_task`, `list_tasks`, `update_tasks`,
+  `complete_tasks`, `abandon_tasks`, `delete_tasks`, `move_tasks`, `set_task_parents`,
   `unparent_tasks`, `search_tasks`, `pin_tasks`.
 - **Projects (5):** `list_projects`, `get_project`, `create_project`,
   `update_project`, `delete_project`.

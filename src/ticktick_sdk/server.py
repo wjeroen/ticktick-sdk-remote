@@ -122,6 +122,7 @@ from ticktick_sdk.tools.inputs import (
     TaskGetInput,
     UpdateTasksInput,
     CompleteTasksInput,
+    AbandonTasksInput,
     DeleteTasksInput,
     MoveTasksInput,
     SetTaskParentsInput,
@@ -161,6 +162,8 @@ from ticktick_sdk.tools.inputs import (
 )
 from ticktick_sdk.models import Habit, HabitSection
 from ticktick_sdk.tools.formatting import (
+    format_task_date,
+    task_date_json,
     format_task_markdown,
     format_task_json,
     format_tasks_markdown,
@@ -467,6 +470,58 @@ async def build_child_meta_for_task(
             continue
         meta[cid] = child_meta_entry(child)
     return meta
+
+
+def _json_outcome(**fields: Any) -> str:
+    """JSON reply of a write tool that sends back no task data."""
+    return json.dumps({"success": True, **fields}, separators=(",", ":"))
+
+
+def _next_occurrences_json(tasks: list) -> list[dict[str, Any]]:
+    """The new dates of recurring tasks that moved to their next occurrence."""
+    return [
+        {
+            "id": t.id,
+            "start_date": task_date_json(t, t.start_date, USER_TIMEZONE),
+            "due_date": task_date_json(t, t.due_date, USER_TIMEZONE),
+        }
+        for t in tasks
+    ]
+
+
+def _closed_tasks_summary(
+    task_ids: list[str],
+    state: str,
+    next_occurrences: list,
+    *,
+    already: list[str],
+    completed_instead: list[str] | None = None,
+) -> str:
+    """Sentence-style result of ticktick_complete_tasks / ticktick_abandon_tasks.
+
+    `state` is what the tasks became ("complete" or "abandoned").
+    """
+    lines: list[str] = []
+    if len(task_ids) == 1:
+        lines.append(f"Task `{task_ids[0]}` marked as {state}.")
+    elif task_ids:
+        lines.append(f"{len(task_ids)} tasks marked as {state}.")
+    if already:
+        ids = ", ".join(f"`{tid}`" for tid in already)
+        lines.append(f"Already {state}, left as they were: {ids}.")
+    if completed_instead:
+        ids = ", ".join(f"`{tid}`" for tid in completed_instead)
+        lines.append(
+            f"Could not mark the current occurrence of {ids} as abandoned, so "
+            "it stays completed. Its series did move on."
+        )
+    if next_occurrences:
+        lines.append("Repeating, so the same id stays active on its next date:")
+        lines.extend(
+            f"- `{t.id}`: {format_task_date(t, t.due_date or t.start_date, USER_TIMEZONE)}"
+            for t in next_occurrences
+        )
+    return "\n".join(lines)
 
 
 async def build_project_name_for_task(
@@ -1324,8 +1379,12 @@ async def ticktick_complete_tasks(params: CompleteTasksInput, ctx: Context) -> s
     """
     Complete one or more tasks.
 
-    Changes task status to completed and records completion time.
-    Supports batch completion (1-100 tasks).
+    Changes task status to completed and records completion time. Every other
+    field stays as it is. Supports batch completion (1-100 tasks).
+
+    A repeating task behaves as in the TickTick app. The finished occurrence
+    becomes a new completed task with a new id, and this task (same id) stays
+    active and moves to its next date, which the response names.
 
     Args:
         params: Completion parameters:
@@ -1351,16 +1410,85 @@ async def ticktick_complete_tasks(params: CompleteTasksInput, ctx: Context) -> s
     try:
         client = get_client(ctx)
         task_ids = [(t.task_id, t.project_id) for t in params.tasks]
-        await client.complete_tasks(task_ids)
-
-        count = len(task_ids)
-        if count == 1:
-            return success_message(f"Task `{task_ids[0][0]}` marked as complete.")
-        else:
-            return success_message(f"{count} tasks marked as complete.")
+        result = await client.complete_tasks(task_ids)
+        if params.response_format == ResponseFormat.JSON:
+            return _json_outcome(
+                completed=result["completed"],
+                already_completed=result["already_completed"],
+                next_occurrences=_next_occurrences_json(result["next_occurrences"]),
+            )
+        return success_message(_closed_tasks_summary(
+            result["completed"], "complete", result["next_occurrences"],
+            already=result["already_completed"],
+        ))
 
     except Exception as e:
         return handle_error(e, "complete_tasks")
+
+
+@mcp.tool(
+    name="ticktick_abandon_tasks",
+    annotations={
+        "title": "Abandon Tasks",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def ticktick_abandon_tasks(params: AbandonTasksInput, ctx: Context) -> str:
+    """
+    Abandon one or more tasks, the "Won't Do" action in the TickTick app.
+
+    Changes task status to abandoned and records the time. Every other field
+    stays as it is, and an abandoned task does not count as completed in the
+    statistics. Supports batch abandoning (1-100 tasks). List abandoned tasks
+    with ticktick_list_tasks and status="abandoned".
+
+    A repeating task behaves as in the TickTick app. Only the current
+    occurrence is abandoned: it becomes a new abandoned task with a new id, and
+    this task (same id) stays active and moves to its next date, which the
+    response names. In the rare case that the occurrence cannot be changed, it
+    stays completed, and the response says so.
+
+    Args:
+        params: Abandon parameters:
+            - tasks (list, required): List of task identifiers (1-100 tasks)
+              Each task must contain:
+                - task_id (str): Task to abandon
+                - project_id (str): Project containing the task
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        Success confirmation or error message.
+
+    Examples:
+        Single task:
+            tasks=[{"task_id": "abc123", "project_id": "proj1"}]
+    """
+    try:
+        client = get_client(ctx)
+        task_ids = [(t.task_id, t.project_id) for t in params.tasks]
+        result = await client.abandon_tasks(task_ids)
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps({
+                "success": not result["completed_instead"],
+                "abandoned": result["abandoned"],
+                "already_abandoned": result["already_abandoned"],
+                "completed_instead": result["completed_instead"],
+                "next_occurrences": _next_occurrences_json(result["next_occurrences"]),
+            }, separators=(",", ":"))
+        summary = _closed_tasks_summary(
+            result["abandoned"], "abandoned", result["next_occurrences"],
+            already=result["already_abandoned"],
+            completed_instead=result["completed_instead"],
+        )
+        if result["completed_instead"]:
+            return f"**Partly done**: {summary}"
+        return success_message(summary)
+
+    except Exception as e:
+        return handle_error(e, "abandon_tasks")
 
 
 @mcp.tool(
@@ -1397,6 +1525,8 @@ async def ticktick_delete_tasks(params: DeleteTasksInput, ctx: Context) -> str:
         await client.delete_tasks(task_ids)
 
         count = len(task_ids)
+        if params.response_format == ResponseFormat.JSON:
+            return _json_outcome(count=count, deleted=[tid for tid, _ in task_ids])
         if count == 1:
             return success_message(f"Task `{task_ids[0][0]}` deleted.")
         else:
@@ -1455,6 +1585,11 @@ async def ticktick_move_tasks(params: MoveTasksInput, ctx: Context) -> str:
         await client.move_tasks(move_specs)
 
         count = len(move_specs)
+        if params.response_format == ResponseFormat.JSON:
+            return _json_outcome(count=count, moved=[
+                {"task_id": m["task_id"], "to_project_id": m["to_project_id"]}
+                for m in move_specs
+            ])
         if count == 1:
             return success_message(f"Task `{move_specs[0]['task_id']}` moved to project `{move_specs[0]['to_project_id']}`.")
         else:
@@ -1513,6 +1648,11 @@ async def ticktick_set_task_parents(params: SetTaskParentsInput, ctx: Context) -
         await client.set_task_parents(assignments)
 
         count = len(assignments)
+        if params.response_format == ResponseFormat.JSON:
+            return _json_outcome(count=count, assigned=[
+                {"task_id": a["task_id"], "parent_id": a["parent_id"]}
+                for a in assignments
+            ])
         if count == 1:
             return success_message(f"Task `{assignments[0]['task_id']}` is now a subtask of `{assignments[0]['parent_id']}`.")
         else:
@@ -1562,6 +1702,8 @@ async def ticktick_unparent_tasks(params: UnparentTasksInput, ctx: Context) -> s
         await client.unparent_tasks(unparent_specs)
 
         count = len(unparent_specs)
+        if params.response_format == ResponseFormat.JSON:
+            return _json_outcome(count=count, unparented=[u["task_id"] for u in unparent_specs])
         if count == 1:
             return success_message(f"Task `{unparent_specs[0]['task_id']}` is now a top-level task.")
         else:
@@ -3622,6 +3764,8 @@ _V1_CAPABLE_TOOLS = frozenset({
     "ticktick_list_projects",
     "ticktick_get_project",
     "ticktick_get_task",  # V1 path works only when a project_id is supplied
+    "ticktick_complete_tasks",  # V1 first, V2 fallback for non-recurring tasks
+    "ticktick_abandon_tasks",  # V1 first, V2 fallback for non-recurring tasks
 })
 # Diagnostic tool that is meant to work even while everything else is degraded.
 _ALWAYS_AVAILABLE_TOOLS = frozenset({

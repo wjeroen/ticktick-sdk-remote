@@ -354,6 +354,21 @@ class CompleteTasksInput(BaseMCPInput):
     )
 
 
+class AbandonTasksInput(BaseMCPInput):
+    """Abandon ("won't do") one or more tasks."""
+
+    tasks: List[TaskIdentifier] = Field(
+        ...,
+        description="Tasks to mark as abandoned (1-100)",
+        min_length=1,
+        max_length=100,
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format",
+    )
+
+
 class DeleteTasksInput(BaseMCPInput):
     """Delete one or more tasks (moves to trash)."""
 
