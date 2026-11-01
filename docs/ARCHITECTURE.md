@@ -994,9 +994,9 @@ short operator-facing version).
     completed list and the completion stats. The V1 completed list does not link
     a copy to its series (no `repeatTaskId`), so `_find_completed_copies` matches
     on project, title and the occurrence's dates. If that step fails, the
-    occurrence stays completed and the tool says so. All verified live on
-    2026-11-01 with throwaway all-day daily tasks. Not checked: timed tasks, and
-    a parent with open subtasks.
+    occurrence stays completed and the tool says so. Completing a parent leaves
+    its open subtasks open. All verified live on 2026-11-01 with throwaway
+    all-day tasks. Not checked: timed recurring tasks.
 
 ---
 

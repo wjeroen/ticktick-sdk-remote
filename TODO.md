@@ -64,7 +64,7 @@
 ### Testing
 
 - [ ] Run the full suite on Windows for the subtask status, complete and abandon changes (Termux cannot install pydantic-core, 2026-11-01)
-- [ ] Check live what `complete_tasks` does to a parent with open subtasks, and to a timed recurring task (not covered by the 2026-11-01 test)
+- [ ] Check live what `complete_tasks` does to a timed recurring task (not covered by the 2026-11-01 test)
 
 ## Completed Recently ✅
 
