@@ -8,7 +8,6 @@ in both Markdown and JSON formats.
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -41,11 +40,40 @@ def format_datetime(dt: datetime | None, tz_name: str = "UTC") -> str:
     return convert_tz(dt, tz_name).strftime("%Y-%m-%d %H:%M %Z").strip()
 
 
-def format_date(dt: datetime | None, tz_name: str = "UTC") -> str:
-    """Format a date for human-readable display."""
-    if dt is None:
-        return "Not set"
-    return convert_tz(dt, tz_name).strftime("%Y-%m-%d")
+def format_task_date(
+    task: Task, value: datetime | None, tz_name: str, *, detail: bool = False
+) -> str | None:
+    """One of a task's start/due dates, as the TickTick app shows it.
+
+    All-day tasks give a plain ``YYYY-MM-DD``, read in the task's own zone
+    (see ``Task.home_zone``). Timed tasks give ``YYYY-MM-DD HH:MM`` plus the
+    zone, so a reader never has to guess it: a fixed-time task in ``tz_name``
+    (where the user is) with its abbreviation, e.g. ``17:00 PDT``, and a
+    floating task at its own clock time with ``(floating)``. When
+    ``is_all_day`` is unknown, rows show the date only and the detail view
+    shows the time with its zone.
+    """
+    local = task.local(value, tz_name)
+    if local is None:
+        return None
+    if task.is_all_day or (task.is_all_day is None and not detail):
+        return local.strftime("%Y-%m-%d")
+    suffix = "(floating)" if task.is_floating else local.strftime("%Z")
+    return f"{local.strftime('%Y-%m-%d %H:%M')} {suffix}".strip()
+
+
+def task_date_json(task: Task, value: datetime | None, tz_name: str) -> str | None:
+    """One of a task's start/due dates for JSON output.
+
+    All-day tasks give a plain ``YYYY-MM-DD``, the date the TickTick app shows.
+    Other tasks give an ISO timestamp with offset, in the task's home zone.
+    """
+    local = task.local(value, tz_name)
+    if local is None:
+        return None
+    if task.is_all_day:
+        return local.date().isoformat()
+    return local.isoformat()
 
 
 def priority_label(priority: int) -> str:
@@ -66,25 +94,60 @@ def status_label(status: int) -> str:
     return labels.get(status, "Unknown")
 
 
-_KNOWN_RRULE_FREQS = {"DAILY", "WEEKLY", "MONTHLY", "YEARLY", "HOURLY", "MINUTELY"}
+def status_flag(status: int | None) -> str:
+    """Markdown flag for a non-active status, with a trailing space.
+
+    Active gives an empty string: ``[ACTIVE]`` on every row is noise, so a
+    missing flag means active. Used by task rows and by child rows.
+    """
+    if status == -1:
+        return "[ABANDONED] "
+    if status in (1, 2):
+        return "[DONE] "
+    return ""
+
+
+def child_flags(meta: dict[str, Any]) -> str:
+    """Markdown flags for one child row, in task-row order: ``[TRASH]``, then
+    ``[DONE]`` / ``[ABANDONED]``. An active child that is not trashed gets
+    none, so a child without flags reads like a task row without flags."""
+    trash = "[TRASH] " if meta.get("in_trash") else ""
+    return trash + status_flag(meta.get("status", 0))
+
+
+# Dropped from the displayed rule. WKST only names which weekday a week starts
+# on, so it never changes which dates the rule produces.
+_RRULE_NOISE_PARAMS = {"WKST"}
+_RRULE_PREFIX = "RRULE:"
 
 
 def repeat_flag_indicator(repeat_flag: str | None) -> str:
     """Compact list-row label for a task's recurrence rule.
 
-    Parses FREQ= out of an iCalendar RRULE (e.g. ``RRULE:FREQ=WEEKLY;BYDAY=MO``)
-    and returns ``[WEEKLY] `` so the cadence is visible at a glance. Falls back
-    to ``[REPEATS] `` when the rule is set but FREQ is missing or unknown.
+    Shows the rule itself rather than only its frequency, so cadences that
+    differ stay distinguishable in a list row: ``RRULE:FREQ=DAILY`` and
+    ``RRULE:FREQ=DAILY;INTERVAL=8`` both used to read ``[DAILY]``.
+
+    The ``RRULE:`` prefix and any ``WKST=`` part are dropped as noise, and the
+    rest is kept verbatim, so ``RRULE:FREQ=DAILY;INTERVAL=8;WKST=MO`` becomes
+    ``[FREQ=DAILY;INTERVAL=8] ``. Non-RRULE rules (TickTick also emits forms
+    such as ``ERULE:NAME=...``) are shown in full. A rule that is empty once
+    cleaned falls back to ``[REPEATS] ``.
     """
-    if not repeat_flag:
+    rule = (repeat_flag or "").strip()
+    if not rule:
         return ""
-    match = re.search(r"FREQ=(\w+)", repeat_flag, re.IGNORECASE)
-    if not match:
+    if rule.upper().startswith(_RRULE_PREFIX):
+        rule = rule[len(_RRULE_PREFIX):]
+    parts = [
+        part.strip()
+        for part in rule.split(";")
+        if part.strip()
+        and part.split("=", 1)[0].strip().upper() not in _RRULE_NOISE_PARAMS
+    ]
+    if not parts:
         return "[REPEATS] "
-    freq = match.group(1).upper()
-    if freq in _KNOWN_RRULE_FREQS:
-        return f"[{freq}] "
-    return "[REPEATS] "
+    return f"[{';'.join(parts)}] "
 
 
 # =============================================================================
@@ -221,7 +284,7 @@ def paginate_json(
         }
         if next_off is not None:
             env["_pagination_hint"] = (
-                f"More {item_key} available — call this tool again with "
+                f"More {item_key} available, call this tool again with "
                 f"offset={next_off} to fetch the next page "
                 f"(showing {len(items_list)} of {total})."
             )
@@ -258,9 +321,10 @@ _SORT_DATE_FIELDS: dict[str, tuple[str, bool]] = {
     "created_asc": ("created_time", False),
     "modified_desc": ("modified_time", True),
     "modified_asc": ("modified_time", False),
-    "due_desc": ("due_date", True),
-    "due_asc": ("due_date", False),
 }
+# Due sorts order by the day the TickTick app shows (see Task.due_day), then
+# by moment, so a Sept 12 all-day task never sorts before a Sept 11 one.
+_SORT_DUE: dict[str, bool] = {"due_asc": False, "due_desc": True}
 
 
 def _date_sort_fragment(dt: datetime | None, descending: bool) -> tuple:
@@ -274,7 +338,19 @@ def _date_sort_fragment(dt: datetime | None, descending: bool) -> tuple:
     return (0, -dt.timestamp() if descending else dt.timestamp())
 
 
-def task_sort_key(sort) -> Callable[[Task], tuple]:
+def _due_sort_fragment(task: Task, descending: bool, tz_name: str) -> tuple:
+    """Sort-key fragment for a task's due date: shown day first, then moment.
+
+    Missing due dates sort *last* in both directions (group 1).
+    """
+    day = task.due_day(tz_name)
+    if day is None or task.due_date is None:
+        return (1, 0, 0.0)
+    ordinal, ts = day.toordinal(), task.due_date.timestamp()
+    return (0, -ordinal, -ts) if descending else (0, ordinal, ts)
+
+
+def task_sort_key(sort, tz_name: str = "UTC") -> Callable[[Task], tuple]:
     """Return a sort-key function for the given sort name (a ``TaskSort`` or
     its string value).
 
@@ -284,6 +360,9 @@ def task_sort_key(sort) -> Callable[[Task], tuple]:
     that tie on the primary field keep a stable, repeatable order.
     """
     key = sort.value if hasattr(sort, "value") else sort
+    if key in _SORT_DUE:
+        descending = _SORT_DUE[key]
+        return lambda t: _due_sort_fragment(t, descending, tz_name) + (t.id or "",)
     if key in _SORT_DATE_FIELDS:
         field, descending = _SORT_DATE_FIELDS[key]
         return lambda t: _date_sort_fragment(getattr(t, field, None), descending) + (t.id or "",)
@@ -313,8 +392,9 @@ def format_task_markdown(
     the ID.
 
     When `child_meta` is provided (`{child_id: {"title": str, "priority":
-    int}}`), each child row shows `[PRIORITY] title (\`id\`)`. Without it,
-    children render as bare IDs.
+    int, "status": int, "in_trash": bool}}`, see `child_meta_entry`), each
+    child row shows `[PRIORITY] [TRASH] [DONE|ABANDONED] title (\`id\`)`, with
+    each flag only when it applies. Without it, children render as bare IDs.
     """
     lines = []
 
@@ -341,10 +421,14 @@ def format_task_markdown(
             if meta:
                 ind = priority_indicator(meta.get("priority", 0))
                 ctitle = meta.get("title") or "(No title)"
-                lines.append(f"  - {ind} {ctitle} (`{child_id}`)")
+                lines.append(f"  - {ind} {child_flags(meta)}{ctitle} (`{child_id}`)")
             else:
                 lines.append(f"  - `{child_id}`")
     lines.append(f"- **Status**: {status_label(task.status)}")
+    # A trashed task keeps its old status (usually "Active"), so flag the trash
+    # explicitly. Shown only when trashed (blank == not trashed).
+    if getattr(task, "deleted", 0):
+        lines.append("- **In trash**: Yes (deleted, recoverable from TickTick trash)")
     lines.append(f"- **Priority**: {priority_label(task.priority)}")
 
     if task.progress is not None and task.progress > 0:
@@ -358,14 +442,16 @@ def format_task_markdown(
         lines.append(f"- **Type**: {task.kind}")
 
     if task.due_date:
-        lines.append(f"- **Due**: {format_datetime(task.due_date, tz_name)}")
+        lines.append(f"- **Due**: {format_task_date(task, task.due_date, tz_name, detail=True)}")
     if task.start_date:
-        lines.append(f"- **Start**: {format_datetime(task.start_date, tz_name)}")
+        lines.append(f"- **Start**: {format_task_date(task, task.start_date, tz_name, detail=True)}")
     if task.is_all_day:
         lines.append("- **All-day**: Yes")
+    if task.is_floating and not task.is_all_day:
+        lines.append("- **Floating time**: Yes (same clock time in every zone)")
     if task.repeat_flag:
         lines.append(f"- **Repeats**: `{task.repeat_flag}`")
-    # Only surface time_zone when it differs from the user's configured TZ —
+    # Only surface time_zone when it differs from the user's configured TZ,
     # otherwise it's noise on every task.
     if task.time_zone and task.time_zone != tz_name:
         lines.append(f"- **Time zone**: {task.time_zone}")
@@ -378,6 +464,11 @@ def format_task_markdown(
         lines.append("")
         lines.append("### Notes")
         lines.append(task.content)
+
+    if task.desc:
+        lines.append("")
+        lines.append("### Description")
+        lines.append(task.desc)
 
     if task.items:
         # task.items are checklist items (a TODO list *inside* the task),
@@ -404,7 +495,7 @@ def format_task_json(
     `content_max_chars` is the per-task content cap used in list views to
     keep page sizes manageable. When set and the content is longer, it's
     truncated with an ellipsis and an extra `content_truncated: true` field
-    is added — the model should call `ticktick_get_task` for the full text.
+    is added. The model should call `ticktick_get_task` for the full text.
     Detail-view callers leave this at None to get the full content.
 
     `omit_defaults` (list/search views) drops fields that are at their default
@@ -413,14 +504,16 @@ def format_task_json(
     Detail callers leave it False to get every field. Always kept either way:
     id, project_id, title, kind, priority(+label), status(+label), time_zone.
 
-    `child_meta` is `{child_id: {"title": str, "priority": int}}`. When
-    provided, the `children` array becomes a list of `{id, title,
-    priority_label}` objects; children not present in the map are dropped
-    (with `total_children`/`children_hidden` reported). When None (detail
-    view fallback), children are listed as bare `{id}` entries.
+    `child_meta` is `{child_id: {"title": str, "priority": int, "status":
+    int, "in_trash": bool}}` (see `child_meta_entry`). When provided, the
+    `children` array becomes a list of `{id, title, priority_label, status,
+    status_label}` objects, plus `in_trash: true` on a trashed child (omitted
+    otherwise, like the task-level flag); children not present in the map are dropped (with
+    `total_children`/`children_hidden` reported). When None (detail view
+    fallback), children are listed as bare `{id}` entries.
     """
-    start_date = convert_tz(task.start_date, tz_name)
-    due_date = convert_tz(task.due_date, tz_name)
+    start_date = task_date_json(task, task.start_date, tz_name)
+    due_date = task_date_json(task, task.due_date, tz_name)
     completed_time = convert_tz(task.completed_time, tz_name)
 
     content = task.content
@@ -433,11 +526,28 @@ def format_task_json(
         content = content[:content_max_chars] + "…"
         content_truncated = True
 
+    # The checklist description gets the same list-view cap as content so a
+    # huge desc can't blow the response budget. Detail views pass None here
+    # and show it in full.
+    desc = task.desc
+    desc_truncated = False
+    if (
+        content_max_chars is not None
+        and desc is not None
+        and len(desc) > content_max_chars
+    ):
+        desc = desc[:content_max_chars] + "…"
+        desc_truncated = True
+
     # Children: when child_meta is provided (list/search/detail contexts),
-    # render `{id, title, priority_label}`. Entries not in the map are dropped
-    # (they're a different status than the current filter — e.g. completed
-    # subtasks under an active-filtered parent). When child_meta is None,
-    # children are listed as bare `{id}` entries.
+    # render `{id, title, priority_label, status, status_label}`, plus
+    # `in_trash: true` on a trashed child. These matter most in the detail
+    # view, which shows every child whatever its status, so a completed or
+    # trashed child must not read as active. Entries not in
+    # the map are dropped (in list views they're a different status than the
+    # current filter, e.g. completed subtasks under an active-filtered
+    # parent). When child_meta is None, children are listed as bare `{id}`
+    # entries.
     total_children = len(task.child_ids or [])
     if task.child_ids and child_meta is not None:
         children = []
@@ -445,11 +555,17 @@ def format_task_json(
             meta = child_meta.get(cid)
             if meta is None:
                 continue
-            children.append({
+            cstatus = meta.get("status", 0)
+            child = {
                 "id": cid,
                 "title": meta.get("title"),
                 "priority_label": priority_label(meta.get("priority", 0)),
-            })
+                "status": cstatus,
+                "status_label": status_label(cstatus),
+            }
+            if meta.get("in_trash"):
+                child["in_trash"] = True
+            children.append(child)
     elif task.child_ids:
         children = [{"id": cid} for cid in task.child_ids]
     else:
@@ -460,6 +576,7 @@ def format_task_json(
         "project_id": task.project_id,
         "title": task.title,
         "content": content,
+        "description": desc,
         "kind": task.kind,
         "status": task.status,
         "status_label": status_label(task.status),
@@ -467,8 +584,8 @@ def format_task_json(
         "priority_label": priority_label(task.priority),
         "progress": task.progress,
         "is_pinned": task.is_pinned,
-        "start_date": start_date.isoformat() if start_date else None,
-        "due_date": due_date.isoformat() if due_date else None,
+        "start_date": start_date,
+        "due_date": due_date,
         "completed_time": completed_time.isoformat() if completed_time else None,
         "tags": task.tags,
         "is_all_day": task.is_all_day,
@@ -496,6 +613,8 @@ def format_task_json(
         )
     if content_truncated:
         payload["content_truncated"] = True
+    if desc_truncated:
+        payload["description_truncated"] = True
 
     if omit_defaults:
         # Drop fields at their default value (absent == default). Keys not
@@ -504,12 +623,26 @@ def format_task_json(
         # hint keys (total_children/children_hidden/_children_hint/
         # content_truncated) which only appear when meaningful.
         for key in (
-            "content", "start_date", "due_date", "completed_time", "progress",
+            "content", "description", "start_date", "due_date",
+            "completed_time", "progress",
             "is_pinned", "is_all_day", "repeat_flag", "parent_id",
             "tags", "children", "items",
         ):
             if not payload.get(key):  # None / "" / 0 / False / []
                 payload.pop(key, None)
+
+    # Trash flag: emit ONLY when the task is actually trashed. Blank (key
+    # absent) means "not trashed", uniformly across detail and list views, so a
+    # not-trashed task never carries an in_trash:false. `deleted` is a separate
+    # axis from `status`, so a trashed task otherwise reads as status_label
+    # "Active" and in_trash:true is the only signal it's binned.
+    if getattr(task, "deleted", 0):
+        payload["in_trash"] = True
+    # Floating flag: emitted only when true, like in_trash. A floating task's
+    # time is its own clock time in every zone, which explains why its
+    # timestamp carries the task's zone instead of the user's.
+    if task.is_floating and not task.is_all_day:
+        payload["is_floating"] = True
     return payload
 
 
@@ -522,23 +655,20 @@ def format_task_row_markdown(
     r"""Format a single task as one markdown list row.
 
     When `child_meta` is provided and the task has children, the row is
-    followed by indented sub-bullets — one per resolvable child showing
-    `[PRIORITY] title (\`id\`)`. Children not in the map (different status
-    than the active filter) are counted as hidden in the row suffix.
+    followed by indented sub-bullets, one per resolvable child showing
+    `[PRIORITY] [TRASH] [DONE|ABANDONED] title (\`id\`)`, with each flag only
+    when it applies. Children not in the map (different status than the
+    active filter) are counted as hidden in the row suffix.
     Without `child_meta`, the row shows only the plain `| N children` count.
     """
     priority_str = priority_indicator(task.priority)
+    note_str = "[NOTE] " if task.kind == "NOTE" else ""
+    trash_str = "[TRASH] " if getattr(task, "deleted", 0) else ""
     pinned_str = "[PINNED] " if task.is_pinned else ""
-    # Only flag non-active statuses — [ACTIVE] on every row is noise.
-    if task.status == -1:
-        status_flag = "[ABANDONED] "
-    elif task.status in (1, 2):
-        status_flag = "[DONE] "
-    else:
-        status_flag = ""
+    status_str = status_flag(task.status)
     repeat_flag_str = repeat_flag_indicator(task.repeat_flag)
     task_title = task.title or "(No title)"
-    due_str = f" | Due: {format_date(task.due_date, tz_name)}" if task.due_date else ""
+    due_str = f" | Due: {format_task_date(task, task.due_date, tz_name)}" if task.due_date else ""
     tags_str = f" | Tags: {', '.join(task.tags)}" if task.tags else ""
     parent_str = f" | Child of: `{task.parent_id}`" if task.parent_id else ""
     # Skip 0 (redundant noise) and 100 (already implied by [DONE]).
@@ -564,7 +694,7 @@ def format_task_row_markdown(
                 continue
             cind = priority_indicator(meta.get("priority", 0))
             ctitle = meta.get("title") or "(No title)"
-            child_lines.append(f"  - {cind} {ctitle} (`{cid}`)")
+            child_lines.append(f"  - {cind} {child_flags(meta)}{ctitle} (`{cid}`)")
         if not child_lines and hidden > 0:
             children_suffix = f" | {hidden} subtasks (not in this filter)"
         elif hidden > 0:
@@ -573,7 +703,7 @@ def format_task_row_markdown(
         children_suffix = f" | {total_children} children"
 
     main_row = (
-        f"- {priority_str} {pinned_str}{status_flag}{repeat_flag_str}**{task_title}** "
+        f"- {priority_str} {note_str}{trash_str}{pinned_str}{status_str}{repeat_flag_str}**{task_title}** "
         f"(`{task.id}`){project_str}{due_str}{progress_str}{tags_str}{parent_str}{children_suffix}"
     )
     if child_lines:
@@ -602,10 +732,25 @@ def format_tasks_markdown(
     return "\n".join(lines)
 
 
+def child_meta_entry(task: Task) -> dict[str, Any]:
+    """One task's entry in a `child_meta` map: what a parent's view shows
+    about this task as a child (title, priority flag, status flag, trash
+    flag).
+
+    Every place that builds a `child_meta` map uses this, so the map has one
+    shape everywhere."""
+    return {
+        "title": task.title,
+        "priority": task.priority,
+        "status": task.status,
+        "in_trash": bool(getattr(task, "deleted", 0)),
+    }
+
+
 def _build_child_meta(tasks: list[Task]) -> dict[str, dict[str, Any]]:
-    """Build a `{id: {title, priority}}` map from a task list — used to
+    """Build a `{id: child_meta_entry}` map from a task list, used to
     enrich child references when no explicit map was passed."""
-    return {t.id: {"title": t.title, "priority": t.priority} for t in tasks if t.id}
+    return {t.id: child_meta_entry(t) for t in tasks if t.id}
 
 
 def format_tasks_json(
@@ -622,8 +767,8 @@ def format_tasks_json(
     notes don't blow up batch responses with multi-kilobyte content fields.
     For budget-aware paginated output use `paginate_tasks_json` instead.
 
-    `child_meta` is `{id: {title, priority}}` for enriching child references
-    with title + priority_label. When omitted, it's built from `tasks` itself
+    `child_meta` is `{id: child_meta_entry}` for enriching child references
+    with title, priority, status and the trash flag. When omitted, it's built from `tasks` itself
     (which only helps when children happen to be in the same batch).
     """
     meta = child_meta if child_meta is not None else _build_child_meta(tasks)
@@ -636,18 +781,21 @@ def format_tasks_json(
         "count": len(tasks),
         "tasks": formatted,
     }
-    if content_max_chars is not None and any(t.get("content_truncated") for t in formatted):
+    if content_max_chars is not None and any(
+        t.get("content_truncated") or t.get("description_truncated") for t in formatted
+    ):
         result["_content_hint"] = (
-            f"Some content fields are truncated to {content_max_chars} chars. "
-            "Use ticktick_get_task(task_id) for the full note."
+            f"Some content/description fields are truncated to {content_max_chars} chars. "
+            "Use ticktick_get_task(task_id) for the full text."
         )
     return result
 
 
-# Per-task content cap for list views (~a short paragraph); the model can
+# Per-task content cap for list views (~a short paragraph). The model can
 # call ticktick_get_task to retrieve the full notes when needed. Raising this
-# shows more content per task but fits fewer tasks per page (the 25k-char
-# response budget is fixed), so list pages get shorter for content-heavy tasks.
+# shows more content per task but fits fewer tasks per page, because the
+# response budget (CHARACTER_LIMIT, 40,000 chars) is fixed, so list pages get
+# shorter for content-heavy tasks.
 LIST_CONTENT_MAX_CHARS = 1000
 
 
@@ -696,7 +844,7 @@ def paginate_tasks_json(
     When any task hits the cap, a `_content_hint` is added at the top level
     pointing the caller at `ticktick_get_task` for the full text.
 
-    `child_meta` is `{id: {title, priority}}` for enriching child references
+    `child_meta` is `{id: child_meta_entry}` for enriching child references
     even when the children aren't in `tasks` (e.g. a filtered "due today"
     list whose parents' subtasks have no due date). When omitted, the map
     is built from `tasks` itself.
@@ -716,10 +864,13 @@ def paginate_tasks_json(
         item_key="tasks",
         limit=limit,
     )
-    if any(t.get("content_truncated") for t in result["tasks"]):
+    if any(
+        t.get("content_truncated") or t.get("description_truncated")
+        for t in result["tasks"]
+    ):
         result["_content_hint"] = (
-            f"Some content fields are truncated to {content_max_chars} chars. "
-            "Use ticktick_get_task(task_id) for the full note."
+            f"Some content/description fields are truncated to {content_max_chars} chars. "
+            "Use ticktick_get_task(task_id) for the full text."
         )
     return result
 
@@ -1109,7 +1260,7 @@ def _completion_window(stats: UserStatistics) -> dict[str, Any] | None:
     """Summarize the per-day completion window TickTick returns in task_by_day.
 
     Returns None when there's no daily history. The date keys are whatever
-    TickTick sends — we don't control the window (the /statistics/general
+    TickTick sends. We don't control the window (the /statistics/general
     endpoint takes no date params), we just summarize what's present.
     """
     if not stats.task_by_day:
