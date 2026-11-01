@@ -1665,8 +1665,13 @@ class UnifiedTickTickAPI:
                 tasks[task_id] = await self.get_task(task_id, project_id)
         return list(tasks.values())
 
-    async def _v1_complete(self, tasks: list[Task], operation: str) -> None:
+    async def _v1_complete(
+        self, tasks: list[Task], operation: str, confirmed: set[str]
+    ) -> None:
         """Complete tasks through V1, one call per project and per 50 tasks.
+
+        ``confirmed`` collects each ID TickTick confirms, call by call, so the
+        caller still knows what was done when a later call fails.
 
         Raises:
             TickTickAPIError: If TickTick left a task out of its confirmation.
@@ -1675,7 +1680,6 @@ class UnifiedTickTickAPI:
         for task in tasks:
             by_project.setdefault(task.project_id, []).append(task.id)
 
-        confirmed: set[str] = set()
         for project_id, ids in by_project.items():
             for start in range(0, len(ids), _V1_BATCH_SIZE):
                 chunk = ids[start:start + _V1_BATCH_SIZE]
@@ -1701,17 +1705,26 @@ class UnifiedTickTickAPI:
         return errors
 
     async def _v2_close_tasks(
-        self, tasks: list[Task], status: TaskStatus, operation: str
+        self,
+        tasks: list[Task],
+        status: TaskStatus,
+        operation: str,
+        v1_completed: set[str] | None = None,
     ) -> None:
         """Close non-recurring tasks through V2, the fallback when V1 cannot.
 
         Because /batch/task REPLACES the task, this sends the full pre-fetched
         task. A sparse {id, projectId, status, completedTime} body makes
         TickTick wipe the start date, due date and repeat rule.
+
+        Tasks in ``v1_completed`` are skipped: V1 finished them before it
+        failed, and a recurring one among them has already moved on.
         """
+        tasks = [task for task in tasks if task.id not in (v1_completed or ())]
         if not self._router.has_v2:
             raise TickTickAPIUnavailableError(
-                f"Could not run {operation}: neither API is available",
+                f"Could not run {operation}: neither API is available."
+                f"{self._v1_completed_note(v1_completed)}",
                 operation=operation,
             )
         recurring = [
@@ -1719,7 +1732,7 @@ class UnifiedTickTickAPI:
             if task.repeat_flag and task.status == TaskStatus.ACTIVE
         ]
         if recurring:
-            raise self._recurring_needs_v1(recurring, operation)
+            raise self._recurring_needs_v1(recurring, operation, v1_completed=v1_completed)
 
         now = datetime.now(timezone.utc)
         updates: list[dict[str, Any]] = []
@@ -1737,10 +1750,26 @@ class UnifiedTickTickAPI:
         _check_batch_response_errors(response, operation, [u["id"] for u in updates])
 
     @staticmethod
+    def _v1_completed_note(v1_completed: set[str] | None) -> str:
+        """Error text naming the tasks V1 finished before it failed.
+
+        A retry of the whole call would complete the next occurrence of a
+        recurring task among them, so the error has to tell.
+        """
+        if not v1_completed:
+            return ""
+        return (
+            " These tasks were completed before the login failed, so do not "
+            f"send them again: {', '.join(sorted(v1_completed))}."
+        )
+
+    @classmethod
     def _recurring_needs_v1(
+        cls,
         task_ids: list[str],
         operation: str,
         cause: TickTickError | None = None,
+        v1_completed: set[str] | None = None,
     ) -> TickTickAPIUnavailableError:
         """Error for recurring tasks that cannot be closed without V1.
 
@@ -1751,7 +1780,7 @@ class UnifiedTickTickAPI:
             f"Could not run {operation} on repeating tasks {', '.join(task_ids)}: "
             "that needs the V1 login, which is not working, and closing them "
             "without it would end their series. Nothing was changed for them. "
-            "Refresh TICKTICK_ACCESS_TOKEN.",
+            f"Refresh TICKTICK_ACCESS_TOKEN.{cls._v1_completed_note(v1_completed)}",
             operation=operation,
             v1_error=cause,
         )
@@ -1811,14 +1840,15 @@ class UnifiedTickTickAPI:
 
         if pending:
             v1_error: TickTickAuthenticationError | None = None
+            confirmed: set[str] = set()
             if self._router.has_v1:
                 try:
-                    await self._v1_complete(pending, operation)
+                    await self._v1_complete(pending, operation, confirmed)
                 except TickTickAuthenticationError as exc:
                     logger.warning("%s: V1 login failed, trying V2: %s", operation, exc)
                     v1_error = exc
             if v1_error is not None or not self._router.has_v1:
-                await self._v2_close_tasks(pending, TaskStatus.COMPLETED, operation)
+                await self._v2_close_tasks(pending, TaskStatus.COMPLETED, operation, confirmed)
 
         return {
             "completed": [task.id for task in pending],
@@ -1887,10 +1917,16 @@ class UnifiedTickTickAPI:
         """
         operation = "batch_abandon_tasks"
         since = datetime.now(timezone.utc)
+        confirmed: set[str] = set()
         try:
-            await self._v1_complete(tasks, operation)
+            await self._v1_complete(tasks, operation, confirmed)
         except TickTickAuthenticationError as exc:
-            raise self._recurring_needs_v1([task.id for task in tasks], operation, exc) from exc
+            raise self._recurring_needs_v1(
+                [task.id for task in tasks if task.id not in confirmed],
+                operation,
+                exc,
+                confirmed,
+            ) from exc
 
         try:
             copies = await self._find_completed_copies(tasks, since)

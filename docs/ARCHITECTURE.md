@@ -996,10 +996,16 @@ short operator-facing version).
     on project, title and the occurrence's dates. If that step fails, the
     occurrence stays completed and the tool says so. Completing a parent leaves
     its open subtasks open. All verified live on 2026-11-01 with throwaway
-    all-day tasks. `/task/completeTasks` also keeps the clock time of a timed
+    all-day tasks. Complete and abandon also keep the clock time of a timed
     task: a daily task due at 20:00 Pacific moved to 20:00 the next day, across
-    the end of daylight saving time (`-07:00` to `-08:00`). It also accepts
-    Inbox ids (`inbox{userId}`). Not checked: abandoning a timed recurring task.
+    the end of daylight saving time (`-07:00` to `-08:00`), and the abandoned
+    copy kept the old date. `/task/completeTasks` also accepts Inbox ids
+    (`inbox{userId}`).
+
+    When the V1 login fails partway through a call, the V2 fallback skips the
+    tasks V1 already finished and every error names them. Sending a recurring
+    one again would complete its next occurrence too, because the same id stays
+    active.
 
 ---
 

@@ -158,6 +158,18 @@ class FakeTickTick:
         self.v1.complete_tasks.side_effect = error
         self.v1.batch_update_tasks.side_effect = error
 
+    def v1_login_fails_on_second_call(self) -> None:
+        """The first V1 complete call works, every later one gets a 401."""
+        calls = []
+
+        async def first_call_only(project_id: str, task_ids: list[str]) -> list[str]:
+            calls.append(project_id)
+            if len(calls) > 1:
+                raise TickTickAuthenticationError("401 from V1")
+            return await self._complete(project_id, task_ids)
+
+        self.v1.complete_tasks.side_effect = first_call_only
+
     @property
     def copies(self) -> list[dict]:
         return [t for t in self.tasks.values() if t["id"].startswith("0" * 10)]
@@ -271,6 +283,41 @@ class TestCompleteFallback:
             await tt.api.batch_complete_tasks([("t1", PROJ), ("r1", PROJ)])
         tt.v2.batch_tasks.assert_not_called()
 
+    async def test_v1_login_failure_midway_skips_what_v1_finished(self):
+        """V1 moved r1 on, so V2 must close only the task V1 did not reach."""
+        tt = FakeTickTick(_raw("r1", rule=DAILY), _raw("t2", project=OTHER_PROJ))
+        tt.v1_login_fails_on_second_call()
+        result = await tt.api.batch_complete_tasks([("r1", PROJ), ("t2", OTHER_PROJ)])
+        sent = tt.v2.batch_tasks.call_args.kwargs["update"]
+        assert [task["id"] for task in sent] == ["t2"]
+        assert result["completed"] == ["r1", "t2"]
+        assert result["next_occurrences"][0].id == "r1"
+
+    async def test_v1_login_failure_midway_names_what_v1_finished(self):
+        """A retry of r1 would complete its next occurrence too, so the error
+        must not say that nothing happened to it."""
+        tt = FakeTickTick(
+            _raw("r1", rule=DAILY),
+            _raw("r2", project=OTHER_PROJ, rule=DAILY),
+        )
+        tt.v1_login_fails_on_second_call()
+        with pytest.raises(TickTickAPIUnavailableError) as caught:
+            await tt.api.batch_complete_tasks([("r1", PROJ), ("r2", OTHER_PROJ)])
+        message = str(caught.value)
+        assert "repeating tasks r2:" in message
+        assert "do not send them again: r1." in message
+        tt.v2.batch_tasks.assert_not_called()
+
+    async def test_v1_login_failure_midway_without_v2_names_what_v1_finished(self):
+        tt = FakeTickTick(
+            _raw("r1", rule=DAILY),
+            _raw("t2", project=OTHER_PROJ),
+            v2=False,
+        )
+        tt.v1_login_fails_on_second_call()
+        with pytest.raises(TickTickAPIUnavailableError, match="do not send them again: r1."):
+            await tt.api.batch_complete_tasks([("r1", PROJ), ("t2", OTHER_PROJ)])
+
     async def test_without_v1_a_normal_task_uses_v2(self):
         tt = FakeTickTick(_raw("t1"), v1=False)
         await tt.api.batch_complete_tasks([("t1", PROJ)])
@@ -369,10 +416,17 @@ class TestAbandonRecurring:
         """Other completed tasks in the project must stay completed."""
         same_title_other_day = _raw("c1", title="Task r1", status=2, dueDate=DAY_TWO)
         other_title_same_day = _raw("c2", title="Something else", status=2)
-        tt = FakeTickTick(_raw("r1", rule=DAILY), same_title_other_day, other_title_same_day)
+        same_title_other_start = _raw("c3", title="Task r1", status=2, startDate=DAY_TWO)
+        tt = FakeTickTick(
+            _raw("r1", rule=DAILY),
+            same_title_other_day,
+            other_title_same_day,
+            same_title_other_start,
+        )
         await tt.api.batch_abandon_tasks([("r1", PROJ)])
         assert tt.tasks["c1"]["status"] == 2
         assert tt.tasks["c2"]["status"] == 2
+        assert tt.tasks["c3"]["status"] == 2
         assert tt.copies[0]["status"] == -1
 
     async def test_copy_not_found_is_reported_not_hidden(self):
@@ -417,6 +471,18 @@ class TestAbandonRecurring:
         with pytest.raises(TickTickAPIUnavailableError, match="r1"):
             await tt.api.batch_abandon_tasks([("t1", PROJ), ("r1", PROJ)])
         tt.v2.batch_tasks.assert_not_called()
+
+    async def test_v1_login_failure_midway_names_what_v1_finished(self):
+        tt = FakeTickTick(
+            _raw("r1", rule=DAILY),
+            _raw("r2", project=OTHER_PROJ, rule=DAILY),
+        )
+        tt.v1_login_fails_on_second_call()
+        with pytest.raises(TickTickAPIUnavailableError) as caught:
+            await tt.api.batch_abandon_tasks([("r1", PROJ), ("r2", OTHER_PROJ)])
+        message = str(caught.value)
+        assert "repeating tasks r2:" in message
+        assert "do not send them again: r1." in message
 
     async def test_mixed_batch(self):
         tt = FakeTickTick(_raw("t1"), _raw("r1", rule=DAILY))
