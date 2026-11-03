@@ -1281,14 +1281,44 @@ def _completion_window(stats: UserStatistics) -> dict[str, Any] | None:
     }
 
 
-def format_statistics_markdown(stats: UserStatistics, section: str = "all") -> str:
+def _day_zone_note(day_zone: str | None, tool_zone: str | None) -> str | None:
+    """Sentence naming the zone TickTick counts statistics days in.
+
+    TickTick counts them in the account time zone set in the app, not in
+    TICKTICK_TIMEZONE (checked live 2026-11-02: the per-day completion counts
+    matched Europe/Paris days while TICKTICK_TIMEZONE was America/Los_Angeles).
+    """
+    if not day_zone:
+        return None
+    note = f"TickTick counts these days in your TickTick account time zone, {day_zone}"
+    if tool_zone and tool_zone != day_zone:
+        note += (
+            f", not in TICKTICK_TIMEZONE ({tool_zone}). So \"today\" here starts "
+            "at a different moment than in the task tools."
+        )
+    else:
+        note += "."
+    return note
+
+
+def format_statistics_markdown(
+    stats: UserStatistics,
+    section: str = "all",
+    day_zone: str | None = None,
+    tool_zone: str | None = None,
+) -> str:
     """Format user statistics as Markdown.
 
     section: "all" (everything), "completions", "score", or "pomodoros".
     All data comes from one /statistics/general call (no task fetching).
+    day_zone: the account time zone TickTick counts days in, named on top
+    when known. tool_zone: TICKTICK_TIMEZONE, to say when the two differ.
     """
     show_all = section == "all"
     lines: list[str] = ["# Productivity Statistics", ""]
+    note = _day_zone_note(day_zone, tool_zone)
+    if note:
+        lines.extend([f"> {note}", ""])
 
     if show_all or section == "score":
         lines.append(f"- **Level**: {stats.level}")
@@ -1351,9 +1381,21 @@ def format_statistics_markdown(stats: UserStatistics, section: str = "all") -> s
     return "\n".join(lines).rstrip()
 
 
-def format_statistics_json(stats: UserStatistics, section: str = "all") -> dict[str, Any]:
-    """Format user statistics as a JSON-able dict (enriched, section-aware)."""
+def format_statistics_json(
+    stats: UserStatistics,
+    section: str = "all",
+    day_zone: str | None = None,
+    tool_zone: str | None = None,
+) -> dict[str, Any]:
+    """Format user statistics as a JSON-able dict (enriched, section-aware).
+
+    ``day_zone`` and ``tool_zone`` work as in ``format_statistics_markdown``.
+    """
     out: dict[str, Any] = {}
+    note = _day_zone_note(day_zone, tool_zone)
+    if note:
+        out["day_time_zone"] = day_zone
+        out["_day_zone_hint"] = note
     if section in ("all", "score"):
         out["level"] = stats.level
         out["score"] = stats.score

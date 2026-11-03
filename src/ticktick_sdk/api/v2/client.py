@@ -126,6 +126,18 @@ from ticktick_sdk.exceptions import TickTickAPIError, TickTickAuthenticationErro
 logger = logging.getLogger(__name__)
 
 
+def _closed_range_param(value: datetime) -> str:
+    """Format one end of the /project/all/closed date range.
+
+    TickTick reads the plain ``YYYY-MM-DD hh:mm:ss`` value as UTC (checked
+    live 2026-11-02), so a value with a zone is converted to UTC first. A
+    value without a zone is sent as it is, and so counts as UTC.
+    """
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc)
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
 class TickTickV2Client(BaseTickTickClient):
     """
     Client for TickTick V2 API.
@@ -732,13 +744,9 @@ class TickTickV2Client(BaseTickTickClient):
         Returns:
             List of completed tasks
         """
-        # Format: YYYY-MM-DD HH:MM:SS (httpx handles URL encoding)
-        from_str = from_date.strftime("%Y-%m-%d %H:%M:%S")
-        to_str = to_date.strftime("%Y-%m-%d %H:%M:%S")
-
         params = {
-            "from": from_str,
-            "to": to_str,
+            "from": _closed_range_param(from_date),
+            "to": _closed_range_param(to_date),
             "status": "Completed",
             "limit": str(limit),
         }
@@ -762,13 +770,9 @@ class TickTickV2Client(BaseTickTickClient):
         Returns:
             List of abandoned tasks
         """
-        # Format: YYYY-MM-DD HH:MM:SS (httpx handles URL encoding)
-        from_str = from_date.strftime("%Y-%m-%d %H:%M:%S")
-        to_str = to_date.strftime("%Y-%m-%d %H:%M:%S")
-
         params = {
-            "from": from_str,
-            "to": to_str,
+            "from": _closed_range_param(from_date),
+            "to": _closed_range_param(to_date),
             "status": "Abandoned",
             "limit": str(limit),
         }

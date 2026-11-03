@@ -78,6 +78,8 @@ These are all the variables you'll set in Railway's dashboard. Required ones mus
 > **Timezone:** Set `TICKTICK_TIMEZONE` to your [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones), the "TZ identifier" column on that page. Common examples: `Europe/Brussels`, `Europe/London`, `America/New_York`, `America/Chicago`, `America/Los_Angeles`, `Asia/Tokyo`, `Asia/Shanghai`, `Australia/Sydney`. When you travel, change it to where you are, like your phone does.
 >
 > **All-day tasks are plain dates.** TickTick saves every date as an exact moment plus the task's own timezone, and the app shows an all-day task on its date in that zone, wherever your phone is. This server does the same: all-day tasks show as `2026-09-11` with no time, and they stay on the same day when you change `TICKTICK_TIMEZONE`. To set one, send a plain date like `2026-09-11`. A time without a timezone, like `2026-09-11T17:00:00`, means 17:00 in `TICKTICK_TIMEZONE`. Timed tasks show their zone (`17:00 PDT` in lists), and the tool descriptions tell the model which zone `TICKTICK_TIMEZONE` currently is, since it cannot see your environment variables.
+>
+> **Statistics use the TickTick app's time zone.** TickTick counts the days in `ticktick_get_statistics` itself, in the time zone set in the TickTick app, not in `TICKTICK_TIMEZONE`. The tool names that zone in its output, so a "today" that starts at a different moment than in the task tools is visible.
 
 > ⚠️ **This server is single-user, so anyone who can reach `/mcp` acts as the account owner**, with full read, write, and delete access to their TickTick data. If you deploy it on a public URL, set `MCP_SECRET_PATH` (below). With neither `MCP_SECRET_PATH` nor `MCP_BEARER_TOKEN` set, the server is completely open and logs a warning saying so at startup. Full reasoning and alternatives: [`docs/SECURING_THE_SERVER.md`](docs/SECURING_THE_SERVER.md).
 
@@ -221,6 +223,7 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 
 **Bug fixes**
 - [x] All-day tasks show on the same day as in the TickTick app, even while you travel (read in each task's own zone), and plain dates you send land on that exact day in every timezone
+- [x] Completed and abandoned listings count `from_date` / `to_date` as days in `TICKTICK_TIMEZONE`. TickTick reads the range as UTC, so in San Francisco a task completed after 16:00 used to count for the next day
 - [x] `complete_tasks` keeps every field and moves a repeating task to its next occurrence, as in the app. It used to wipe the start date, due date and repeat rule of every task it completed, which ended repeating series. Completion now goes through TickTick's official `completeTasks` call, which also works when V2 is down
 - [x] New `ticktick_abandon_tasks` for the app's "Won't Do". A repeating task keeps its series, and only the current occurrence is abandoned
 - [x] `complete_tasks`, `abandon_tasks`, `delete_tasks`, `move_tasks`, `set_task_parents` and `unparent_tasks` honor `response_format=json` (they used to accept it and reply in text)

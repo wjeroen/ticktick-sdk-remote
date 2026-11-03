@@ -57,6 +57,8 @@
 
 ### Bug Fixes
 
+- [x] **`list_tasks` with `status` completed or abandoned read `from_date`/`to_date` as UTC days (2026-11-02).** The V2 client wrote the range as a plain `YYYY-MM-DD hh:mm:ss` without its zone, and TickTick reads that as UTC, so in San Francisco a task completed after 16:00 counted for the next day. The range is now converted to UTC first. Reported by the PA routine.
+- [x] **`get_statistics` names the zone its days are counted in (2026-11-02).** TickTick counts them in the account time zone set in the app (Europe/Paris on this account), not in `TICKTICK_TIMEZONE`, so in San Francisco "today" starts at 15:00 the day before. The server cannot change that, so the output says so.
 - [ ] **Changing only `time_zone` on an all-day task moves its day (found 2026-09-10).** An update that sets `time_zone` without a new date keeps the stored moment, and the app then reads that moment in the new zone, which can land on a different date. Fix: when the zone changes on an all-day task and no date is sent, re-encode the task's current day as midnight in the new zone.
 - [ ] **Confirm floating-time handling against one real floating task.** Floating tasks are read and written at their own clock time (TickTick's help page describes this), but no floating task has been seen in live data yet. Create one timed task set to "Floating Time" in the app and check that `get_task` shows the same clock time as the app.
 - [x] **V1 login failure halfway through `complete_tasks` or `abandon_tasks` (2026-11-01).** The V2 fallback handled tasks V1 had already finished, and for a recurring task the error said "Nothing was changed", which invited a retry that would complete its next occurrence too. The fallback now skips those tasks, and every error names them.

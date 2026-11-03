@@ -3001,13 +3001,14 @@ async def ticktick_auth_status(ctx: Context, response_format: ResponseFormat = R
         "openWorldHint": True,
     },
 )
+@_zone_in_doc
 async def ticktick_get_statistics(
     ctx: Context,
     section: StatisticsSection = StatisticsSection.ALL,
     response_format: ResponseFormat = ResponseFormat.MARKDOWN,
 ) -> str:
     """
-    Get productivity statistics (all from one `/statistics/general` call, no task fetching).
+    Get productivity statistics (from one `/statistics/general` call, no task fetching).
 
     Use `section` to focus the output:
     - `all` (default): score/level, the task-completion overview + per-day/week/month
@@ -3020,24 +3021,47 @@ async def ticktick_get_statistics(
     Note: the per-day/week/month window is fixed by TickTick (this endpoint takes no date
     range). For completions in a date range *you* choose, use a date-filtered task query.
 
+    Days: TickTick counts these days in the TickTick account time zone set in
+    the app, not in TICKTICK_TIMEZONE, so "today" here can start at a different
+    moment than in the task tools. The output names the account zone.
+
     Returns:
         Formatted statistics or error message.
     """
     try:
         client = get_client(ctx)
-        stats = await client.get_statistics()
+        stats, day_zone = await asyncio.gather(
+            client.get_statistics(), _account_time_zone(client)
+        )
 
         if response_format == ResponseFormat.MARKDOWN:
-            return format_statistics_markdown(stats, section=section.value)
+            return format_statistics_markdown(
+                stats, section=section.value, day_zone=day_zone, tool_zone=USER_TIMEZONE
+            )
         else:
             return json.dumps(
-                format_statistics_json(stats, section=section.value),
+                format_statistics_json(
+                    stats, section=section.value, day_zone=day_zone, tool_zone=USER_TIMEZONE
+                ),
                 separators=(",", ":"),
                 default=str,
             )
 
     except Exception as e:
         return handle_error(e, "get_statistics")
+
+
+async def _account_time_zone(client: Any) -> str | None:
+    """The TickTick account time zone, which TickTick counts statistics days in.
+
+    None when the preferences cannot be read, so the statistics still show.
+    """
+    try:
+        zone = (await client.get_preferences()).get("timeZone")
+    except Exception as exc:
+        logger.warning("Could not read the TickTick account time zone: %s", exc)
+        return None
+    return zone or None
 
 
 @mcp.tool(

@@ -812,7 +812,7 @@ go through **batch** endpoints. `verify_authentication()` pings the sync endpoin
 | Task | `create_task` / `update_task` / `delete_task` | convenience wrappers over `POST /batch/task` |
 | Task | `move_task(s)` | `POST /batch/taskProject` |
 | Task | `set_task_parent` / `unset_task_parent` | `POST /batch/taskParent` |
-| Task | `get_completed_tasks` / `get_abandoned_tasks` | `GET /project/all/closed?…&status=Completed\|Abandoned` (dates `YYYY-MM-DD hh:mm:ss`) |
+| Task | `get_completed_tasks` / `get_abandoned_tasks` | `GET /project/all/closed?…&status=Completed\|Abandoned` (dates `YYYY-MM-DD hh:mm:ss`, read as UTC) |
 | Task | `get_deleted_tasks(limit)` | `GET /project/all/trash/pagination` (always sent with `start=0`, callers page in memory) |
 | Project | `batch_projects(add, update, delete)` | `POST /batch/project` |
 | Folder | `batch_project_groups(add, update, delete)` | `POST /batch/projectGroup` |
@@ -968,6 +968,19 @@ short operator-facing version).
     itself (`completedTime`, habit `createdTime` / `modifiedTime`) use an exact
     UTC clock. Nothing reads the machine's local clock, which is UTC on Railway
     and anything on a local stdio install.
+
+    Completed and abandoned listings take their range as plain
+    `YYYY-MM-DD hh:mm:ss` text, which TickTick reads as UTC (checked live on
+    2026-11-02). `list_tasks` builds `from_date` as 00:00 and `to_date` as
+    23:59:59 in `TICKTICK_TIMEZONE`, and `_closed_range_param` in the V2
+    client converts both to UTC before sending them.
+
+    Statistics are the one place where TickTick picks the day.
+    `/statistics/general` counts days in the TickTick account time zone set in
+    the app (`timeZone` in the preferences), not in `TICKTICK_TIMEZONE`. Checked
+    live on 2026-11-02: the per-day completion counts matched Europe/Paris days
+    while `TICKTICK_TIMEZONE` was America/Los_Angeles. `ticktick_get_statistics`
+    reads that zone and names it in its output.
 
     The model using the tools cannot see environment variables, so tool
     descriptions name the zone: `name_the_zone` (in `tools/inputs.py`) turns
