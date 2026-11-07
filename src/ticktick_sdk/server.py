@@ -906,7 +906,8 @@ async def ticktick_get_task(params: TaskGetInput, ctx: Context) -> str:
 
     Returns:
         Task details including: id, project_id, title, content, kind, status,
-        priority, dates, tags, parent_id, child_ids, and checklist items.
+        priority, dates, tags, reminders (iCal triggers such as
+        `TRIGGER:-PT30M`), parent_id, child_ids, and checklist items.
 
         Children: every subtask is listed, whatever its status, and each one
         shows its own status. Markdown marks a completed subtask `[DONE]`, an
@@ -1037,8 +1038,8 @@ async def ticktick_list_tasks(params: TaskListInput, ctx: Context) -> str:
     `completed_time` also means the task is not completed); missing `progress`
     = 0; missing `is_pinned` = false; missing `is_all_day` = false (not an
     all-day task); missing `repeat_flag` = no recurrence; missing `parent_id` =
-    top-level (no parent); missing `tags` / `children` / `items` = empty;
-    missing `is_floating` = fixed time.
+    top-level (no parent); missing `tags` / `reminders` / `children` / `items`
+    = empty; missing `is_floating` = fixed time.
     `id`, `project_id`, `title`, `priority` (with `priority_label`), `status`
     (with `status_label`), and `time_zone` are always present. Use
     `ticktick_get_task` for one task's complete, unabridged fields.
@@ -1253,10 +1254,17 @@ async def ticktick_update_tasks(params: UpdateTasksInput, ctx: Context) -> str:
                 - due_date (str): Due date, same format. Without an offset, all-day
                   and floating tasks are read in their own zone, others in
                   TICKTICK_TIMEZONE, unless time_zone is given in the same update.
+                - clear_dates (bool): true removes the start and due date, like
+                  Clear in the app's date picker. A repeating task also loses its
+                  repeat rule, because a repeat needs a date. Do not combine with
+                  start_date, due_date or recurrence. Sending '' as a date is
+                  rejected.
                 - time_zone (str): IANA timezone (e.g., 'America/New_York')
                 - all_day (bool): Whether task is all-day
                 - tags (list[str]): New tags (replaces existing tags)
                 - recurrence (str): RRULE format for recurring tasks
+                - reminders (list[str]): New reminders in iCal trigger format
+                  (replaces existing ones, [] removes all)
                 - column_id (str): Kanban column ID for board assignment
                   (use empty string '' to remove from column)
             - response_format (str): 'markdown' (default) or 'json'
@@ -1264,11 +1272,16 @@ async def ticktick_update_tasks(params: UpdateTasksInput, ctx: Context) -> str:
     Returns:
         Summary of updated tasks or error message. The JSON response includes a
         `tasks` array of `{task_id}` per updated task, plus `in_trash: true` on
-        any task that was in the trash at edit time (omitted otherwise). A
-        trashed task still updates successfully. This pre-edit trash state is
-        computed for free from the update's own pre-fetch (no extra API call).
+        any task that was in the trash at edit time and `removed_repeat: true`
+        on any task whose repeat rule clear_dates removed (each omitted
+        otherwise). A trashed task still updates successfully. This pre-edit
+        trash state is computed for free from the update's own pre-fetch (no
+        extra API call).
 
     Examples:
+        Remove the dates:
+            tasks=[{"task_id": "abc123", "project_id": "proj1", "clear_dates": true}]
+
         Update priority:
             tasks=[{"task_id": "abc123", "project_id": "proj1", "priority": "high"}]
 
@@ -1310,6 +1323,8 @@ async def ticktick_update_tasks(params: UpdateTasksInput, ctx: Context) -> str:
                 spec["start_date"] = task_item.start_date
             if task_item.due_date is not None:
                 spec["due_date"] = task_item.due_date
+            if task_item.clear_dates:
+                spec["clear_dates"] = True
             if task_item.all_day is not None:
                 spec["all_day"] = task_item.all_day
             if task_item.time_zone is not None:
@@ -1318,6 +1333,8 @@ async def ticktick_update_tasks(params: UpdateTasksInput, ctx: Context) -> str:
                 spec["tags"] = task_item.tags
             if task_item.recurrence is not None:
                 spec["recurrence"] = task_item.recurrence
+            if task_item.reminders is not None:
+                spec["reminders"] = task_item.reminders
             if task_item.column_id is not None:
                 spec["column_id"] = task_item.column_id
             if task_item.kind is not None:
@@ -1333,13 +1350,23 @@ async def ticktick_update_tasks(params: UpdateTasksInput, ctx: Context) -> str:
         # something that was in the bin". Emit in_trash ONLY when true (blank ==
         # not trashed, no clutter).
         in_trash_map = response.pop("_in_trash", {}) if isinstance(response, dict) else {}
+        # Tasks whose repeat rule clear_dates removed. The caller asked only
+        # for the dates to go, so the reply must say the series ended too.
+        removed_repeat_map = (
+            response.pop("_removed_repeat", {}) if isinstance(response, dict) else {}
+        )
         tasks_out = []
         for s in update_specs:
             entry: dict[str, Any] = {"task_id": s["task_id"]}
             if in_trash_map.get(s["task_id"]):
                 entry["in_trash"] = True
+            if removed_repeat_map.get(s["task_id"]):
+                entry["removed_repeat"] = True
             tasks_out.append(entry)
         trashed_ids = [s["task_id"] for s in update_specs if in_trash_map.get(s["task_id"])]
+        unrepeated_ids = [
+            s["task_id"] for s in update_specs if removed_repeat_map.get(s["task_id"])
+        ]
 
         if params.response_format == ResponseFormat.MARKDOWN:
             count = len(update_specs)
@@ -1351,6 +1378,12 @@ async def ticktick_update_tasks(params: UpdateTasksInput, ctx: Context) -> str:
                 body += (
                     f"\n\n⚠️ {len(trashed_ids)} of these were in the trash when edited: "
                     + ", ".join(f"`{tid}`" for tid in trashed_ids)
+                )
+            if unrepeated_ids:
+                body += (
+                    "\n\nRemoving the dates also removed the repeat rule of: "
+                    + ", ".join(f"`{tid}`" for tid in unrepeated_ids)
+                    + ". A repeat needs a date, so these tasks no longer repeat."
                 )
             return body
         else:
@@ -1760,8 +1793,8 @@ async def ticktick_search_tasks(params: SearchInput, ctx: Context) -> str:
     `completed_time` also means the task is not completed); missing `progress`
     = 0; missing `is_pinned` = false; missing `is_all_day` = false (not an
     all-day task); missing `repeat_flag` = no recurrence; missing `parent_id` =
-    top-level (no parent); missing `tags` / `children` / `items` = empty;
-    missing `is_floating` = fixed time.
+    top-level (no parent); missing `tags` / `reminders` / `children` / `items`
+    = empty; missing `is_floating` = fixed time.
     `id`, `project_id`, `title`, `priority` (with `priority_label`), `status`
     (with `status_label`), and `time_zone` are always present. Use
     `ticktick_get_task` for one task's complete, unabridged fields.

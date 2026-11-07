@@ -249,7 +249,8 @@ class Task(TickTickModel):
 
         Args:
             for_update: If True, sends empty strings for None date fields
-                       to explicitly clear them. For creates, None means
+                       and empty lists for no tags or reminders, to
+                       explicitly clear them. For creates, None means
                        "no value" and is omitted.
         """
         data: dict[str, Any] = {
@@ -285,10 +286,14 @@ class Task(TickTickModel):
 
         if self.time_zone is not None:
             data["timeZone"] = self.time_zone
+        # Reminders: for updates, always include (empty list removes them all);
+        # for creates, omit if empty
         if self.reminders:
             data["reminders"] = [
                 r.model_dump(exclude_none=True) for r in self.reminders
             ]
+        elif for_update:
+            data["reminders"] = []
         if self.repeat_flag is not None:
             data["repeatFlag"] = self.repeat_flag
         # Recurrence anchors. The V2 batch/task endpoint resets any field

@@ -451,6 +451,9 @@ def format_task_markdown(
         lines.append("- **Floating time**: Yes (same clock time in every zone)")
     if task.repeat_flag:
         lines.append(f"- **Repeats**: `{task.repeat_flag}`")
+    if task.reminders:
+        triggers = ", ".join(f"`{r.trigger}`" for r in task.reminders)
+        lines.append(f"- **Reminders**: {triggers}")
     # Only surface time_zone when it differs from the user's configured TZ,
     # otherwise it's noise on every task.
     if task.time_zone and task.time_zone != tz_name:
@@ -591,6 +594,7 @@ def format_task_json(
         "is_all_day": task.is_all_day,
         "time_zone": task.time_zone,
         "repeat_flag": task.repeat_flag,
+        "reminders": [r.trigger for r in task.reminders],
         "parent_id": task.parent_id,
         "children": children,
         "items": [
@@ -625,7 +629,7 @@ def format_task_json(
         for key in (
             "content", "description", "start_date", "due_date",
             "completed_time", "progress",
-            "is_pinned", "is_all_day", "repeat_flag", "parent_id",
+            "is_pinned", "is_all_day", "repeat_flag", "reminders", "parent_id",
             "tags", "children", "items",
         ):
             if not payload.get(key):  # None / "" / 0 / False / []

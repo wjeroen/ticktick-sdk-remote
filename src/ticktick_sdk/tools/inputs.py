@@ -269,11 +269,26 @@ class TaskUpdateItem(BaseModel):
     )
     start_date: Optional[str] = Field(
         default=None,
-        description="New start date. " + _UPDATE_DATE_RULE,
+        description=(
+            "New start date. " + _UPDATE_DATE_RULE
+            + " To remove the dates, use clear_dates instead."
+        ),
     )
     due_date: Optional[str] = Field(
         default=None,
-        description="New due date. " + _UPDATE_DATE_RULE,
+        description=(
+            "New due date. " + _UPDATE_DATE_RULE
+            + " To remove the dates, use clear_dates instead."
+        ),
+    )
+    clear_dates: Optional[bool] = Field(
+        default=None,
+        description=(
+            "true removes the task's start and due date, like Clear in the "
+            "app's date picker. A repeat rule needs a date, so a repeating "
+            "task also loses its repeat rule, and the response says so. Do not "
+            "combine with start_date, due_date or recurrence."
+        ),
     )
     all_day: Optional[bool] = Field(
         default=None,
@@ -291,6 +306,15 @@ class TaskUpdateItem(BaseModel):
     recurrence: Optional[str] = Field(
         default=None,
         description="New recurrence rule in RRULE format",
+    )
+    reminders: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "New reminders in iCal trigger format, replacing the current ones "
+            "(e.g., ['TRIGGER:-PT30M'] for 30 min before, 'TRIGGER:PT0S' for "
+            "at the time). [] removes all reminders."
+        ),
+        max_length=10,
     )
     # Column assignment (absorbs move_task_to_column)
     column_id: Optional[str] = Field(

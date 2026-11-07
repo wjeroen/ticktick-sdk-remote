@@ -34,6 +34,7 @@ from ticktick_sdk.exceptions import (
 from ticktick_sdk.models import (
     Column,
     Task,
+    TaskReminder,
     Project,
     ProjectGroup,
     ProjectData,
@@ -1348,7 +1349,8 @@ class UnifiedTickTickAPI:
         if resolved is None:
             raise TickTickAPIError(
                 f"Could not read {field} {value!r}. Send a plain date "
-                "(YYYY-MM-DD) or an ISO date and time.",
+                "(YYYY-MM-DD) or an ISO date and time. To remove a task's "
+                "dates, send clear_dates: true in the update instead.",
                 details={"field": field, "value": str(value)},
             )
         return resolved
@@ -1510,19 +1512,27 @@ class UnifiedTickTickAPI:
                 - priority: New priority (0, 1, 3, 5 or 'none', 'low', 'medium', 'high')
                 - start_date: New start date (datetime or ISO string)
                 - due_date: New due date (datetime or ISO string)
+                - clear_dates: True removes both dates. A repeating task also
+                  loses its repeat rule, because a repeat needs a date.
+                  Cannot be combined with start_date, due_date or recurrence.
                 - time_zone: New timezone
                 - all_day: All-day flag
                 - tags: New tags (replaces existing)
                 - recurrence: New recurrence rule
+                - reminders: New reminder triggers (replaces existing, [] removes all)
                 - column_id: Kanban column ID (empty string to remove from column)
                 - kind: TEXT / NOTE / CHECKLIST
 
         Returns:
-            Batch response with id2etag and id2error
+            Batch response with id2etag and id2error, plus two derived keys:
+            ``_in_trash`` (task id to its pre-edit trash state) and
+            ``_removed_repeat`` (task id to True for each task whose repeat
+            rule clear_dates removed).
 
         Raises:
             TickTickAPIUnavailableError: If V2 API is not available
-            TickTickAPIError: On other API errors
+            TickTickAPIError: On other API errors, or when clear_dates is
+                combined with a new date or recurrence
         """
         self._ensure_initialized()
 
@@ -1539,16 +1549,35 @@ class UnifiedTickTickAPI:
         # (a trashed task reads as status "Active" and updates on it succeed).
         # Free: we already fetch each task, so this costs no extra API call.
         in_trash_by_id: dict[str, bool] = {}
+        # Tasks whose repeat rule clear_dates removed, so the caller can say so.
+        removed_repeat_by_id: dict[str, bool] = {}
 
+        # Check every update before fetching or sending anything, so one bad
+        # item cannot fail the batch halfway.
         for update in updates:
-            task_id = update.get("task_id")
-            project_id = update.get("project_id")
-
-            if not task_id or not project_id:
+            if not update.get("task_id") or not update.get("project_id"):
                 raise TickTickAPIError(
                     "Each update requires 'task_id' and 'project_id'",
                     details={"update": update},
                 )
+            if update.get("clear_dates"):
+                conflicts = [
+                    field
+                    for field in ("start_date", "due_date", "recurrence")
+                    if update.get(field) is not None
+                ]
+                if conflicts:
+                    raise TickTickAPIError(
+                        f"Task {update['task_id']}: clear_dates removes the "
+                        f"dates, so it cannot be combined with "
+                        f"{', '.join(conflicts)}. Send either clear_dates or "
+                        "the new values.",
+                        details={"task_id": update["task_id"], "fields": conflicts},
+                    )
+
+        for update in updates:
+            task_id = update["task_id"]
+            project_id = update["project_id"]
 
             # Pre-fetch so we can send the full task representation. Without
             # this, fields not in the delta would be wiped server-side.
@@ -1592,10 +1621,26 @@ class UnifiedTickTickAPI:
             # written in, so TickTick and the app read the date back the same way.
             if wrote_date and not Task.zone_or_none(existing.time_zone):
                 existing.time_zone = zone
+            if update.get("clear_dates"):
+                # None dates go out as "" (see Task.to_v2_dict), which clears
+                # them. Both must go: TickTick fills a removed due date back in
+                # from the start date. The all-day flag and the zone stay, as
+                # when the app clears a date (seen live 2026-11-05).
+                existing.start_date = None
+                existing.due_date = None
+                # A repeat rule needs a start date, so it goes too. An empty
+                # string (not None) is sent as repeatFlag "", which clears it.
+                if existing.repeat_flag:
+                    existing.repeat_flag = ""
+                    removed_repeat_by_id[task_id] = True
             if "tags" in update and update["tags"] is not None:
                 existing.tags = update["tags"]
             if "recurrence" in update and update["recurrence"] is not None:
                 existing.repeat_flag = update["recurrence"]
+            if "reminders" in update and update["reminders"] is not None:
+                existing.reminders = [
+                    TaskReminder(trigger=trigger) for trigger in update["reminders"]
+                ]
 
             v2_update = existing.to_v2_dict(for_update=True)
 
@@ -1613,6 +1658,7 @@ class UnifiedTickTickAPI:
         # call. Underscore-prefixed like the other derived keys in this codebase.
         if isinstance(response, dict):
             response["_in_trash"] = in_trash_by_id
+            response["_removed_repeat"] = removed_repeat_by_id
         return response
 
     async def batch_delete_tasks(
