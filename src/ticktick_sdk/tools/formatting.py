@@ -593,7 +593,9 @@ def format_task_json(
         "tags": task.tags,
         "is_all_day": task.is_all_day,
         "time_zone": task.time_zone,
-        "repeat_flag": task.repeat_flag,
+        # TickTick returns "" after a rule is removed. Show it as null, like
+        # a task that never had a rule.
+        "repeat_flag": task.repeat_flag or None,
         "reminders": [r.trigger for r in task.reminders],
         "parent_id": task.parent_id,
         "children": children,

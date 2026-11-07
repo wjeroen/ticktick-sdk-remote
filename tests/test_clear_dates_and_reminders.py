@@ -254,6 +254,17 @@ class TestUpdateTool:
         assert "_removed_repeat" not in data["response"]
 
 
+class TestRemovedRuleDisplay:
+    def test_empty_rule_shows_as_null(self):
+        """TickTick returns repeatFlag "" after a rule is removed (seen live
+        2026-11-06)."""
+        assert format_task_json(_task(repeat_flag=""))["repeat_flag"] is None
+
+    def test_real_rule_is_unchanged(self):
+        task = _task(repeat_flag="RRULE:FREQ=DAILY")
+        assert format_task_json(task)["repeat_flag"] == "RRULE:FREQ=DAILY"
+
+
 class TestReminderDisplay:
     def test_json_lists_the_triggers(self):
         task = _task(reminders=[TaskReminder(id="r1", trigger="TRIGGER:-PT30M")])
