@@ -322,6 +322,67 @@ class TickTickV1Client(BaseTickTickClient):
         endpoint = f"/project/{project_id}/task/{task_id}/complete"
         await self._post(endpoint)
 
+    async def complete_tasks(self, project_id: str, task_ids: list[str]) -> list[str]:
+        """
+        Mark up to 50 tasks in one project as complete.
+
+        TickTick moves a recurring task to its next occurrence itself: the
+        same id stays active with new dates, and the finished occurrence
+        becomes a new completed task with a new id.
+
+        Args:
+            project_id: Project identifier
+            task_ids: Task identifiers (TickTick processes the first 50)
+
+        Returns:
+            The IDs TickTick completed. An ID it could not complete is left out.
+        """
+        return await self._post_json(
+            "/task/completeTasks",
+            json_data={"projectId": project_id, "taskIds": task_ids},
+        )
+
+    async def batch_update_tasks(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
+        """
+        Update up to 50 tasks in one call.
+
+        Unlike the V2 batch endpoint, fields left out of an update keep their
+        value, so `{id, projectId, status}` changes only the status.
+
+        Args:
+            updates: Task updates, each with at least `id` and `projectId`
+
+        Returns:
+            Response with `id2etag` and `id2error`
+        """
+        return await self._post_json("/task/batch", json_data={"update": updates})
+
+    async def get_completed_tasks(
+        self,
+        project_ids: list[str],
+        start_date: str,
+        end_date: str,
+    ) -> list[dict[str, Any]]:
+        """
+        List up to 200 completed tasks by completion time.
+
+        Args:
+            project_ids: Project identifiers
+            start_date: Start of the range (inclusive)
+            end_date: End of the range (inclusive)
+
+        Returns:
+            Completed tasks
+        """
+        return await self._post_json(
+            "/task/completed",
+            json_data={
+                "projectIds": project_ids,
+                "startDate": start_date,
+                "endDate": end_date,
+            },
+        )
+
     async def delete_task(self, project_id: str, task_id: str) -> None:
         """
         Delete a task.

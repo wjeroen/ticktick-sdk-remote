@@ -46,6 +46,7 @@ TOOL_MODULES = {
         "ticktick_list_tasks",
         "ticktick_update_tasks",
         "ticktick_complete_tasks",
+        "ticktick_abandon_tasks",
         "ticktick_delete_tasks",
         "ticktick_move_tasks",
         "ticktick_set_task_parents",

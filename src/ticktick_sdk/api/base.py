@@ -174,7 +174,7 @@ class BaseTickTickClient(ABC):
         """
         if self.api_version == APIVersion.V1:
             return (
-                f"TickTick V1 (OAuth) authentication failed at {endpoint} — the "
+                f"TickTick V1 (OAuth) authentication failed at {endpoint}. The "
                 "TICKTICK_ACCESS_TOKEN has likely expired or been revoked. The "
                 "person hosting this server needs to mint a new token "
                 "(`ticktick-sdk auth`), update TICKTICK_ACCESS_TOKEN in the "
@@ -183,7 +183,7 @@ class BaseTickTickClient(ABC):
                 f"(TickTick said: {raw_message})"
             )
         return (
-            f"TickTick V2 (session) authentication failed at {endpoint} — the "
+            f"TickTick V2 (session) authentication failed at {endpoint}. The "
             "session has expired or been invalidated. The person hosting this "
             "server needs to refresh the TICKTICK_V2_COOKIES env var from a "
             "logged-in TickTick browser tab (see the README section 'Grabbing "
