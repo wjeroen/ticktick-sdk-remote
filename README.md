@@ -227,6 +227,8 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 - [x] `complete_tasks` keeps every field and moves a repeating task to its next occurrence, as in the app. It used to wipe the start date, due date and repeat rule of every task it completed, which ended repeating series. Completion now goes through TickTick's official `completeTasks` call, which also works when V2 is down
 - [x] New `ticktick_abandon_tasks` for the app's "Won't Do". A repeating task keeps its series, and only the current occurrence is abandoned
 - [x] `complete_tasks`, `abandon_tasks`, `delete_tasks`, `move_tasks`, `set_task_parents` and `unparent_tasks` honor `response_format=json` (they used to accept it and reply in text)
+- [x] `update_tasks` can remove a task's dates: `clear_dates: true` works like Clear in the app's date picker, and TickTick then drops the reminders itself. A repeating task also loses its repeat rule, because a repeat needs a date, and the reply names those tasks. Before, `''` was rejected as an unreadable date and `null` was ignored, so a date could only be removed in the app
+- [x] Task reminders are visible and editable: `get_task` shows them (markdown and JSON), list and search JSON include them when set, and `update_tasks` accepts `reminders` (replaces them, `[]` removes all). Before, reminders could only be set at create time and no tool showed them
 - [x] `pin_tasks` no longer wipes dates and other fields. The V2 endpoint replaces the whole task, so pin/unpin now re-sends the full task, the same way TickTick's own web client does
 - [x] Batch operations validate that target task and parent IDs exist instead of silently reporting success on wrong IDs
 - [x] `batch_update_tasks` no longer wipes `repeat_flag` / `is_all_day` / `time_zone` on sparse partial updates
@@ -251,7 +253,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 | `ticktick_create_tasks` | Create 1-50 tasks with titles, dates, tags, etc. |
 | `ticktick_get_task` | Get task details by ID |
 | `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter; `project_id` / `tag` / `priority` / `kind` filters work on **every** status; `due_before` / `due_after` for date ranges, combine both for a range; optional `sort`). **Paginated**: pass `offset` to continue; `total` is the true count. |
-| `ticktick_update_tasks` | Update 1-100 tasks (includes column assignment) |
+| `ticktick_update_tasks` | Update 1-100 tasks (includes column assignment, reminders, and `clear_dates` to remove the dates) |
 | `ticktick_complete_tasks` | Complete 1-100 tasks. A repeating task moves to its next date, as in the app |
 | `ticktick_abandon_tasks` | Abandon 1-100 tasks ("Won't Do"). A repeating task keeps its series |
 | `ticktick_delete_tasks` | Delete 1-100 tasks (moves to trash) |

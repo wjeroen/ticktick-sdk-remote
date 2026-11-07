@@ -1255,10 +1255,10 @@ async def ticktick_update_tasks(params: UpdateTasksInput, ctx: Context) -> str:
                   and floating tasks are read in their own zone, others in
                   TICKTICK_TIMEZONE, unless time_zone is given in the same update.
                 - clear_dates (bool): true removes the start and due date, like
-                  Clear in the app's date picker. A repeating task also loses its
-                  repeat rule, because a repeat needs a date. Do not combine with
-                  start_date, due_date or recurrence. Sending '' as a date is
-                  rejected.
+                  Clear in the app's date picker. TickTick then drops the
+                  reminders itself. A repeating task also loses its repeat rule,
+                  because a repeat needs a date. Do not combine with start_date,
+                  due_date or recurrence. Sending '' as a date is rejected.
                 - time_zone (str): IANA timezone (e.g., 'America/New_York')
                 - all_day (bool): Whether task is all-day
                 - tags (list[str]): New tags (replaces existing tags)

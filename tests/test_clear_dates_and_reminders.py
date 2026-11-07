@@ -103,6 +103,8 @@ class TestClearDates:
         assert response["_removed_repeat"] == {}
 
     async def test_reminders_are_sent_unchanged(self):
+        """TickTick drops them itself once the task has no date (checked live
+        2026-11-06), so the server leaves them alone."""
         api, batch = _make_api(_task(reminders=[TaskReminder(id="r1", trigger="TRIGGER:P0DT9H0M0S")]))
         await api.batch_update_tasks([
             {"task_id": TASK_ID, "project_id": PROJ, "clear_dates": True}

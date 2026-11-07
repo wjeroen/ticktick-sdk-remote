@@ -1512,8 +1512,9 @@ class UnifiedTickTickAPI:
                 - priority: New priority (0, 1, 3, 5 or 'none', 'low', 'medium', 'high')
                 - start_date: New start date (datetime or ISO string)
                 - due_date: New due date (datetime or ISO string)
-                - clear_dates: True removes both dates. A repeating task also
-                  loses its repeat rule, because a repeat needs a date.
+                - clear_dates: True removes both dates (TickTick then drops the
+                  reminders itself). A repeating task also loses its repeat
+                  rule, because a repeat needs a date.
                   Cannot be combined with start_date, due_date or recurrence.
                 - time_zone: New timezone
                 - all_day: All-day flag
@@ -1625,7 +1626,9 @@ class UnifiedTickTickAPI:
                 # None dates go out as "" (see Task.to_v2_dict), which clears
                 # them. Both must go: TickTick fills a removed due date back in
                 # from the start date. The all-day flag and the zone stay, as
-                # when the app clears a date (seen live 2026-11-05).
+                # when the app clears a date (seen live 2026-11-05). Reminders
+                # are sent unchanged: TickTick drops them itself once the task
+                # has no date (checked live 2026-11-06).
                 existing.start_date = None
                 existing.due_date = None
                 # A repeat rule needs a start date, so it goes too. An empty

@@ -285,9 +285,10 @@ class TaskUpdateItem(BaseModel):
         default=None,
         description=(
             "true removes the task's start and due date, like Clear in the "
-            "app's date picker. A repeat rule needs a date, so a repeating "
-            "task also loses its repeat rule, and the response says so. Do not "
-            "combine with start_date, due_date or recurrence."
+            "app's date picker. TickTick then drops the task's reminders "
+            "itself. A repeat rule needs a date, so a repeating task also "
+            "loses its repeat rule, and the response says so. Do not combine "
+            "with start_date, due_date or recurrence."
         ),
     )
     all_day: Optional[bool] = Field(

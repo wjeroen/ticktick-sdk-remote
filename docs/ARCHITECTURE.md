@@ -661,9 +661,10 @@ zone for wall-clock tasks with a valid zone, else `default_tz`),
 - For **creates** (`for_update=False`), `None` date fields are *omitted*.
 - For **updates** (`for_update=True`), `None` `start_date`/`due_date` are sent as
   `""` (explicitly clear), `None` `pinned_time` is sent as `None` (clear pinned),
-  and empty `tags` is sent as `[]` (clear tags). This is what makes
-  "clear the date" / "remove tags" possible given V2's replace-not-patch
-  behavior.
+  and empty `tags` / `reminders` are sent as `[]` (clear them). This is what
+  makes "clear the date" / "remove tags" / "remove reminders" possible given
+  V2's replace-not-patch behavior. A `repeat_flag` of `""` (not `None`) is sent
+  as `repeatFlag: ""`, which removes the rule.
 - The **recurrence anchors** (`repeatFrom`/`repeatFirstDate`/`repeatTaskId`/
   `exDate`) are round-tripped whenever present. They must be, because V2's
   `/batch/task` resets any field absent from the body — drop the anchors and
@@ -917,7 +918,13 @@ short operator-facing version).
 
 4. **Clearing a due date needs both dates cleared.** If you clear `due_date` but
    leave `start_date`, TickTick restores `due_date` from `start_date`. Clear
-   both. (`to_v2_dict(for_update=True)` sends `""` for cleared dates.)
+   both. (`to_v2_dict(for_update=True)` sends `""` for cleared dates.) The
+   `update_tasks` option `clear_dates` does this, like Clear in the app's date
+   picker. Checked live on 2026-11-06: TickTick drops the task's reminders by
+   itself once both dates are `""`, even though the payload still lists them.
+   The all-day flag and `timeZone` stay, as when the app clears a date. A
+   repeat rule needs a start date (quirk 1), so `clear_dates` also sends
+   `repeatFlag: ""`, which removes it, and the tool reply names those tasks.
 
 5. **Tag order is not preserved.** The API may return a task's tags in any order;
    nothing here relies on ordering.
@@ -1295,6 +1302,20 @@ search, still `in_trash: true`). So TickTick does *not* un-delete a task just
 because the update payload omits `deleted`, and the earlier "V2 resets omitted
 fields" reasoning does not extend to the trash flag. Updates on trashed tasks are
 kept working on purpose and leave them trashed.
+
+**Removing dates and editing reminders (`update_tasks`).** `clear_dates: true`
+sets both dates to `None` on the pre-fetched task, which `to_v2_dict` sends as
+`""` (quirk 4). It cannot be combined with `start_date`, `due_date` or
+`recurrence`, and every item is checked before anything is fetched or sent, so
+one bad item cannot fail the batch halfway. `""` as a date is still rejected as
+unreadable, and the error points to `clear_dates`. When the task had a repeat
+rule, `batch_update_tasks` records it in `_removed_repeat` (a derived key like
+`_in_trash`), and the tool reply names those tasks (JSON `removed_repeat: true`
+per task). `reminders` replaces the task's reminders, and `[]` removes them all
+(`to_v2_dict` sends `[]` on updates). A title-only update keeps the reminders
+(checked live 2026-11-06). The read tools show reminders as their raw iCal
+triggers: markdown detail has a "Reminders" line, JSON has a `reminders` list,
+which list and search views drop when empty.
 
 **Per-task content cap in list views.** Task notes can be huge, so JSON *list*
 views truncate `content` to `LIST_CONTENT_MAX_CHARS = 1000`, set
