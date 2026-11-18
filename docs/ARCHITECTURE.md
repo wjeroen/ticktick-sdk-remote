@@ -1029,21 +1029,36 @@ short operator-facing version).
 13. **Subtasks when a parent closes.** TickTick's server leaves subtasks as
     they are on both APIs. Live: completing a parent left its open subtask open
     (2026-11-01), and when a weekly parent moved to its next date, its
-    completed subtask stayed completed (2026-11-18). The app does both jobs
-    itself: it closes the open subtasks with their parent, and it opens every
-    subtask again for a repeating parent's next date. So `batch_complete_tasks`
-    and `batch_abandon_tasks` do the same. `_open_subtasks` collects the open
-    subtasks of each non-repeating task before anything is written, and they
-    close in the same V1 calls as their parent. After a repeating task moved
-    on, `_reopen_subtasks` reopens its closed subtasks through V2. Both walk
-    the tree through `_subtask_tree`: each parent's `child_ids` (which list
-    closed subtasks too), one `get_task` per subtask, so a task without
-    subtasks costs no extra call. A child whose own `parent_id` points
-    elsewhere (a stale id) and a trashed child are left out with everything
-    below them. A repeating subtask under a closing parent is left alone with
-    its own subtasks, because closing it would only move it on. Only V2 links
-    subtasks to parents, so with V2 down, or when a read fails, the named tasks
-    still close and the reply names them under `subtasks_unchecked`.
+    completed subtask stayed completed (2026-11-18). The app does this work
+    itself. On the Weekly review (2026-11-18), every occurrence closed in the
+    app has closed copies of the subtasks (new ids, made with the occurrence)
+    under its closed copy, while the series keeps the same subtasks for years
+    and opens them again. `batch_complete_tasks` and `batch_abandon_tasks` do
+    the same, with one difference: a closed subtask keeps its own status.
+    Jeroen reports that the app sometimes turns abandoned subtasks into
+    completed ones when their parent completes.
+
+    - **Non-repeating task:** `_open_subtasks` collects its open subtasks, and
+      theirs, before anything is written. They close in the same V1 calls as
+      their parent.
+    - **Repeating task:** after it moved on, `_finished_copies` looks up the
+      closed copy of the finished occurrence, only when the series has
+      subtasks (`_find_completed_copies`). `_copy_subtasks` gives that copy
+      closed copies of the subtasks, nested the same way: an open subtask's
+      copy gets the parent's new status, a closed one keeps its own. The copy
+      V1 made lists the series' subtasks in its own `childIds` too, so its
+      `childIds` are then set to its own subtask copies. Last,
+      `_renew_subtasks` reopens the closed subtasks of the series. When no
+      copy is found or a step fails, nothing is reopened, so no status is
+      lost, and the reply names the task under `subtasks_unchecked`.
+
+    Both walk the tree through `_subtask_tree`: each parent's `child_ids`
+    (which list closed subtasks too), one `get_task` per subtask, so a task
+    without subtasks costs no extra call. A child whose own `parent_id` points
+    elsewhere (a stale id), a trashed child, and a repeating subtask are left
+    out with everything below them. Only V2 links subtasks to parents, so with
+    V2 down, or when a read fails, the named tasks still close and the reply
+    names them under `subtasks_unchecked`.
 
 14. **Reopening a task.** `batch_reopen_tasks` sends the full task through V2
     with status `0`, so every field stays (live 2026-11-18: dates, all-day

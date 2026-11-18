@@ -226,7 +226,7 @@ Summarized changes since [dev-mirzabicer/ticktick-sdk](https://github.com/dev-mi
 - [x] Completed and abandoned listings count `from_date` / `to_date` as days in `TICKTICK_TIMEZONE`. TickTick reads the range as UTC, so in San Francisco a task completed after 16:00 used to count for the next day
 - [x] `complete_tasks` keeps every field and moves a repeating task to its next occurrence, as in the app. It used to wipe the start date, due date and repeat rule of every task it completed, which ended repeating series. Completion now goes through TickTick's official `completeTasks` call, which also works when V2 is down
 - [x] New `ticktick_abandon_tasks` for the app's "Won't Do". A repeating task keeps its series, and only the current occurrence is abandoned
-- [x] Completing or abandoning a task also closes its open subtasks, and a repeating task gets all its subtasks open again for its next date, as in the app. TickTick's server does neither by itself, so a parent closed through the MCP used to leave its subtasks open
+- [x] Completing or abandoning a task also closes its open subtasks, while closed subtasks keep their own status (so an abandoned subtask never turns completed). A repeating task's finished occurrence keeps closed copies of its subtasks, and the subtasks open again for its next date, as in the app. TickTick's server does none of this by itself, so a parent closed through the MCP used to leave its subtasks open
 - [x] New `ticktick_reopen_tasks` makes completed or abandoned tasks active again, like unchecking them in the app
 - [x] `complete_tasks`, `abandon_tasks`, `delete_tasks`, `move_tasks`, `set_task_parents` and `unparent_tasks` honor `response_format=json` (they used to accept it and reply in text)
 - [x] `update_tasks` can remove a task's dates: `clear_dates: true` works like Clear in the app's date picker, and TickTick then drops the reminders itself. A repeating task also loses its repeat rule, because a repeat needs a date, and the reply names those tasks. Before, `''` was rejected as an unreadable date and `null` was ignored, so a date could only be removed in the app
@@ -256,7 +256,7 @@ All mutation tools accept lists for batch operations (1-100 items).
 | `ticktick_get_task` | Get task details by ID |
 | `ticktick_list_tasks` | List tasks (active/completed/abandoned/deleted via status filter; `project_id` / `tag` / `priority` / `kind` filters work on **every** status; `due_before` / `due_after` for date ranges, combine both for a range; optional `sort`). **Paginated**: pass `offset` to continue; `total` is the true count. |
 | `ticktick_update_tasks` | Update 1-100 tasks (includes column assignment, reminders, and `clear_dates` to remove the dates) |
-| `ticktick_complete_tasks` | Complete 1-100 tasks and their open subtasks. A repeating task moves to its next date with all its subtasks open again, as in the app |
+| `ticktick_complete_tasks` | Complete 1-100 tasks and their open subtasks. A repeating task moves to its next date: its finished occurrence keeps closed copies of the subtasks, and the subtasks open again |
 | `ticktick_abandon_tasks` | Abandon 1-100 tasks ("Won't Do") and their open subtasks. A repeating task keeps its series |
 | `ticktick_reopen_tasks` | Reopen 1-100 completed or abandoned tasks, like unchecking them in the app. Subtasks stay as they are |
 | `ticktick_delete_tasks` | Delete 1-100 tasks (moves to trash) |
