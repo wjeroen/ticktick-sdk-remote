@@ -1800,6 +1800,10 @@ class UnifiedTickTickAPI:
             # kanban column.
             if task.column_id:
                 update["columnId"] = task.column_id
+            # TickTick keeps the old completion time when the field is left
+            # out (live 2026-11-18), so an open task sends null.
+            if completed_time is None:
+                update["completedTime"] = None
             updates.append(update)
 
         response = await self._v2_client.batch_tasks(update=updates)  # type: ignore
