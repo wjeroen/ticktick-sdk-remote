@@ -455,6 +455,11 @@ async def build_child_meta_for_task(
     trash flag have to travel with it: without them a completed or trashed
     subtask reads as active.
 
+    It also takes out of ``task.child_ids`` every child whose own parent is
+    another task. The finished copy TickTick makes of a repeating task lists
+    the series' subtasks as its own (live 2026-11-18), so without this the
+    copy of a past week shows next week's open subtasks.
+
     Returns None when the task has no children. Failed fetches are skipped
     silently, the formatter will fall back to bare IDs for those.
     """
@@ -466,10 +471,15 @@ async def build_child_meta_for_task(
         return_exceptions=True,
     )
     meta: dict[str, dict[str, Any]] = {}
+    other_parent: set[str] = set()
     for cid, child in zip(task.child_ids, results):
         if isinstance(child, Exception):
             continue
+        if child.parent_id and child.parent_id != task.id:
+            other_parent.add(cid)
+            continue
         meta[cid] = child_meta_entry(child)
+    task.child_ids = [cid for cid in task.child_ids if cid not in other_parent]
     return meta
 
 

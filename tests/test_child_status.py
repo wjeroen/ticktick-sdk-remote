@@ -118,6 +118,22 @@ async def test_get_task_markdown_flags_abandoned_child():
     assert _child_line(out, DROPPED_CHILD) == f"  - [LOW] [ABANDONED] Old idea (`{DROPPED_CHILD}`)"
 
 
+async def test_get_task_leaves_out_children_of_another_parent():
+    """The finished copy TickTick makes of a repeating task lists the series'
+    subtasks as its own (live 2026-11-18). They belong to next week."""
+    next_week = "6" * 24
+    tasks = _family()
+    tasks[next_week] = Task(id=next_week, project_id=PROJ, title="Next week's step",
+                            status=0, parent_id="7" * 24)
+    tasks[PARENT].child_ids.append(next_week)
+    client = FakeClient(tasks)
+    out = await server.ticktick_get_task(
+        TaskGetInput(task_id=PARENT, project_id=PROJ), _ctx(client)
+    )
+    assert next_week not in out
+    assert _child_line(out, OPEN_CHILD) == f"  - [HIGH] Book a room (`{OPEN_CHILD}`)"
+
+
 async def test_get_task_json_children_carry_status():
     client = FakeClient(_family(with_abandoned=True))
     out = await server.ticktick_get_task(

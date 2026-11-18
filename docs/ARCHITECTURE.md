@@ -1048,9 +1048,11 @@ short operator-facing version).
       copy gets the parent's new status, a closed one keeps its own. Last,
       `_renew_subtasks` reopens the closed subtasks of the series. The copy
       V1 made also lists the series' subtasks in its `childIds`, and
-      TickTick ignores `childIds` in an update (both live 2026-11-18), so
-      `get_task` on that copy shows the series' subtasks next to its own
-      copies. The app's copies list only their own. When no
+      TickTick ignores `childIds` in an update (both live 2026-11-18). So
+      `build_child_meta_for_task` leaves every child whose own `parent_id`
+      is another task out of `get_task`, and the copy shows only its own
+      subtask copies there. List views still count those children in
+      `total_children`. When no
       copy is found or a step fails, nothing is reopened, so no status is
       lost, and the reply names the task under `subtasks_unchecked`.
 
