@@ -829,7 +829,13 @@ class MockUnifiedAPI:
             task.status = TaskStatus.COMPLETED
             task.completed_time = utc_now()
             completed.append(task_id)
-        return {"completed": completed, "already_completed": [], "next_occurrences": []}
+        return {
+            "completed": completed,
+            "already_completed": [],
+            "next_occurrences": [],
+            "subtasks_completed": [],
+            "subtasks_reopened": [],
+        }
 
     async def batch_abandon_tasks(
         self,
@@ -856,7 +862,34 @@ class MockUnifiedAPI:
             "already_abandoned": [],
             "completed_instead": [],
             "next_occurrences": [],
+            "subtasks_abandoned": [],
+            "subtasks_reopened": [],
         }
+
+    async def batch_reopen_tasks(
+        self,
+        task_ids: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        """Mock batch reopen tasks (mirrors production existence check)."""
+        self._record_call("batch_reopen_tasks", (task_ids,), {})
+        self._check_failure("batch_reopen_tasks")
+
+        from ticktick_sdk.exceptions import TickTickNotFoundError
+
+        for task_id in {tid for tid, _ in task_ids}:
+            if task_id not in self.tasks:
+                raise TickTickNotFoundError(f"Task not found: {task_id}")
+
+        reopened, already_open = [], []
+        for task_id in dict.fromkeys(tid for tid, _ in task_ids):
+            task = self.tasks[task_id]
+            if TaskStatus.is_closed(task.status):
+                task.status = TaskStatus.ACTIVE
+                task.completed_time = None
+                reopened.append(task_id)
+            else:
+                already_open.append(task_id)
+        return {"reopened": reopened, "already_open": already_open}
 
     async def batch_delete_tasks(
         self,

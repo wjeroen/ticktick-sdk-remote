@@ -394,6 +394,21 @@ class AbandonTasksInput(BaseMCPInput):
     )
 
 
+class ReopenTasksInput(BaseMCPInput):
+    """Reopen one or more completed or abandoned tasks."""
+
+    tasks: List[TaskIdentifier] = Field(
+        ...,
+        description="Completed or abandoned tasks to make active again (1-100)",
+        min_length=1,
+        max_length=100,
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format",
+    )
+
+
 class DeleteTasksInput(BaseMCPInput):
     """Delete one or more tasks (moves to trash)."""
 

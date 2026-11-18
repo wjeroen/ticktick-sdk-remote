@@ -123,6 +123,7 @@ from ticktick_sdk.tools.inputs import (
     UpdateTasksInput,
     CompleteTasksInput,
     AbandonTasksInput,
+    ReopenTasksInput,
     DeleteTasksInput,
     MoveTasksInput,
     SetTaskParentsInput,
@@ -496,32 +497,53 @@ def _closed_tasks_summary(
     *,
     already: list[str],
     completed_instead: list[str] | None = None,
+    subtasks: list[str] | None = None,
+    reopened: list[str] | None = None,
+    unchecked: list[str] | None = None,
 ) -> str:
     """Sentence-style result of ticktick_complete_tasks / ticktick_abandon_tasks.
 
     `state` is what the tasks became ("complete" or "abandoned").
     """
+    def ids(task_ids: list[str]) -> str:
+        return ", ".join(f"`{tid}`" for tid in task_ids)
+
     lines: list[str] = []
     if len(task_ids) == 1:
         lines.append(f"Task `{task_ids[0]}` marked as {state}.")
     elif task_ids:
         lines.append(f"{len(task_ids)} tasks marked as {state}.")
     if already:
-        ids = ", ".join(f"`{tid}`" for tid in already)
-        lines.append(f"Already {state}, left as they were: {ids}.")
+        lines.append(f"Already {state}, left as they were: {ids(already)}.")
     if completed_instead:
-        ids = ", ".join(f"`{tid}`" for tid in completed_instead)
         lines.append(
-            f"Could not mark the current occurrence of {ids} as abandoned, so "
-            "it stays completed. Its series did move on."
+            f"Could not mark the current occurrence of {ids(completed_instead)} "
+            "as abandoned, so it stays completed. Its series did move on."
         )
+    if subtasks:
+        lines.append(f"Open subtasks marked as {state} too, as in the app: {ids(subtasks)}.")
     if next_occurrences:
         lines.append("Repeating, so the same id stays active on its next date:")
         lines.extend(
             f"- `{t.id}`: {format_task_date(t, t.due_date or t.start_date, USER_TIMEZONE)}"
             for t in next_occurrences
         )
+    if reopened:
+        lines.append(f"Subtasks open again for the next date, as in the app: {ids(reopened)}.")
+    if unchecked:
+        lines.append(
+            f"Could not check the subtasks of {ids(unchecked)}. "
+            "Check them with ticktick_get_task."
+        )
     return "\n".join(lines)
+
+
+def _subtask_fields(result: dict[str, Any], key: str) -> dict[str, Any]:
+    """The subtask part of a complete or abandon JSON reply."""
+    fields = {key: result[key], "subtasks_reopened": result["subtasks_reopened"]}
+    if result.get("subtasks_unchecked"):
+        fields["subtasks_unchecked"] = result["subtasks_unchecked"]
+    return fields
 
 
 async def build_project_name_for_task(
@@ -1419,6 +1441,11 @@ async def ticktick_complete_tasks(params: CompleteTasksInput, ctx: Context) -> s
     becomes a new completed task with a new id, and this task (same id) stays
     active and moves to its next date, which the response names.
 
+    Subtasks also behave as in the app. The open subtasks of a task, and
+    theirs, are completed too, and the response names them. A repeating task
+    keeps its subtasks for its next date, so they all become open again. A
+    repeating subtask is left as it is. Undo with ticktick_reopen_tasks.
+
     Args:
         params: Completion parameters:
             - tasks (list, required): List of task identifiers (1-100 tasks)
@@ -1449,10 +1476,14 @@ async def ticktick_complete_tasks(params: CompleteTasksInput, ctx: Context) -> s
                 completed=result["completed"],
                 already_completed=result["already_completed"],
                 next_occurrences=_next_occurrences_json(result["next_occurrences"]),
+                **_subtask_fields(result, "subtasks_completed"),
             )
         return success_message(_closed_tasks_summary(
             result["completed"], "complete", result["next_occurrences"],
             already=result["already_completed"],
+            subtasks=result["subtasks_completed"],
+            reopened=result["subtasks_reopened"],
+            unchecked=result.get("subtasks_unchecked"),
         ))
 
     except Exception as e:
@@ -1484,6 +1515,11 @@ async def ticktick_abandon_tasks(params: AbandonTasksInput, ctx: Context) -> str
     response names. In the rare case that the occurrence cannot be changed, it
     stays completed, and the response says so.
 
+    Subtasks also behave as in the app. The open subtasks of a task, and
+    theirs, are abandoned too, and the response names them. A repeating task
+    keeps its subtasks for its next date, so they all become open again. A
+    repeating subtask is left as it is. Undo with ticktick_reopen_tasks.
+
     Args:
         params: Abandon parameters:
             - tasks (list, required): List of task identifiers (1-100 tasks)
@@ -1510,11 +1546,15 @@ async def ticktick_abandon_tasks(params: AbandonTasksInput, ctx: Context) -> str
                 "already_abandoned": result["already_abandoned"],
                 "completed_instead": result["completed_instead"],
                 "next_occurrences": _next_occurrences_json(result["next_occurrences"]),
+                **_subtask_fields(result, "subtasks_abandoned"),
             }, separators=(",", ":"))
         summary = _closed_tasks_summary(
             result["abandoned"], "abandoned", result["next_occurrences"],
             already=result["already_abandoned"],
             completed_instead=result["completed_instead"],
+            subtasks=result["subtasks_abandoned"],
+            reopened=result["subtasks_reopened"],
+            unchecked=result.get("subtasks_unchecked"),
         )
         if result["completed_instead"]:
             return f"**Partly done**: {summary}"
@@ -1522,6 +1562,70 @@ async def ticktick_abandon_tasks(params: AbandonTasksInput, ctx: Context) -> str
 
     except Exception as e:
         return handle_error(e, "abandon_tasks")
+
+
+@mcp.tool(
+    name="ticktick_reopen_tasks",
+    annotations={
+        "title": "Reopen Tasks",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def ticktick_reopen_tasks(params: ReopenTasksInput, ctx: Context) -> str:
+    """
+    Reopen completed or abandoned tasks, like unchecking them in the TickTick app.
+
+    The task becomes active again. Its dates and every other field stay as
+    they were, and its completion time is removed. Its subtasks stay as they
+    are, so name them too when they should reopen. Supports batch reopening
+    (1-100 tasks). Find closed tasks with ticktick_list_tasks and
+    status="completed" or status="abandoned".
+
+    A repeating task: completing or abandoning it made a closed copy with a
+    new id, and the series (the original id) moved to its next date.
+    Reopening the copy makes it a normal open task, and the series stays on
+    its next date. A task in the trash stays in the trash.
+
+    Args:
+        params: Reopen parameters:
+            - tasks (list, required): List of task identifiers (1-100 tasks)
+              Each task must contain:
+                - task_id (str): Task to reopen
+                - project_id (str): Project containing the task
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        Success confirmation or error message.
+
+    Examples:
+        Single task:
+            tasks=[{"task_id": "abc123", "project_id": "proj1"}]
+    """
+    try:
+        client = get_client(ctx)
+        task_ids = [(t.task_id, t.project_id) for t in params.tasks]
+        result = await client.reopen_tasks(task_ids)
+        if params.response_format == ResponseFormat.JSON:
+            return _json_outcome(
+                reopened=result["reopened"],
+                already_open=result["already_open"],
+            )
+        reopened = result["reopened"]
+        lines: list[str] = []
+        if len(reopened) == 1:
+            lines.append(f"Task `{reopened[0]}` reopened.")
+        elif reopened:
+            lines.append(f"{len(reopened)} tasks reopened.")
+        if result["already_open"]:
+            already = ", ".join(f"`{tid}`" for tid in result["already_open"])
+            lines.append(f"Already open, left as they were: {already}.")
+        return success_message("\n".join(lines))
+
+    except Exception as e:
+        return handle_error(e, "reopen_tasks")
 
 
 @mcp.tool(

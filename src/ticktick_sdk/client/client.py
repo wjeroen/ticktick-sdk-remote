@@ -692,13 +692,17 @@ class TickTickClient:
 
         A recurring task moves to its next occurrence: the same id stays
         active, and the finished occurrence becomes a new completed task.
+        Subtasks follow the app: open ones are completed too, and a recurring
+        task gets all its subtasks open again for its next date.
 
         Args:
             task_ids: List of (task_id, project_id) tuples
 
         Returns:
-            Dict with `completed` (IDs), `already_completed` (IDs) and
-            `next_occurrences` (recurring tasks with their new dates)
+            Dict with `completed` (IDs), `already_completed` (IDs),
+            `next_occurrences` (recurring tasks with their new dates),
+            `subtasks_completed` and `subtasks_reopened` (IDs), plus
+            `subtasks_unchecked` (IDs) when some subtasks could not be checked
         """
         return await self._api.batch_complete_tasks(task_ids)
 
@@ -710,7 +714,8 @@ class TickTickClient:
         Abandon ("won't do") one or more tasks.
 
         A recurring task moves to its next occurrence, and only the current
-        occurrence is abandoned.
+        occurrence is abandoned. Subtasks follow the app, as in
+        `complete_tasks`.
 
         Args:
             task_ids: List of (task_id, project_id) tuples
@@ -718,10 +723,28 @@ class TickTickClient:
         Returns:
             Dict with `abandoned` (IDs), `already_abandoned` (IDs),
             `completed_instead` (recurring task IDs whose occurrence stayed
-            completed) and `next_occurrences` (recurring tasks with their new
-            dates)
+            completed), `next_occurrences` (recurring tasks with their new
+            dates), `subtasks_abandoned` and `subtasks_reopened` (IDs), plus
+            `subtasks_unchecked` (IDs) when some subtasks could not be checked
         """
         return await self._api.batch_abandon_tasks(task_ids)
+
+    async def reopen_tasks(
+        self,
+        task_ids: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        """
+        Reopen completed or abandoned tasks, like unchecking them in the app.
+
+        Every other field stays, and subtasks stay as they are.
+
+        Args:
+            task_ids: List of (task_id, project_id) tuples
+
+        Returns:
+            Dict with `reopened` (IDs) and `already_open` (IDs)
+        """
+        return await self._api.batch_reopen_tasks(task_ids)
 
     async def move_tasks(
         self,
