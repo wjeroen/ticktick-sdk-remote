@@ -687,6 +687,8 @@ class TestSubtasksOfRepeatingTasks:
         assert c1_copy["parentId"] == finished
         assert c2_copy["parentId"] == finished
         assert g1_copy["parentId"] == c1_copy["id"]
+        assert tt.tasks[finished]["childIds"] == [c1_copy["id"], c2_copy["id"]]
+        assert tt.tasks[finished]["status"] == 2
         assert c2_copy["completedTime"] == "2026-10-30T10:00:00.000+0000"
         assert all("repeatFlag" not in t and "reminders" not in t for t in tt.added)
 
