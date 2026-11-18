@@ -835,6 +835,7 @@ class MockUnifiedAPI:
             "next_occurrences": [],
             "subtasks_completed": [],
             "subtasks_reopened": [],
+            "subtask_copies": [],
         }
 
     async def batch_abandon_tasks(
@@ -864,6 +865,7 @@ class MockUnifiedAPI:
             "next_occurrences": [],
             "subtasks_abandoned": [],
             "subtasks_reopened": [],
+            "subtask_copies": [],
         }
 
     async def batch_reopen_tasks(

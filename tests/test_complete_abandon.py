@@ -90,12 +90,14 @@ class FakeTickTick:
     def __init__(self, *tasks: dict, v1: bool = True, v2: bool = True):
         self.tasks = {t["id"]: dict(t) for t in tasks}
         self.next_copy = 0
+        self.next_add = 0
         self.hide_copies = False
 
         self.v2 = MagicMock()
         self.v2.is_authenticated = True
         self.v2.get_task = AsyncMock(side_effect=self._get_v2)
-        self.v2.batch_tasks = AsyncMock(side_effect=self._replace)
+        self.v2.batch_tasks = AsyncMock(side_effect=self._batch)
+        self.v2.set_task_parent = AsyncMock(side_effect=self._set_parent)
 
         self.v1 = MagicMock()
         self.v1.is_authenticated = True
@@ -150,11 +152,29 @@ class FakeTickTick:
             self.tasks[update["id"]].update(update)
         return {"id2etag": {u["id"]: "e" for u in updates}, "id2error": {}}
 
-    async def _replace(self, update: list[dict] | None = None, **_) -> dict:
-        """V2 /batch/task: the update REPLACES the stored task."""
+    async def _batch(self, add: list[dict] | None = None, update: list[dict] | None = None, **_) -> dict:
+        """V2 /batch/task: an add gets a new id, an update REPLACES the task."""
+        etags = {}
+        for task in add or []:
+            self.next_add += 1
+            new = {**task, "id": f"f{self.next_add:023x}"}
+            self.tasks[new["id"]] = new
+            etags[new["id"]] = "e"
         for task in update or []:
             self.tasks[task["id"]] = dict(task)
-        return {"id2etag": {t["id"]: "e" for t in update or []}, "id2error": {}}
+            etags[task["id"]] = "e"
+        return {"id2etag": etags, "id2error": {}}
+
+    async def _set_parent(self, task_id: str, project_id: str, parent_id: str) -> dict:
+        self.tasks[task_id]["parentId"] = parent_id
+        parent = self.tasks[parent_id]
+        parent["childIds"] = [*(parent.get("childIds") or []), task_id]
+        return {}
+
+    @property
+    def added(self) -> list[dict]:
+        """Tasks made through V2 adds, in order."""
+        return [t for t in self.tasks.values() if t["id"].startswith("f")]
 
     async def _list_completed(self, project_ids, start, end) -> list[dict]:
         if self.hide_copies:
@@ -208,6 +228,7 @@ class TestComplete:
             "next_occurrences": [],
             "subtasks_completed": [],
             "subtasks_reopened": [],
+            "subtask_copies": [],
         }
 
     async def test_recurring_task_reports_its_next_occurrence(self):
@@ -374,6 +395,7 @@ class TestAbandonNormal:
             "next_occurrences": [],
             "subtasks_abandoned": [],
             "subtasks_reopened": [],
+            "subtask_copies": [],
         }
 
     async def test_updates_go_in_chunks_of_fifty(self):
@@ -607,6 +629,20 @@ class TestSubtasksClose:
         assert result["already_completed"] == ["p"]
         assert result["subtasks_completed"] == ["c1", "g1"]
 
+    async def test_closed_subtasks_keep_their_own_status(self):
+        """The app bug to avoid: an abandoned subtask must not become completed."""
+        tt = FakeTickTick(
+            _raw("p", childIds=["a", "b", "o"]),
+            _sub("a", "p", status=-1),
+            _sub("b", "p", status=2),
+            _sub("o", "p"),
+        )
+        result = await tt.api.batch_complete_tasks([("p", PROJ)])
+        tt.v1.complete_tasks.assert_awaited_once_with(PROJ, ["p", "o"])
+        assert result["subtasks_completed"] == ["o"]
+        assert tt.tasks["a"]["status"] == -1
+        assert tt.tasks["b"]["status"] == 2
+
     async def test_abandon_abandons_open_subtasks(self):
         tt = _family()
         result = await tt.api.batch_abandon_tasks([("p", PROJ)])
@@ -633,23 +669,60 @@ class TestSubtasksClose:
 
 
 class TestSubtasksOfRepeatingTasks:
-    async def test_complete_opens_every_subtask_again_for_the_next_date(self):
+    async def test_complete_keeps_copies_and_opens_the_subtasks_again(self):
         """Live 2026-11-18: TickTick moved the weekly parent on and left the
-        done subtask done. The app opens it again, so the server does too."""
+        done subtask done. The app keeps closed copies under the finished
+        occurrence and opens the subtasks again, so the server does too."""
         tt = _family(parent_rule=DAILY)
         result = await tt.api.batch_complete_tasks([("p", PROJ)])
 
         tt.v1.complete_tasks.assert_awaited_once_with(PROJ, ["p"])
         assert result["next_occurrences"][0].id == "p"
         assert result["subtasks_completed"] == []
+        finished = tt.copies[0]["id"]
+        c1_copy, c2_copy, g1_copy = tt.added
+        assert result["subtask_copies"] == [c1_copy["id"], c2_copy["id"], g1_copy["id"]]
+        assert [t["title"] for t in tt.added] == ["Task c1", "Task c2", "Task g1"]
+        assert [t["status"] for t in tt.added] == [2, 2, 2]
+        assert c1_copy["parentId"] == finished
+        assert c2_copy["parentId"] == finished
+        assert g1_copy["parentId"] == c1_copy["id"]
+        assert c2_copy["completedTime"] == "2026-10-30T10:00:00.000+0000"
+        assert all("repeatFlag" not in t and "reminders" not in t for t in tt.added)
+
         assert result["subtasks_reopened"] == ["c2"]
-        sent = tt.v2.batch_tasks.call_args.kwargs["update"]
-        assert [u["id"] for u in sent] == ["c2"]
-        assert sent[0]["status"] == 0
-        assert "completedTime" not in sent[0]
-        assert sent[0]["parentId"] == "p"
+        assert tt.tasks["c2"]["status"] == 0
+        assert tt.tasks["c2"]["parentId"] == "p"
         assert tt.tasks["c1"]["status"] == 0
         assert tt.tasks["g1"]["status"] == 0
+
+    async def test_each_closed_subtask_keeps_its_own_status(self):
+        """The app turns an abandoned subtask into a completed one when the
+        parent is completed. Here it stays abandoned."""
+        tt = FakeTickTick(
+            _raw("p", rule=DAILY, childIds=["a", "b", "o"]),
+            _sub("a", "p", status=-1),
+            _sub("b", "p", status=2),
+            _sub("o", "p"),
+        )
+        result = await tt.api.batch_complete_tasks([("p", PROJ)])
+        assert [(t["title"], t["status"]) for t in tt.added] == [
+            ("Task a", -1), ("Task b", 2), ("Task o", 2),
+        ]
+        assert result["subtasks_reopened"] == ["a", "b"]
+
+    async def test_abandon_gives_open_subtasks_abandoned_copies(self):
+        tt = _family(parent_rule=DAILY)
+        result = await tt.api.batch_abandon_tasks([("p", PROJ)])
+        assert result["abandoned"] == ["p"]
+        assert result["subtasks_abandoned"] == []
+        assert [(t["title"], t["status"]) for t in tt.added] == [
+            ("Task c1", -1), ("Task c2", 2), ("Task g1", -1),
+        ]
+        assert tt.added[0]["parentId"] == tt.copies[0]["id"]
+        assert tt.copies[0]["status"] == -1
+        assert result["subtasks_reopened"] == ["c2"]
+        assert tt.tasks["c2"]["status"] == 0
 
     async def test_closed_subtasks_further_down_open_again_too(self):
         tt = FakeTickTick(
@@ -661,23 +734,27 @@ class TestSubtasksOfRepeatingTasks:
         assert result["subtasks_reopened"] == ["c", "g"]
         assert tt.tasks["c"]["status"] == 0
         assert tt.tasks["g"]["status"] == 0
+        assert tt.added[1]["parentId"] == tt.added[0]["id"]
 
-    async def test_trashed_subtask_stays_closed(self):
+    async def test_trashed_subtask_is_left_alone(self):
         tt = FakeTickTick(
             _raw("p", rule=DAILY, childIds=["c"]),
             _sub("c", "p", status=2, deleted=1),
         )
         result = await tt.api.batch_complete_tasks([("p", PROJ)])
         assert result["subtasks_reopened"] == []
+        assert result["subtask_copies"] == []
         tt.v2.batch_tasks.assert_not_called()
 
-    async def test_abandon_opens_every_subtask_again_too(self):
+    async def test_without_a_finished_copy_nothing_changes_and_it_says_so(self):
+        """Reopening without the copies would lose which subtasks were done."""
         tt = _family(parent_rule=DAILY)
-        result = await tt.api.batch_abandon_tasks([("p", PROJ)])
-        assert result["abandoned"] == ["p"]
-        assert result["subtasks_abandoned"] == []
-        assert result["subtasks_reopened"] == ["c2"]
-        assert tt.tasks["c2"]["status"] == 0
+        tt.hide_copies = True
+        result = await tt.api.batch_complete_tasks([("p", PROJ)])
+        assert result["subtasks_unchecked"] == ["p"]
+        assert result["subtask_copies"] == []
+        assert tt.tasks["c2"]["status"] == 2
+        tt.v2.batch_tasks.assert_not_called()
 
     async def test_a_failure_is_reported_not_raised(self):
         """The parent already moved on, so the call must still say so."""
@@ -688,6 +765,12 @@ class TestSubtasksOfRepeatingTasks:
         assert result["next_occurrences"][0].id == "p"
         assert result["subtasks_reopened"] == []
         assert result["subtasks_unchecked"] == ["p"]
+        assert tt.tasks["c2"]["status"] == 2
+
+    async def test_a_repeating_task_without_subtasks_costs_no_copy_lookup(self):
+        tt = FakeTickTick(_raw("r1", rule=DAILY))
+        await tt.api.batch_complete_tasks([("r1", PROJ)])
+        tt.v1.get_completed_tasks.assert_not_called()
 
 
 # =============================================================================
@@ -778,6 +861,7 @@ async def test_complete_tool_names_the_next_date():
         "already_completed": [],
         "subtasks_completed": [],
         "subtasks_reopened": [],
+        "subtask_copies": [],
         "next_occurrences": [_task()],
     })
     out = await server.ticktick_complete_tasks(CompleteTasksInput(tasks=[_identifier()]), ctx)
@@ -791,6 +875,7 @@ async def test_complete_tool_counts_a_batch_and_lists_skipped_tasks():
         "already_completed": ["3" * 24],
         "subtasks_completed": [],
         "subtasks_reopened": [],
+        "subtask_copies": [],
         "next_occurrences": [],
     })
     out = await server.ticktick_complete_tasks(
@@ -808,6 +893,7 @@ async def test_abandon_tool_says_when_an_occurrence_stayed_completed():
         "already_abandoned": [],
         "subtasks_abandoned": [],
         "subtasks_reopened": [],
+        "subtask_copies": [],
         "completed_instead": ["1" * 24],
         "next_occurrences": [_task()],
     })
@@ -824,6 +910,7 @@ async def test_abandon_tool_success():
         "already_abandoned": [],
         "subtasks_abandoned": [],
         "subtasks_reopened": [],
+        "subtask_copies": [],
         "completed_instead": [],
         "next_occurrences": [],
     })
@@ -837,6 +924,7 @@ async def test_complete_tool_json():
         "already_completed": [],
         "subtasks_completed": [],
         "subtasks_reopened": [],
+        "subtask_copies": [],
         "next_occurrences": [_task()],
     })
     out = json.loads(await server.ticktick_complete_tasks(
@@ -848,6 +936,7 @@ async def test_complete_tool_json():
         "already_completed": [],
         "subtasks_completed": [],
         "subtasks_reopened": [],
+        "subtask_copies": [],
         "next_occurrences": [
             {"id": "1" * 24, "start_date": "2026-11-01", "due_date": "2026-11-01"}
         ],
@@ -860,6 +949,7 @@ async def test_abandon_tool_json_is_not_a_success_when_an_occurrence_stayed_comp
         "already_abandoned": [],
         "subtasks_abandoned": [],
         "subtasks_reopened": [],
+        "subtask_copies": [],
         "completed_instead": ["1" * 24],
         "next_occurrences": [],
     })
@@ -918,13 +1008,14 @@ async def test_complete_tool_names_closed_and_reopened_subtasks():
         "already_completed": [],
         "subtasks_completed": ["2" * 24],
         "subtasks_reopened": ["3" * 24],
+        "subtask_copies": [],
         "subtasks_unchecked": ["4" * 24],
         "next_occurrences": [],
     })
     out = await server.ticktick_complete_tasks(CompleteTasksInput(tasks=[_identifier()]), ctx)
-    assert f"Open subtasks marked as complete too, as in the app: `{'2' * 24}`." in out
-    assert f"Subtasks open again for the next date, as in the app: `{'3' * 24}`." in out
-    assert f"Could not check the subtasks of `{'4' * 24}`." in out
+    assert f"Open subtasks marked as complete too: `{'2' * 24}`." in out
+    assert f"Subtasks open again for the next date: `{'3' * 24}`." in out
+    assert f"Could not handle the subtasks of `{'4' * 24}`." in out
 
 
 async def test_abandon_tool_json_names_the_subtasks():
@@ -933,6 +1024,7 @@ async def test_abandon_tool_json_names_the_subtasks():
         "already_abandoned": [],
         "subtasks_abandoned": ["2" * 24],
         "subtasks_reopened": [],
+        "subtask_copies": [],
         "completed_instead": [],
         "next_occurrences": [],
         "subtasks_unchecked": ["1" * 24],

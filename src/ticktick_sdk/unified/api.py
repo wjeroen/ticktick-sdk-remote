@@ -1852,7 +1852,7 @@ class UnifiedTickTickAPI:
         TickTick's server leaves subtasks as they are when their parent closes
         (checked live 2026-11-01). Subtasks of subtasks count too. A repeating
         task among ``tasks`` keeps its subtasks for its next date (see
-        ``_reopen_subtasks``), and a repeating subtask is left alone with
+        ``_renew_subtasks``), and a repeating subtask is left alone with
         everything below it, because closing it would only move it on. A task
         without subtasks costs no extra call.
 
@@ -1877,31 +1877,99 @@ class UnifiedTickTickAPI:
             if task.status == TaskStatus.ACTIVE and task.id not in named
         ]
 
-    async def _reopen_subtasks(self, parents: list[Task]) -> tuple[list[str], list[str]]:
-        """Reopen the closed subtasks of repeating tasks that moved to their next date.
+    async def _copy_subtasks(
+        self, tree: list[Task], parent: Task, copy: Task, status: TaskStatus
+    ) -> list[str]:
+        """Make closed copies of ``tree`` under ``copy``, nested as under ``parent``.
 
-        The app opens every subtask again for the next occurrence, and
-        TickTick's server does not: a completed subtask stayed completed after
-        its weekly parent moved on (checked live 2026-11-18). Subtasks of
-        subtasks count too. Trashed ones stay as they are. The parents were
-        already closed, so a failure here is reported instead of raised.
+        A closed subtask's copy keeps its own status and completion time. An
+        open subtask follows the parent, so its copy gets ``status``. TickTick
+        ignores parentId on create (quirk 2), so each copy is created first,
+        then attached. ``tree`` lists parents before their children.
 
         Returns:
-            IDs of the reopened subtasks, and IDs of the parents whose
-            subtasks could not be checked.
+            IDs of the copies, in the order of ``tree``.
+        """
+        operation = "copy_subtasks"
+        new_ids: dict[str, str] = {parent.id: copy.id}
+        now = datetime.now(timezone.utc)
+        for task in tree:
+            closed = TaskStatus.is_closed(task.status)
+            data = task.to_v2_dict()
+            # A copy is a record of the finished occurrence: no id of its own
+            # yet, no parent until attached, and nothing that repeats, pins or
+            # reminds.
+            for key in (
+                "id", "parentId", "repeatFlag", "repeatFrom", "repeatFirstDate",
+                "repeatTaskId", "exDate", "pinnedTime", "reminders",
+            ):
+                data.pop(key, None)
+            data["status"] = int(task.status if closed else status)
+            data["completedTime"] = Task.format_datetime(
+                task.completed_time if closed and task.completed_time else now, "v2"
+            )
+            response = await self._v2_client.batch_tasks(add=[data])  # type: ignore
+            _check_batch_response_errors(response, operation)
+            new_id = next(iter(response.get("id2etag") or {}), None)
+            if not new_id:
+                raise TickTickAPIError(
+                    f"{operation}: TickTick returned no ID for the copy of {task.id}",
+                    details={"response": response},
+                )
+            await self._v2_client.set_task_parent(  # type: ignore
+                new_id, task.project_id, new_ids[task.parent_id or parent.id]
+            )
+            new_ids[task.id] = new_id
+        return [new_ids[task.id] for task in tree]
+
+    async def _renew_subtasks(
+        self,
+        moved_on: list[Task],
+        copies: dict[str, Task],
+        statuses: dict[str, TaskStatus],
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Handle the subtasks of repeating tasks that moved to their next date.
+
+        The app keeps the finished occurrence's subtasks as closed copies
+        under its closed copy, and opens the subtasks of the series again for
+        the next date (seen live on the Weekly review, 2026-11-18). TickTick's
+        server does neither: a completed subtask stayed completed after its
+        weekly parent moved on. So this makes the copies (``_copy_subtasks``),
+        then reopens the closed subtasks. Subtasks of subtasks count too.
+        Trashed and repeating subtasks are left alone. When the copies cannot
+        be made, nothing is reopened, so no status is lost. The parents were
+        already closed, so a failure is reported instead of raised.
+
+        Args:
+            moved_on: Repeating tasks, re-read on their next date
+            copies: The closed copy of each one's finished occurrence, by ID
+            statuses: The status each one's finished occurrence got, by ID
+
+        Returns:
+            IDs of the reopened subtasks, IDs of the copies made, and IDs of
+            the repeating tasks whose subtasks could not be handled.
         """
         reopened: list[str] = []
+        made: list[str] = []
         failed: list[str] = []
-        for parent in parents:
+        for parent in moved_on:
             try:
-                tree = await self._subtask_tree([parent], set(), stop_at_repeating=False)
+                tree = await self._subtask_tree([parent], set(), stop_at_repeating=True)
+                if not tree:
+                    continue
+                copy = copies.get(parent.id)
+                if copy is None:
+                    logger.warning("No finished copy found for %s, its subtasks stay as they are", parent.id)
+                    failed.append(parent.id)
+                    continue
+                made.extend(await self._copy_subtasks(tree, parent, copy, statuses[parent.id]))
                 closed = [task for task in tree if TaskStatus.is_closed(task.status)]
                 await self._v2_write_status(closed, TaskStatus.ACTIVE, "reopen_subtasks")
                 reopened.extend(task.id for task in closed)
             except TickTickError as exc:
-                logger.warning("Could not reopen the subtasks of %s: %s", parent.id, exc)
+                logger.warning("Could not handle the subtasks of %s: %s", parent.id, exc)
                 failed.append(parent.id)
-        return reopened, failed
+        return reopened, made, failed
 
     async def _settle_subtasks(
         self,
@@ -1910,61 +1978,30 @@ class UnifiedTickTickAPI:
         tasks: list[Task],
         subtasks: list[Task] | None,
         moved_on: list[Task],
+        copies: dict[str, Task],
+        statuses: dict[str, TaskStatus],
     ) -> dict[str, Any]:
         """Add what happened to the subtasks to a complete or abandon result.
 
-        ``key`` names the subtasks that were closed. ``subtasks_reopened``
-        names those reopened under repeating tasks, and
-        ``subtasks_unchecked`` (only when not empty) the tasks whose
-        subtasks could not be checked.
+        ``key`` names the open subtasks that were closed with their parent.
+        ``subtasks_reopened`` and ``subtask_copies`` name what
+        ``_renew_subtasks`` did for repeating tasks, and
+        ``subtasks_unchecked`` (only when not empty) the tasks whose subtasks
+        could not be handled.
         """
+        result["subtasks_reopened"] = []
+        result["subtask_copies"] = []
         if subtasks is None:
             result[key] = []
-            result["subtasks_reopened"] = []
             result["subtasks_unchecked"] = [task.id for task in tasks]
             return result
-        reopened, failed = await self._reopen_subtasks(moved_on)
+        reopened, made, failed = await self._renew_subtasks(moved_on, copies, statuses)
         result[key] = [task.id for task in subtasks]
         result["subtasks_reopened"] = reopened
+        result["subtask_copies"] = made
         if failed:
             result["subtasks_unchecked"] = failed
         return result
-
-    @staticmethod
-    def _v1_completed_note(v1_completed: set[str] | None) -> str:
-        """Error text naming the tasks V1 finished before it failed.
-
-        A retry of the whole call would complete the next occurrence of a
-        recurring task among them, so the error has to tell.
-        """
-        if not v1_completed:
-            return ""
-        return (
-            " These tasks were completed before the login failed, so do not "
-            f"send them again: {', '.join(sorted(v1_completed))}."
-        )
-
-    @classmethod
-    def _recurring_needs_v1(
-        cls,
-        task_ids: list[str],
-        operation: str,
-        cause: TickTickError | None = None,
-        v1_completed: set[str] | None = None,
-    ) -> TickTickAPIUnavailableError:
-        """Error for recurring tasks that cannot be closed without V1.
-
-        Only V1 moves a recurring task to its next occurrence. Closing one
-        through V2 would end its series.
-        """
-        return TickTickAPIUnavailableError(
-            f"Could not run {operation} on repeating tasks {', '.join(task_ids)}: "
-            "that needs the V1 login, which is not working, and closing them "
-            "without it would end their series. Nothing was changed for them. "
-            f"Refresh TICKTICK_ACCESS_TOKEN.{cls._v1_completed_note(v1_completed)}",
-            operation=operation,
-            v1_error=cause,
-        )
 
     async def _next_occurrences(self, tasks: list[Task]) -> list[Task]:
         """Re-read closed recurring tasks, keeping those that are active again.
@@ -2001,8 +2038,10 @@ class UnifiedTickTickAPI:
         closed through V2 and a recurring task raises an error.
 
         Subtasks follow the app: the open subtasks of each task are completed
-        too (``_open_subtasks``), and a recurring task gets all its subtasks
-        open again for its next date (``_reopen_subtasks``).
+        too (``_open_subtasks``), while closed ones keep their own status. A
+        recurring task's finished occurrence keeps closed copies of its
+        subtasks, and the subtasks open again for its next date
+        (``_renew_subtasks``).
 
         Args:
             task_ids: List of (task_id, project_id) tuples
@@ -2010,9 +2049,10 @@ class UnifiedTickTickAPI:
         Returns:
             Dict with ``completed`` (IDs), ``already_completed`` (IDs left as
             they were), ``next_occurrences`` (recurring tasks, re-read
-            after completing, with their new dates), ``subtasks_completed``
-            and ``subtasks_reopened`` (IDs), plus ``subtasks_unchecked``
-            (IDs of tasks whose subtasks could not be checked) when not empty
+            after completing, with their new dates), ``subtasks_completed``,
+            ``subtasks_reopened`` and ``subtask_copies`` (IDs), plus
+            ``subtasks_unchecked`` (IDs of tasks whose subtasks could not be
+            handled) when not empty
 
         Raises:
             TickTickAPIUnavailableError: If no API can complete the tasks
@@ -2026,6 +2066,7 @@ class UnifiedTickTickAPI:
         already_completed = [task.id for task in tasks if TaskStatus.is_completed(task.status)]
         subtasks = await self._open_subtasks(tasks)
         to_close = pending + (subtasks or [])
+        since = datetime.now(timezone.utc)
 
         if to_close:
             v1_error: TickTickAuthenticationError | None = None
@@ -2040,14 +2081,42 @@ class UnifiedTickTickAPI:
                 await self._v2_close_tasks(to_close, TaskStatus.COMPLETED, operation, confirmed)
 
         moved_on = await self._next_occurrences(pending)
+        copies = (
+            await self._finished_copies(pending, moved_on, since)
+            if subtasks is not None else {}
+        )
         result = {
             "completed": [task.id for task in pending],
             "already_completed": already_completed,
             "next_occurrences": moved_on,
         }
+        statuses = {task.id: TaskStatus.COMPLETED for task in moved_on}
         return await self._settle_subtasks(
-            result, "subtasks_completed", tasks, subtasks, moved_on
+            result, "subtasks_completed", tasks, subtasks, moved_on, copies, statuses
         )
+
+    async def _finished_copies(
+        self, before: list[Task], moved_on: list[Task], since: datetime
+    ) -> dict[str, Task]:
+        """The closed copy of each finished occurrence whose series has subtasks.
+
+        Only those need one (``_renew_subtasks``), so a recurring task without
+        subtasks costs no extra call. A failed lookup leaves the copy out.
+
+        Args:
+            before: The recurring tasks as read before they were closed
+            moved_on: The same tasks, re-read on their next date
+            since: A moment just before they were closed
+        """
+        with_subtasks = {task.id for task in moved_on if task.child_ids}
+        wanted = [task for task in before if task.id in with_subtasks]
+        if not wanted:
+            return {}
+        try:
+            return await self._find_completed_copies(wanted, since)
+        except TickTickError as exc:
+            logger.warning("Could not find the finished copies: %s", exc)
+            return {}
 
     async def _find_completed_copies(
         self, tasks: list[Task], since: datetime
@@ -2092,7 +2161,9 @@ class UnifiedTickTickAPI:
                 break
         return found
 
-    async def _abandon_recurring(self, tasks: list[Task]) -> list[str]:
+    async def _abandon_recurring(
+        self, tasks: list[Task]
+    ) -> tuple[list[str], dict[str, Task]]:
         """Abandon the current occurrence of recurring tasks, keeping the series.
 
         Setting status -1 on a recurring task closes it and ends the series
@@ -2102,8 +2173,9 @@ class UnifiedTickTickAPI:
         completion stats (also verified live).
 
         Returns:
-            IDs of tasks whose copy could not be changed. Those stay completed,
-            and their series still moved on.
+            IDs of tasks whose copy could not be changed (those stay
+            completed, and their series still moved on), and the copy of each
+            task that was found, by task ID.
 
         Raises:
             TickTickAPIUnavailableError: If the V1 login does not work
@@ -2121,6 +2193,7 @@ class UnifiedTickTickAPI:
                 confirmed,
             ) from exc
 
+        copies: dict[str, Task] = {}
         try:
             copies = await self._find_completed_copies(tasks, since)
             errors = await self._v1_update_in_chunks([
@@ -2129,12 +2202,12 @@ class UnifiedTickTickAPI:
             ])
         except TickTickError as exc:
             logger.warning("%s: could not change completed copies: %s", operation, exc)
-            return [task.id for task in tasks]
+            return [task.id for task in tasks], copies
 
         return [
             task.id for task in tasks
             if task.id not in copies or copies[task.id].id in errors
-        ]
+        ], copies
 
     async def batch_abandon_tasks(
         self,
@@ -2157,8 +2230,8 @@ class UnifiedTickTickAPI:
             they were), ``completed_instead`` (recurring task IDs whose
             occurrence stayed completed), ``next_occurrences`` (recurring
             tasks, re-read after closing, with their new dates),
-            ``subtasks_abandoned`` and ``subtasks_reopened`` (IDs), plus
-            ``subtasks_unchecked`` when not empty
+            ``subtasks_abandoned``, ``subtasks_reopened`` and
+            ``subtask_copies`` (IDs), plus ``subtasks_unchecked`` when not empty
 
         Raises:
             TickTickAPIUnavailableError: If no API can abandon the tasks
@@ -2179,7 +2252,10 @@ class UnifiedTickTickAPI:
         subtasks = await self._open_subtasks(tasks)
         plain = [task for task in pending if task.id not in recurring_ids] + (subtasks or [])
 
-        completed_instead = await self._abandon_recurring(recurring) if recurring else []
+        completed_instead: list[str] = []
+        copies: dict[str, Task] = {}
+        if recurring:
+            completed_instead, copies = await self._abandon_recurring(recurring)
 
         if plain:
             v1_error: TickTickAuthenticationError | None = None
@@ -2203,8 +2279,12 @@ class UnifiedTickTickAPI:
             "completed_instead": completed_instead,
             "next_occurrences": moved_on,
         }
+        statuses = {
+            task.id: TaskStatus.COMPLETED if task.id in completed_instead else TaskStatus.ABANDONED
+            for task in moved_on
+        }
         return await self._settle_subtasks(
-            result, "subtasks_abandoned", tasks, subtasks, moved_on
+            result, "subtasks_abandoned", tasks, subtasks, moved_on, copies, statuses
         )
 
     async def batch_reopen_tasks(

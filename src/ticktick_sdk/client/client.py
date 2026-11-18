@@ -692,8 +692,9 @@ class TickTickClient:
 
         A recurring task moves to its next occurrence: the same id stays
         active, and the finished occurrence becomes a new completed task.
-        Subtasks follow the app: open ones are completed too, and a recurring
-        task gets all its subtasks open again for its next date.
+        Open subtasks are completed too, and closed ones keep their status. A
+        recurring task's finished occurrence keeps closed copies of its
+        subtasks, and the subtasks open again for its next date.
 
         Args:
             task_ids: List of (task_id, project_id) tuples
@@ -701,8 +702,9 @@ class TickTickClient:
         Returns:
             Dict with `completed` (IDs), `already_completed` (IDs),
             `next_occurrences` (recurring tasks with their new dates),
-            `subtasks_completed` and `subtasks_reopened` (IDs), plus
-            `subtasks_unchecked` (IDs) when some subtasks could not be checked
+            `subtasks_completed`, `subtasks_reopened` and `subtask_copies`
+            (IDs), plus `subtasks_unchecked` (IDs) when some subtasks could not
+            be handled
         """
         return await self._api.batch_complete_tasks(task_ids)
 
@@ -724,8 +726,9 @@ class TickTickClient:
             Dict with `abandoned` (IDs), `already_abandoned` (IDs),
             `completed_instead` (recurring task IDs whose occurrence stayed
             completed), `next_occurrences` (recurring tasks with their new
-            dates), `subtasks_abandoned` and `subtasks_reopened` (IDs), plus
-            `subtasks_unchecked` (IDs) when some subtasks could not be checked
+            dates), `subtasks_abandoned`, `subtasks_reopened` and
+            `subtask_copies` (IDs), plus `subtasks_unchecked` (IDs) when some
+            subtasks could not be handled
         """
         return await self._api.batch_abandon_tasks(task_ids)
 

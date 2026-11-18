@@ -499,6 +499,7 @@ def _closed_tasks_summary(
     completed_instead: list[str] | None = None,
     subtasks: list[str] | None = None,
     reopened: list[str] | None = None,
+    copies: list[str] | None = None,
     unchecked: list[str] | None = None,
 ) -> str:
     """Sentence-style result of ticktick_complete_tasks / ticktick_abandon_tasks.
@@ -521,18 +522,23 @@ def _closed_tasks_summary(
             "as abandoned, so it stays completed. Its series did move on."
         )
     if subtasks:
-        lines.append(f"Open subtasks marked as {state} too, as in the app: {ids(subtasks)}.")
+        lines.append(f"Open subtasks marked as {state} too: {ids(subtasks)}.")
     if next_occurrences:
         lines.append("Repeating, so the same id stays active on its next date:")
         lines.extend(
             f"- `{t.id}`: {format_task_date(t, t.due_date or t.start_date, USER_TIMEZONE)}"
             for t in next_occurrences
         )
+    if copies:
+        lines.append(
+            "The finished occurrence keeps closed copies of its subtasks, each "
+            f"with its own status: {ids(copies)}."
+        )
     if reopened:
-        lines.append(f"Subtasks open again for the next date, as in the app: {ids(reopened)}.")
+        lines.append(f"Subtasks open again for the next date: {ids(reopened)}.")
     if unchecked:
         lines.append(
-            f"Could not check the subtasks of {ids(unchecked)}. "
+            f"Could not handle the subtasks of {ids(unchecked)}. "
             "Check them with ticktick_get_task."
         )
     return "\n".join(lines)
@@ -540,7 +546,11 @@ def _closed_tasks_summary(
 
 def _subtask_fields(result: dict[str, Any], key: str) -> dict[str, Any]:
     """The subtask part of a complete or abandon JSON reply."""
-    fields = {key: result[key], "subtasks_reopened": result["subtasks_reopened"]}
+    fields = {
+        key: result[key],
+        "subtask_copies": result["subtask_copies"],
+        "subtasks_reopened": result["subtasks_reopened"],
+    }
     if result.get("subtasks_unchecked"):
         fields["subtasks_unchecked"] = result["subtasks_unchecked"]
     return fields
@@ -1441,10 +1451,13 @@ async def ticktick_complete_tasks(params: CompleteTasksInput, ctx: Context) -> s
     becomes a new completed task with a new id, and this task (same id) stays
     active and moves to its next date, which the response names.
 
-    Subtasks also behave as in the app. The open subtasks of a task, and
-    theirs, are completed too, and the response names them. A repeating task
-    keeps its subtasks for its next date, so they all become open again. A
-    repeating subtask is left as it is. Undo with ticktick_reopen_tasks.
+    Subtasks: the open subtasks of a task, and theirs, are completed too, and
+    the response names them. Closed subtasks keep their own status, so an
+    abandoned one stays abandoned. A repeating task keeps its subtasks for its
+    next date: its finished occurrence gets closed copies of them (an open
+    subtask's copy is completed, a closed one's keeps its status), and the
+    subtasks become open again. A repeating subtask is left as it is. Undo
+    with ticktick_reopen_tasks.
 
     Args:
         params: Completion parameters:
@@ -1483,6 +1496,7 @@ async def ticktick_complete_tasks(params: CompleteTasksInput, ctx: Context) -> s
             already=result["already_completed"],
             subtasks=result["subtasks_completed"],
             reopened=result["subtasks_reopened"],
+            copies=result["subtask_copies"],
             unchecked=result.get("subtasks_unchecked"),
         ))
 
@@ -1515,10 +1529,13 @@ async def ticktick_abandon_tasks(params: AbandonTasksInput, ctx: Context) -> str
     response names. In the rare case that the occurrence cannot be changed, it
     stays completed, and the response says so.
 
-    Subtasks also behave as in the app. The open subtasks of a task, and
-    theirs, are abandoned too, and the response names them. A repeating task
-    keeps its subtasks for its next date, so they all become open again. A
-    repeating subtask is left as it is. Undo with ticktick_reopen_tasks.
+    Subtasks: the open subtasks of a task, and theirs, are abandoned too, and
+    the response names them. Closed subtasks keep their own status, so a
+    completed one stays completed. A repeating task keeps its subtasks for its
+    next date: its finished occurrence gets closed copies of them (an open
+    subtask's copy is abandoned, a closed one's keeps its status), and the
+    subtasks become open again. A repeating subtask is left as it is. Undo
+    with ticktick_reopen_tasks.
 
     Args:
         params: Abandon parameters:
@@ -1554,6 +1571,7 @@ async def ticktick_abandon_tasks(params: AbandonTasksInput, ctx: Context) -> str
             completed_instead=result["completed_instead"],
             subtasks=result["subtasks_abandoned"],
             reopened=result["subtasks_reopened"],
+            copies=result["subtask_copies"],
             unchecked=result.get("subtasks_unchecked"),
         )
         if result["completed_instead"]:
