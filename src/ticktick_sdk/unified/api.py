@@ -1885,8 +1885,7 @@ class UnifiedTickTickAPI:
         A closed subtask's copy keeps its own status and completion time. An
         open subtask follows the parent, so its copy gets ``status``. TickTick
         ignores parentId on create (quirk 2), so each copy is created first,
-        then attached. ``tree`` lists parents before their children. Last,
-        ``copy`` gets only its own subtask copies as children.
+        then attached. ``tree`` lists parents before their children.
 
         Returns:
             IDs of the copies, in the order of ``tree``.
@@ -1921,17 +1920,6 @@ class UnifiedTickTickAPI:
                 new_id, task.project_id, new_ids[task.parent_id or parent.id]
             )
             new_ids[task.id] = new_id
-
-        # The copy V1 made lists the series' subtasks in its childIds too
-        # (live 2026-11-18), so it would show them as its own. The app's
-        # copies list only their own subtask copies.
-        current = await self.get_task(copy.id, copy.project_id)
-        update = current.to_v2_dict(for_update=True)
-        update["childIds"] = [new_ids[task.id] for task in tree if task.parent_id == parent.id]
-        if current.column_id:
-            update["columnId"] = current.column_id
-        response = await self._v2_client.batch_tasks(update=[update])  # type: ignore
-        _check_batch_response_errors(response, operation, [copy.id])
         return [new_ids[task.id] for task in tree]
 
     async def _renew_subtasks(

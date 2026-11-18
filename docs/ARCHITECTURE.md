@@ -1045,10 +1045,12 @@ short operator-facing version).
       closed copy of the finished occurrence, only when the series has
       subtasks (`_find_completed_copies`). `_copy_subtasks` gives that copy
       closed copies of the subtasks, nested the same way: an open subtask's
-      copy gets the parent's new status, a closed one keeps its own. The copy
-      V1 made lists the series' subtasks in its own `childIds` too, so its
-      `childIds` are then set to its own subtask copies. Last,
-      `_renew_subtasks` reopens the closed subtasks of the series. When no
+      copy gets the parent's new status, a closed one keeps its own. Last,
+      `_renew_subtasks` reopens the closed subtasks of the series. The copy
+      V1 made also lists the series' subtasks in its `childIds`, and
+      TickTick ignores `childIds` in an update (both live 2026-11-18), so
+      `get_task` on that copy shows the series' subtasks next to its own
+      copies. The app's copies list only their own. When no
       copy is found or a step fails, nothing is reopened, so no status is
       lost, and the reply names the task under `subtasks_unchecked`.
 
