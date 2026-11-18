@@ -110,14 +110,14 @@ class TickTickSettings(BaseSettings):
             "Full Cookie header string from a logged-in TickTick browser session "
             "(e.g. 'tt_distid=...; t=...; AWSALB=...'). Used as a fallback when "
             "password sign-on fails (e.g. captcha-walled). The session token is "
-            "the `t` cookie inside it and is extracted automatically — this is the "
+            "the `t` cookie inside it and is extracted automatically. This is the "
             "only env var you need for the token fallback."
         ),
     )
     v2_token: SecretStr | None = Field(
         default=None,
         description=(
-            "Optional. The V2 session token explicitly. Normally unnecessary — it "
+            "Optional. The V2 session token explicitly. Normally unnecessary, it "
             "is auto-extracted from the `t` cookie in TICKTICK_V2_COOKIES. Set this "
             "only to override that (e.g. if your cookie string lacks `t`)."
         ),
@@ -158,8 +158,8 @@ class TickTickSettings(BaseSettings):
         """True when device_id is a 24-char lowercase-hex ObjectId.
 
         TickTick expects the device id (sent in the X-Device header) to look
-        like a MongoDB ObjectId. A malformed value — wrong length, non-hex
-        chars, stray whitespace/quotes — can make V2 sign-on fail with
+        like a MongoDB ObjectId. A malformed value (wrong length, non-hex
+        chars, stray whitespace/quotes) can make V2 sign-on fail with
         misleading errors (e.g. username_password_not_match).
         """
         did = self.device_id

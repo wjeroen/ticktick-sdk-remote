@@ -126,6 +126,18 @@ from ticktick_sdk.exceptions import TickTickAPIError, TickTickAuthenticationErro
 logger = logging.getLogger(__name__)
 
 
+def _closed_range_param(value: datetime) -> str:
+    """Format one end of the /project/all/closed date range.
+
+    TickTick reads the plain ``YYYY-MM-DD hh:mm:ss`` value as UTC (checked
+    live 2026-11-02), so a value with a zone is converted to UTC first. A
+    value without a zone is sent as it is, and so counts as UTC.
+    """
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc)
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
 class TickTickV2Client(BaseTickTickClient):
     """
     Client for TickTick V2 API.
@@ -308,7 +320,7 @@ class TickTickV2Client(BaseTickTickClient):
         """
         Complete 2FA authentication with a TOTP code.
 
-        Scaffolding for the planned 2FA support (see TODO.md) — implemented but
+        Scaffolding for the planned 2FA support (see TODO.md), implemented but
         NOT yet wired into the sign-on flow. For a headless deployment a real
         TOTP path would also need a way to obtain the code (e.g. a
         TICKTICK_TOTP_SECRET env var to generate it); note that the
@@ -732,13 +744,9 @@ class TickTickV2Client(BaseTickTickClient):
         Returns:
             List of completed tasks
         """
-        # Format: YYYY-MM-DD HH:MM:SS (httpx handles URL encoding)
-        from_str = from_date.strftime("%Y-%m-%d %H:%M:%S")
-        to_str = to_date.strftime("%Y-%m-%d %H:%M:%S")
-
         params = {
-            "from": from_str,
-            "to": to_str,
+            "from": _closed_range_param(from_date),
+            "to": _closed_range_param(to_date),
             "status": "Completed",
             "limit": str(limit),
         }
@@ -762,13 +770,9 @@ class TickTickV2Client(BaseTickTickClient):
         Returns:
             List of abandoned tasks
         """
-        # Format: YYYY-MM-DD HH:MM:SS (httpx handles URL encoding)
-        from_str = from_date.strftime("%Y-%m-%d %H:%M:%S")
-        to_str = to_date.strftime("%Y-%m-%d %H:%M:%S")
-
         params = {
-            "from": from_str,
-            "to": to_str,
+            "from": _closed_range_param(from_date),
+            "to": _closed_range_param(to_date),
             "status": "Abandoned",
             "limit": str(limit),
         }
@@ -777,21 +781,22 @@ class TickTickV2Client(BaseTickTickClient):
 
     async def get_deleted_tasks(
         self,
-        start: int = 0,
         limit: int = 500,
     ) -> TrashResponseV2:
         """
         Get deleted tasks (trash).
 
+        Always reads from the start of the trash. Callers page in memory, like
+        the completed and abandoned listings.
+
         Args:
-            start: Start offset
             limit: Maximum results
 
         Returns:
             Trash response with tasks
         """
         params = {
-            "start": str(start),
+            "start": "0",
             "limit": str(limit),
         }
         response = await self._get_json(
@@ -1418,7 +1423,7 @@ class TickTickV2Client(BaseTickTickClient):
         """
         from datetime import datetime
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         now_str = now.strftime("%Y-%m-%dT%H:%M:%S.000+0000")
 
         habit: HabitCreateV2 = {
@@ -1508,7 +1513,7 @@ class TickTickV2Client(BaseTickTickClient):
 
         habit: HabitUpdateV2 = {
             "id": habit_id,
-            "modifiedTime": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
+            "modifiedTime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
         }
 
         if name is not None:

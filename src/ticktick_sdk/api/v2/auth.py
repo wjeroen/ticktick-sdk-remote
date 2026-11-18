@@ -343,7 +343,7 @@ class SessionHandler:
         """
         Complete 2FA authentication.
 
-        Scaffolding for the planned 2FA support (see TODO.md) — not yet wired
+        Scaffolding for the planned 2FA support (see TODO.md), not yet wired
         into the sign-on flow. Holds the reverse-engineered MFA endpoint +
         payload so a future TOTP path doesn't have to rederive them.
 

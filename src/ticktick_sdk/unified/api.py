@@ -10,6 +10,7 @@ and converts between unified models and API-specific formats.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
 from types import TracebackType
@@ -24,6 +25,7 @@ from ticktick_sdk.exceptions import (
     TickTickAPIUnavailableError,
     TickTickAuthenticationError,
     TickTickConfigurationError,
+    TickTickError,
     TickTickForbiddenError,
     TickTickNotFoundError,
     TickTickQuotaExceededError,
@@ -32,6 +34,7 @@ from ticktick_sdk.exceptions import (
 from ticktick_sdk.models import (
     Column,
     Task,
+    TaskReminder,
     Project,
     ProjectGroup,
     ProjectData,
@@ -50,6 +53,15 @@ from ticktick_sdk.unified.router import APIRouter
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound="UnifiedTickTickAPI")
+
+# TickTick's V1 batch calls take at most this many tasks per call.
+_V1_BATCH_SIZE = 50
+# The completed copy of a recurring task is looked up in the V1 completed list
+# by completion time. The margin covers clock differences with TickTick, and
+# the extra attempts cover a copy that takes a moment to appear.
+_COPY_LOOKUP_MARGIN = timedelta(minutes=5)
+_COPY_LOOKUP_ATTEMPTS = 3
+_COPY_LOOKUP_DELAY_SECONDS = 1.0
 
 
 # Error codes that map to NotFoundError in batch responses
@@ -171,7 +183,7 @@ def _calculate_streak_from_checkins(
         return 0
 
     if reference_date is None:
-        reference_date = date.today()
+        reference_date = datetime.now(timezone.utc).date()
 
     # Build a set of completed check-in dates (status=2 means completed)
     # checkin_stamp is in YYYYMMDD format (int)
@@ -283,7 +295,12 @@ class UnifiedTickTickAPI:
         # General
         timeout: float = 30.0,
         device_id: str | None = None,
+        default_timezone: str = "UTC",
     ) -> None:
+        # Zone for dates sent without an offset (TICKTICK_TIMEZONE in the MCP
+        # server). See _write_zone for when a task's own zone is used instead.
+        self._default_timezone = default_timezone
+
         # Store credentials for lazy initialization
         self._v1_credentials = {
             "client_id": client_id,
@@ -346,7 +363,7 @@ class UnifiedTickTickAPI:
         ``TickTickAPIUnavailableError`` from the existing per-method guards.
 
         Only raises ``TickTickConfigurationError`` if *neither* API is usable
-        — which is the only state where the server genuinely cannot do
+        which is the only state where the server genuinely cannot do
         anything.
         """
         if self._initialized:
@@ -397,7 +414,7 @@ class UnifiedTickTickAPI:
 
         if not verification.get("v1") and self._v1_client is not None and self._v1_client.is_authenticated:
             # The V1 client had a token but verify_clients() reported it
-            # unhealthy — almost always means the OAuth access token has
+            # unhealthy, almost always means the OAuth access token has
             # expired or been revoked.
             logger.error(
                 "V1 OAuth verification failed. Your TICKTICK_ACCESS_TOKEN is "
@@ -545,7 +562,7 @@ class UnifiedTickTickAPI:
         if not token:
             logger.error(
                 "TICKTICK_V2_COOKIES is set but contains no `t=` cookie, and "
-                "TICKTICK_V2_TOKEN is unset — cannot build a V2 session. Make "
+                "TICKTICK_V2_TOKEN is unset, cannot build a V2 session. Make "
                 "sure you pasted the FULL Cookie header (it must include the "
                 "`t=...` entry)."
             )
@@ -569,7 +586,7 @@ class UnifiedTickTickAPI:
             )
             self._v2_client.set_session(session)
 
-            # Verify by hitting /user/status — this also gives us the real
+            # Verify by hitting /user/status, this also gives us the real
             # inbox_id / user_id the hand-built SessionToken didn't have. A
             # stale cookie 401s here; a throttle 429s here.
             status = await self._v2_client.get_user_status()
@@ -587,7 +604,7 @@ class UnifiedTickTickAPI:
                 logger.error(
                     "V2 cookie could not be verified: rate-limited (HTTP 429) on "
                     "/user/status (%s). This is a THROTTLE, not proof of a stale "
-                    "cookie — the session may still be valid, we just can't "
+                    "cookie. The session may still be valid, we just can't "
                     "confirm it while throttled. Usual cause: too many sign-on "
                     "attempts (the server re-authenticating on every connection). "
                     "Refreshing the cookie will NOT help while throttled.",
@@ -596,7 +613,7 @@ class UnifiedTickTickAPI:
             else:
                 logger.error(
                     "V2 cookie verification failed: %s. The session in "
-                    "TICKTICK_V2_COOKIES is probably stale — refresh it from a "
+                    "TICKTICK_V2_COOKIES is probably stale. Refresh it from a "
                     "logged-in TickTick browser tab.",
                     e,
                 )
@@ -689,7 +706,7 @@ class UnifiedTickTickAPI:
         """Live auth health snapshot for diagnostics (no secrets).
 
         Performs two lightweight read pings (V1 `/project`, V2 `/user/status`)
-        to test the *current* validity of each session — so it catches a
+        to test the *current* validity of each session, so it catches a
         token/cookie that expired after startup, not just the boot-time state.
         Never returns credential values; only booleans + derived facts.
         """
@@ -895,9 +912,21 @@ class UnifiedTickTickAPI:
         if project_id is None:
             raise TickTickConfigurationError("No project ID provided and inbox ID unknown")
 
-        # Format dates
-        start_str = Task.format_datetime(start_date, "v2") if start_date else None
-        due_str = Task.format_datetime(due_date, "v2") if due_date else None
+        # Dates: a plain date, or a time without an offset, is read in the zone
+        # from _write_zone, and the task is created in that zone when none is given.
+        zone = self._write_zone(
+            explicit_zone=time_zone, wall_clock=bool(is_all_day), task_zone=time_zone
+        )
+        start_str = (
+            Task.format_datetime(self._write_datetime(start_date, zone, "start_date"), "v2")
+            if start_date else None
+        )
+        due_str = (
+            Task.format_datetime(self._write_datetime(due_date, zone, "due_date"), "v2")
+            if due_date else None
+        )
+        if time_zone is None and (start_str or due_str):
+            time_zone = zone
 
         # V2 is REQUIRED (not optional fallback)
         if not self._router.has_v2:
@@ -995,13 +1024,7 @@ class UnifiedTickTickAPI:
 
     async def complete_task(self, task_id: str, project_id: str) -> None:
         """
-        Mark a task as complete.
-
-        Uses V2 API primarily (better error handling).
-        Falls back to V1 only if V2 unavailable.
-
-        Note: V2 batch operations silently accept updates to nonexistent tasks,
-        so we verify the task exists first to provide proper error handling.
+        Mark a task as complete. See ``batch_complete_tasks``.
 
         Args:
             task_id: Task ID
@@ -1010,35 +1033,7 @@ class UnifiedTickTickAPI:
         Raises:
             TickTickNotFoundError: If the task does not exist
         """
-        self._ensure_initialized()
-
-        # Use V2 (primary) - better error handling
-        if self._router.has_v2:
-            # V2 batch API silently accepts updates to nonexistent tasks (returns
-            # empty etag but no error). Verify task exists first for proper errors.
-            await self._v2_client.get_task(task_id)  # type: ignore  # Raises NotFoundError if missing
-
-            response = await self._v2_client.batch_tasks(  # type: ignore
-                update=[{
-                    "id": task_id,
-                    "projectId": project_id,
-                    "status": TaskStatus.COMPLETED,
-                    "completedTime": Task.format_datetime(datetime.now(), "v2"),
-                }]
-            )
-            # Check for errors in batch response (shouldn't happen after verify)
-            _check_batch_response_errors(response, "complete_task", [task_id])
-            return
-
-        # Fallback to V1 only if V2 unavailable
-        if self._router.has_v1:
-            await self._v1_client.complete_task(project_id, task_id)  # type: ignore
-            return
-
-        raise TickTickAPIUnavailableError(
-            "Could not complete task",
-            operation="complete_task",
-        )
+        await self.batch_complete_tasks([(task_id, project_id)])
 
     async def delete_task(self, task_id: str, project_id: str) -> None:
         """
@@ -1122,7 +1117,6 @@ class UnifiedTickTickAPI:
 
     async def list_deleted_tasks(
         self,
-        start: int = 0,
         limit: int = 100,
     ) -> list[Task]:
         """
@@ -1131,14 +1125,13 @@ class UnifiedTickTickAPI:
         V2-only operation.
 
         Args:
-            start: Pagination offset
             limit: Maximum results
 
         Returns:
             List of deleted tasks
         """
         self._ensure_initialized()
-        data = await self._v2_client.get_deleted_tasks(start, limit)  # type: ignore
+        data = await self._v2_client.get_deleted_tasks(limit)  # type: ignore
         return [Task.from_v2(t) for t in data.get("tasks", [])]
 
     async def move_task(
@@ -1173,7 +1166,7 @@ class UnifiedTickTickAPI:
 
         V2 batch complete/delete/move silently no-op against tasks that no longer
         exist (empty result, no error), so we fetch each unique id first to turn a
-        vanished task into a real 404 — the same guard the singular
+        vanished task into a real 404, the same guard the singular
         ``complete_task`` / ``delete_task`` / ``move_task`` already apply.
 
         Raises:
@@ -1197,7 +1190,7 @@ class UnifiedTickTickAPI:
             await self._v2_client.get_task(parent_id)  # type: ignore  # Raises NotFoundError if missing
         except TickTickNotFoundError as exc:
             raise TickTickNotFoundError(
-                f"Parent task {parent_id} not found — it may have been deleted. "
+                f"Parent task {parent_id} not found, it may have been deleted. "
                 "Subtasks cannot be attached to a nonexistent parent.",
                 resource_type="task",
                 resource_id=parent_id,
@@ -1316,6 +1309,52 @@ class UnifiedTickTickAPI:
     # Batch Task Operations (V2 only)
     # =========================================================================
 
+    def _default_tz(self) -> str:
+        """Zone for dates sent without an offset (TICKTICK_TIMEZONE in the MCP server)."""
+        return getattr(self, "_default_timezone", "UTC")
+
+    def _today(self) -> date:
+        """Today's date where the user is (the default zone), not the server's.
+
+        The server's own clock is usually UTC (Railway), which is already
+        tomorrow from 17:00 in San Francisco.
+        """
+        zone = Task.zone_or_none(self._default_tz()) or timezone.utc
+        return datetime.now(zone).date()
+
+    def _write_zone(
+        self, *, explicit_zone: str | None, wall_clock: bool, task_zone: str | None
+    ) -> str:
+        """Zone that gives a date or time sent without an offset its meaning.
+
+        1. A zone named in the same request wins.
+        2. All-day and floating tasks use their own zone, because the TickTick
+           app reads them in that zone (see ``Task.home_zone``).
+        3. Otherwise the default zone, where the user is.
+        """
+        if Task.zone_or_none(explicit_zone):
+            return explicit_zone  # type: ignore[return-value]
+        if wall_clock and Task.zone_or_none(task_zone):
+            return task_zone  # type: ignore[return-value]
+        return self._default_tz()
+
+    @staticmethod
+    def _write_datetime(value: Any, zone: str, field: str) -> datetime:
+        """Resolve a caller-supplied date for sending, or raise a clear error.
+
+        Raising matters: an unreadable value used to become None, and a None
+        date in an update tells TickTick to clear the date.
+        """
+        resolved = Task.resolve_datetime(value, zone)
+        if resolved is None:
+            raise TickTickAPIError(
+                f"Could not read {field} {value!r}. Send a plain date "
+                "(YYYY-MM-DD) or an ISO date and time. To remove a task's "
+                "dates, send clear_dates: true in the update instead.",
+                details={"field": field, "value": str(value)},
+            )
+        return resolved
+
     async def batch_create_tasks(
         self,
         tasks: list[dict[str, Any]],
@@ -1357,6 +1396,13 @@ class UnifiedTickTickAPI:
                 operation="batch_create_tasks",
             )
 
+        # Check every date before creating anything, so one unreadable value
+        # cannot leave the batch half-created.
+        for task_spec in tasks:
+            for field in ("start_date", "due_date"):
+                if task_spec.get(field):
+                    self._write_datetime(task_spec[field], "UTC", field)
+
         results: list[Task] = []
 
         # Process each task (V2 batch create doesn't support parent_id directly)
@@ -1371,13 +1417,26 @@ class UnifiedTickTickAPI:
             project_id = task_spec.get("project_id") or self._inbox_id
             parent_id = task_spec.get("parent_id")
 
-            # Format dates if provided
+            # Dates: a plain date, or a time without an offset, is read in the
+            # zone from _write_zone. When the caller names no zone, the task is
+            # created in that zone, so TickTick reads the date back the same way.
+            explicit_zone = task_spec.get("time_zone")
+            zone = self._write_zone(
+                explicit_zone=explicit_zone,
+                wall_clock=bool(task_spec.get("all_day")),
+                task_zone=explicit_zone,
+            )
             start_date = task_spec.get("start_date")
             due_date = task_spec.get("due_date")
-            if start_date and isinstance(start_date, datetime):
-                start_date = Task.format_datetime(start_date, "v2")
-            if due_date and isinstance(due_date, datetime):
-                due_date = Task.format_datetime(due_date, "v2")
+            if start_date:
+                start_date = Task.format_datetime(
+                    self._write_datetime(start_date, zone, "start_date"), "v2"
+                )
+            if due_date:
+                due_date = Task.format_datetime(
+                    self._write_datetime(due_date, zone, "due_date"), "v2"
+                )
+            time_zone = explicit_zone or (zone if (start_date or due_date) else None)
 
             # Prepare reminders
             reminders = task_spec.get("reminders")
@@ -1402,7 +1461,7 @@ class UnifiedTickTickAPI:
                 priority=priority,
                 start_date=start_date,
                 due_date=due_date,
-                time_zone=task_spec.get("time_zone"),
+                time_zone=time_zone,
                 is_all_day=task_spec.get("all_day"),
                 reminders=reminders,
                 repeat_flag=task_spec.get("recurrence"),
@@ -1438,7 +1497,7 @@ class UnifiedTickTickAPI:
         Each update preserves unspecified fields: the existing task is fetched,
         the user-supplied delta is merged into it, and the full task is sent
         back. This is required because TickTick's V2 /batch/task endpoint
-        treats the update payload as the new task representation — any field
+        treats the update payload as the new task representation, any field
         not present in the body is reset to its default (e.g. repeatFlag
         becomes null, isAllDay flips to false, timeZone is wiped).
 
@@ -1449,22 +1508,32 @@ class UnifiedTickTickAPI:
                 And any of these optional fields:
                 - title: New title
                 - content: New content
+                - description: New checklist description
                 - priority: New priority (0, 1, 3, 5 or 'none', 'low', 'medium', 'high')
                 - start_date: New start date (datetime or ISO string)
                 - due_date: New due date (datetime or ISO string)
+                - clear_dates: True removes both dates (TickTick then drops the
+                  reminders itself). A repeating task also loses its repeat
+                  rule, because a repeat needs a date.
+                  Cannot be combined with start_date, due_date or recurrence.
                 - time_zone: New timezone
                 - all_day: All-day flag
                 - tags: New tags (replaces existing)
                 - recurrence: New recurrence rule
+                - reminders: New reminder triggers (replaces existing, [] removes all)
                 - column_id: Kanban column ID (empty string to remove from column)
                 - kind: TEXT / NOTE / CHECKLIST
 
         Returns:
-            Batch response with id2etag and id2error
+            Batch response with id2etag and id2error, plus two derived keys:
+            ``_in_trash`` (task id to its pre-edit trash state) and
+            ``_removed_repeat`` (task id to True for each task whose repeat
+            rule clear_dates removed).
 
         Raises:
             TickTickAPIUnavailableError: If V2 API is not available
-            TickTickAPIError: On other API errors
+            TickTickAPIError: On other API errors, or when clear_dates is
+                combined with a new date or recurrence
         """
         self._ensure_initialized()
 
@@ -1476,25 +1545,52 @@ class UnifiedTickTickAPI:
 
         priority_map = {"none": 0, "low": 1, "medium": 3, "high": 5}
         v2_updates: list[dict[str, Any]] = []
+        # Pre-edit trash state per task, captured from the pre-fetch below so
+        # the caller can tell it just edited something that was in the bin
+        # (a trashed task reads as status "Active" and updates on it succeed).
+        # Free: we already fetch each task, so this costs no extra API call.
+        in_trash_by_id: dict[str, bool] = {}
+        # Tasks whose repeat rule clear_dates removed, so the caller can say so.
+        removed_repeat_by_id: dict[str, bool] = {}
 
+        # Check every update before fetching or sending anything, so one bad
+        # item cannot fail the batch halfway.
         for update in updates:
-            task_id = update.get("task_id")
-            project_id = update.get("project_id")
-
-            if not task_id or not project_id:
+            if not update.get("task_id") or not update.get("project_id"):
                 raise TickTickAPIError(
                     "Each update requires 'task_id' and 'project_id'",
                     details={"update": update},
                 )
+            if update.get("clear_dates"):
+                conflicts = [
+                    field
+                    for field in ("start_date", "due_date", "recurrence")
+                    if update.get(field) is not None
+                ]
+                if conflicts:
+                    raise TickTickAPIError(
+                        f"Task {update['task_id']}: clear_dates removes the "
+                        f"dates, so it cannot be combined with "
+                        f"{', '.join(conflicts)}. Send either clear_dates or "
+                        "the new values.",
+                        details={"task_id": update["task_id"], "fields": conflicts},
+                    )
+
+        for update in updates:
+            task_id = update["task_id"]
+            project_id = update["project_id"]
 
             # Pre-fetch so we can send the full task representation. Without
             # this, fields not in the delta would be wiped server-side.
             existing = await self.get_task(task_id, project_id)
+            in_trash_by_id[task_id] = bool(existing.deleted)
 
             if "title" in update and update["title"] is not None:
                 existing.title = update["title"]
             if "content" in update and update["content"] is not None:
                 existing.content = update["content"]
+            if "description" in update and update["description"] is not None:
+                existing.desc = update["description"]
             if "kind" in update and update["kind"] is not None:
                 existing.kind = update["kind"]
             if "priority" in update and update["priority"] is not None:
@@ -1503,24 +1599,51 @@ class UnifiedTickTickAPI:
                     key = priority.lower()
                     priority = priority_map[key] if key in priority_map else int(priority)
                 existing.priority = priority
-            if "start_date" in update and update["start_date"] is not None:
-                start_date = update["start_date"]
-                if isinstance(start_date, str):
-                    start_date = Task.parse_datetime(start_date)
-                existing.start_date = start_date
-            if "due_date" in update and update["due_date"] is not None:
-                due_date = update["due_date"]
-                if isinstance(due_date, str):
-                    due_date = Task.parse_datetime(due_date)
-                existing.due_date = due_date
-            if "time_zone" in update and update["time_zone"] is not None:
-                existing.time_zone = update["time_zone"]
+            # Zone and all-day flag first: they decide what a date sent
+            # without an offset means (see _write_zone).
+            explicit_zone = update.get("time_zone")
+            if explicit_zone is not None:
+                existing.time_zone = explicit_zone
             if "all_day" in update and update["all_day"] is not None:
                 existing.is_all_day = update["all_day"]
+            zone = self._write_zone(
+                explicit_zone=explicit_zone,
+                wall_clock=existing.is_wall_clock,
+                task_zone=existing.time_zone,
+            )
+            wrote_date = False
+            if "start_date" in update and update["start_date"] is not None:
+                existing.start_date = self._write_datetime(update["start_date"], zone, "start_date")
+                wrote_date = True
+            if "due_date" in update and update["due_date"] is not None:
+                existing.due_date = self._write_datetime(update["due_date"], zone, "due_date")
+                wrote_date = True
+            # A dated task with no usable zone gets the zone its date was
+            # written in, so TickTick and the app read the date back the same way.
+            if wrote_date and not Task.zone_or_none(existing.time_zone):
+                existing.time_zone = zone
+            if update.get("clear_dates"):
+                # None dates go out as "" (see Task.to_v2_dict), which clears
+                # them. Both must go: TickTick fills a removed due date back in
+                # from the start date. The all-day flag and the zone stay, as
+                # when the app clears a date (seen live 2026-11-05). Reminders
+                # are sent unchanged: TickTick drops them itself once the task
+                # has no date (checked live 2026-11-06).
+                existing.start_date = None
+                existing.due_date = None
+                # A repeat rule needs a start date, so it goes too. An empty
+                # string (not None) is sent as repeatFlag "", which clears it.
+                if existing.repeat_flag:
+                    existing.repeat_flag = ""
+                    removed_repeat_by_id[task_id] = True
             if "tags" in update and update["tags"] is not None:
                 existing.tags = update["tags"]
             if "recurrence" in update and update["recurrence"] is not None:
                 existing.repeat_flag = update["recurrence"]
+            if "reminders" in update and update["reminders"] is not None:
+                existing.reminders = [
+                    TaskReminder(trigger=trigger) for trigger in update["reminders"]
+                ]
 
             v2_update = existing.to_v2_dict(for_update=True)
 
@@ -1533,6 +1656,12 @@ class UnifiedTickTickAPI:
 
         response = await self._v2_client.batch_tasks(update=v2_updates)  # type: ignore
         _check_batch_response_errors(response, "batch_update_tasks", [u["id"] for u in v2_updates])
+        # Attach the pre-edit trash state (derived, not part of TickTick's wire
+        # response) so the MCP tool can surface in_trash per task with no extra
+        # call. Underscore-prefixed like the other derived keys in this codebase.
+        if isinstance(response, dict):
+            response["_in_trash"] = in_trash_by_id
+            response["_removed_repeat"] = removed_repeat_by_id
         return response
 
     async def batch_delete_tasks(
@@ -1570,6 +1699,330 @@ class UnifiedTickTickAPI:
         response = await self._v2_client.batch_tasks(delete=deletes)  # type: ignore
         return response
 
+    async def _fetch_unique_tasks(self, task_ids: list[tuple[str, str]]) -> list[Task]:
+        """Fetch each unique task once, in input order.
+
+        Doubles as the existence check: a missing task raises a real 404
+        before anything is written.
+
+        Raises:
+            TickTickNotFoundError: If any task does not exist.
+        """
+        tasks: dict[str, Task] = {}
+        for task_id, project_id in task_ids:
+            if task_id not in tasks:
+                tasks[task_id] = await self.get_task(task_id, project_id)
+        return list(tasks.values())
+
+    async def _v1_complete(
+        self, tasks: list[Task], operation: str, confirmed: set[str]
+    ) -> None:
+        """Complete tasks through V1, one call per project and per 50 tasks.
+
+        ``confirmed`` collects each ID TickTick confirms, call by call, so the
+        caller still knows what was done when a later call fails.
+
+        Raises:
+            TickTickAPIError: If TickTick left a task out of its confirmation.
+        """
+        by_project: dict[str, list[str]] = {}
+        for task in tasks:
+            by_project.setdefault(task.project_id, []).append(task.id)
+
+        for project_id, ids in by_project.items():
+            for start in range(0, len(ids), _V1_BATCH_SIZE):
+                chunk = ids[start:start + _V1_BATCH_SIZE]
+                confirmed.update(
+                    await self._v1_client.complete_tasks(project_id, chunk)  # type: ignore
+                )
+
+        missing = [task.id for task in tasks if task.id not in confirmed]
+        if missing:
+            raise TickTickAPIError(
+                f"{operation}: TickTick did not complete these tasks: "
+                f"{', '.join(missing)}. Any other task in this call was completed.",
+                api_version="v1",
+            )
+
+    async def _v1_update_in_chunks(self, updates: list[dict[str, Any]]) -> dict[str, str]:
+        """Send V1 task updates, 50 per call. Returns ``id2error`` for all of them."""
+        errors: dict[str, str] = {}
+        for start in range(0, len(updates), _V1_BATCH_SIZE):
+            chunk = updates[start:start + _V1_BATCH_SIZE]
+            response = await self._v1_client.batch_update_tasks(chunk)  # type: ignore
+            errors.update(response.get("id2error") or {})
+        return errors
+
+    async def _v2_close_tasks(
+        self,
+        tasks: list[Task],
+        status: TaskStatus,
+        operation: str,
+        v1_completed: set[str] | None = None,
+    ) -> None:
+        """Close non-recurring tasks through V2, the fallback when V1 cannot.
+
+        Tasks in ``v1_completed`` are skipped: V1 finished them before it
+        failed, and a recurring one among them has already moved on.
+        """
+        tasks = [task for task in tasks if task.id not in (v1_completed or ())]
+        if not self._router.has_v2:
+            raise TickTickAPIUnavailableError(
+                f"Could not run {operation}: neither API is available."
+                f"{self._v1_completed_note(v1_completed)}",
+                operation=operation,
+            )
+        recurring = [task.id for task in tasks if self._moves_on(task)]
+        if recurring:
+            raise self._recurring_needs_v1(recurring, operation, v1_completed=v1_completed)
+
+        await self._v2_write_status(tasks, status, operation)
+
+    async def _v2_write_status(
+        self, tasks: list[Task], status: TaskStatus, operation: str
+    ) -> None:
+        """Give tasks a new status through V2.
+
+        Because /batch/task REPLACES the task, this sends the full pre-fetched
+        task. A sparse {id, projectId, status, completedTime} body makes
+        TickTick wipe the start date, due date and repeat rule. A closed task
+        gets the current time as its completion time. An open task keeps its
+        old one, because TickTick ignores a missing or null completedTime
+        (live 2026-11-18), as it does when the app unchecks a task.
+        """
+        if not tasks:
+            return
+        completed_time = None if status == TaskStatus.ACTIVE else datetime.now(timezone.utc)
+        updates: list[dict[str, Any]] = []
+        for task in tasks:
+            task.status = status
+            task.completed_time = completed_time
+            update = task.to_v2_dict(for_update=True)
+            # to_v2_dict does not serialize columnId; keep the task in its
+            # kanban column.
+            if task.column_id:
+                update["columnId"] = task.column_id
+            updates.append(update)
+
+        response = await self._v2_client.batch_tasks(update=updates)  # type: ignore
+        _check_batch_response_errors(response, operation, [u["id"] for u in updates])
+
+    @staticmethod
+    def _moves_on(task: Task) -> bool:
+        """True for an open repeating task: closing it moves it to its next date."""
+        return bool(task.repeat_flag) and task.status == TaskStatus.ACTIVE
+
+    async def _subtask_tree(
+        self, parents: list[Task], skip: set[str], *, stop_at_repeating: bool
+    ) -> list[Task]:
+        """Every subtask below ``parents``, parents first, read one by one.
+
+        A parent lists its subtasks in ``child_ids``, closed ones included.
+        A child that is gone, in the trash, or whose own ``parent_id`` points
+        elsewhere (a stale ID) is left out with everything below it, and so
+        is a task in ``skip``. With ``stop_at_repeating``, a repeating subtask
+        is left out with everything below it too.
+
+        Raises:
+            TickTickError: If TickTick does not answer
+        """
+        found: list[Task] = []
+        seen = set(skip) | {parent.id for parent in parents}
+        queue = [(parent, child_id) for parent in parents for child_id in parent.child_ids or []]
+        while queue:
+            parent, child_id = queue.pop(0)
+            if child_id in seen:
+                continue
+            seen.add(child_id)
+            try:
+                child = await self.get_task(child_id, parent.project_id)
+            except TickTickNotFoundError:
+                continue
+            if child.parent_id != parent.id or child.deleted:
+                continue
+            if stop_at_repeating and child.repeat_flag:
+                continue
+            found.append(child)
+            queue.extend((child, grandchild) for grandchild in child.child_ids or [])
+        return found
+
+    async def _open_subtasks(self, tasks: list[Task]) -> list[Task] | None:
+        """The open subtasks to close together with ``tasks``, as the app does.
+
+        TickTick's server leaves subtasks as they are when their parent closes
+        (checked live 2026-11-01). Subtasks of subtasks count too. A repeating
+        task among ``tasks`` keeps its subtasks for its next date (see
+        ``_renew_subtasks``), and a repeating subtask is left alone with
+        everything below it, because closing it would only move it on. A task
+        without subtasks costs no extra call.
+
+        Returns:
+            The open subtasks that are not in ``tasks`` themselves, or None
+            when they could not be checked: only V2 links subtasks to their
+            parent, and nothing is written yet, so a read failure only skips
+            the subtasks.
+        """
+        if not self._router.has_v2:
+            return None
+        repeating = {task.id for task in tasks if self._moves_on(task)}
+        parents = [task for task in tasks if task.id not in repeating]
+        try:
+            tree = await self._subtask_tree(parents, repeating, stop_at_repeating=True)
+        except TickTickError as exc:
+            logger.warning("Could not read the subtasks to close: %s", exc)
+            return None
+        named = {task.id for task in tasks}
+        return [
+            task for task in tree
+            if task.status == TaskStatus.ACTIVE and task.id not in named
+        ]
+
+    async def _copy_subtasks(
+        self, tree: list[Task], parent: Task, copy: Task, status: TaskStatus
+    ) -> list[str]:
+        """Make closed copies of ``tree`` under ``copy``, nested as under ``parent``.
+
+        A closed subtask's copy keeps its own status and completion time. An
+        open subtask follows the parent, so its copy gets ``status``. TickTick
+        ignores parentId on create (quirk 2), so each copy is created first,
+        then attached. ``tree`` lists parents before their children.
+
+        Returns:
+            IDs of the copies, in the order of ``tree``.
+        """
+        operation = "copy_subtasks"
+        new_ids: dict[str, str] = {parent.id: copy.id}
+        now = datetime.now(timezone.utc)
+        for task in tree:
+            closed = TaskStatus.is_closed(task.status)
+            data = task.to_v2_dict()
+            # A copy is a record of the finished occurrence: no id of its own
+            # yet, no parent until attached, and nothing that repeats, pins or
+            # reminds.
+            for key in (
+                "id", "parentId", "repeatFlag", "repeatFrom", "repeatFirstDate",
+                "repeatTaskId", "exDate", "pinnedTime", "reminders",
+            ):
+                data.pop(key, None)
+            data["status"] = int(task.status if closed else status)
+            data["completedTime"] = Task.format_datetime(
+                task.completed_time if closed and task.completed_time else now, "v2"
+            )
+            response = await self._v2_client.batch_tasks(add=[data])  # type: ignore
+            _check_batch_response_errors(response, operation)
+            new_id = next(iter(response.get("id2etag") or {}), None)
+            if not new_id:
+                raise TickTickAPIError(
+                    f"{operation}: TickTick returned no ID for the copy of {task.id}",
+                    details={"response": response},
+                )
+            await self._v2_client.set_task_parent(  # type: ignore
+                new_id, task.project_id, new_ids[task.parent_id or parent.id]
+            )
+            new_ids[task.id] = new_id
+        return [new_ids[task.id] for task in tree]
+
+    async def _renew_subtasks(
+        self,
+        moved_on: list[Task],
+        copies: dict[str, Task],
+        statuses: dict[str, TaskStatus],
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Handle the subtasks of repeating tasks that moved to their next date.
+
+        The app keeps the finished occurrence's subtasks as closed copies
+        under its closed copy, and opens the subtasks of the series again for
+        the next date (seen live on the Weekly review, 2026-11-18). TickTick's
+        server does neither: a completed subtask stayed completed after its
+        weekly parent moved on. So this makes the copies (``_copy_subtasks``),
+        then reopens the closed subtasks. Subtasks of subtasks count too.
+        Trashed and repeating subtasks are left alone. When the copies cannot
+        be made, nothing is reopened, so no status is lost. The parents were
+        already closed, so a failure is reported instead of raised.
+
+        Args:
+            moved_on: Repeating tasks, re-read on their next date
+            copies: The closed copy of each one's finished occurrence, by ID
+            statuses: The status each one's finished occurrence got, by ID
+
+        Returns:
+            IDs of the reopened subtasks, IDs of the copies made, and IDs of
+            the repeating tasks whose subtasks could not be handled.
+        """
+        reopened: list[str] = []
+        made: list[str] = []
+        failed: list[str] = []
+        for parent in moved_on:
+            try:
+                tree = await self._subtask_tree([parent], set(), stop_at_repeating=True)
+                if not tree:
+                    continue
+                copy = copies.get(parent.id)
+                if copy is None:
+                    logger.warning("No finished copy found for %s, its subtasks stay as they are", parent.id)
+                    failed.append(parent.id)
+                    continue
+                made.extend(await self._copy_subtasks(tree, parent, copy, statuses[parent.id]))
+                closed = [task for task in tree if TaskStatus.is_closed(task.status)]
+                await self._v2_write_status(closed, TaskStatus.ACTIVE, "reopen_subtasks")
+                reopened.extend(task.id for task in closed)
+            except TickTickError as exc:
+                logger.warning("Could not handle the subtasks of %s: %s", parent.id, exc)
+                failed.append(parent.id)
+        return reopened, made, failed
+
+    async def _settle_subtasks(
+        self,
+        result: dict[str, Any],
+        key: str,
+        tasks: list[Task],
+        subtasks: list[Task] | None,
+        moved_on: list[Task],
+        copies: dict[str, Task],
+        statuses: dict[str, TaskStatus],
+    ) -> dict[str, Any]:
+        """Add what happened to the subtasks to a complete or abandon result.
+
+        ``key`` names the open subtasks that were closed with their parent.
+        ``subtasks_reopened`` and ``subtask_copies`` name what
+        ``_renew_subtasks`` did for repeating tasks, and
+        ``subtasks_unchecked`` (only when not empty) the tasks whose subtasks
+        could not be handled.
+        """
+        result["subtasks_reopened"] = []
+        result["subtask_copies"] = []
+        if subtasks is None:
+            result[key] = []
+            result["subtasks_unchecked"] = [task.id for task in tasks]
+            return result
+        reopened, made, failed = await self._renew_subtasks(moved_on, copies, statuses)
+        result[key] = [task.id for task in subtasks]
+        result["subtasks_reopened"] = reopened
+        result["subtask_copies"] = made
+        if failed:
+            result["subtasks_unchecked"] = failed
+        return result
+
+    async def _next_occurrences(self, tasks: list[Task]) -> list[Task]:
+        """Re-read closed recurring tasks, keeping those that are active again.
+
+        A series that reached its end stays closed and is left out. The close
+        already succeeded, so a failed read only drops the task from this
+        informational list.
+        """
+        occurrences: list[Task] = []
+        for task in tasks:
+            if not task.repeat_flag:
+                continue
+            try:
+                current = await self.get_task(task.id, task.project_id)
+            except TickTickError as exc:
+                logger.warning("Could not re-read recurring task %s: %s", task.id, exc)
+                continue
+            if current.status == TaskStatus.ACTIVE:
+                occurrences.append(current)
+        return occurrences
+
     async def batch_complete_tasks(
         self,
         task_ids: list[tuple[str, str]],
@@ -1577,13 +2030,281 @@ class UnifiedTickTickAPI:
         """
         Complete multiple tasks in a batch operation.
 
-        V2-only operation.
+        Uses TickTick's V1 completeTasks call, which keeps every field and
+        moves a recurring task to its next occurrence: the same id stays active
+        with new dates, and the finished occurrence becomes a new completed
+        task. Verified live 2026-11-01. V2 has no such behavior, because the
+        apps do that work themselves, so when V1 fails a non-recurring task is
+        closed through V2 and a recurring task raises an error.
+
+        Subtasks follow the app: the open subtasks of each task are completed
+        too (``_open_subtasks``), while closed ones keep their own status. A
+        recurring task's finished occurrence keeps closed copies of its
+        subtasks, and the subtasks open again for its next date
+        (``_renew_subtasks``).
 
         Args:
             task_ids: List of (task_id, project_id) tuples
 
         Returns:
-            Batch response with id2etag and id2error
+            Dict with ``completed`` (IDs), ``already_completed`` (IDs left as
+            they were), ``next_occurrences`` (recurring tasks, re-read
+            after completing, with their new dates), ``subtasks_completed``,
+            ``subtasks_reopened`` and ``subtask_copies`` (IDs), plus
+            ``subtasks_unchecked`` (IDs of tasks whose subtasks could not be
+            handled) when not empty
+
+        Raises:
+            TickTickAPIUnavailableError: If no API can complete the tasks
+            TickTickNotFoundError: If any task does not exist
+        """
+        self._ensure_initialized()
+
+        operation = "batch_complete_tasks"
+        tasks = await self._fetch_unique_tasks(task_ids)
+        pending = [task for task in tasks if not TaskStatus.is_completed(task.status)]
+        already_completed = [task.id for task in tasks if TaskStatus.is_completed(task.status)]
+        subtasks = await self._open_subtasks(tasks)
+        to_close = pending + (subtasks or [])
+        since = datetime.now(timezone.utc)
+
+        if to_close:
+            v1_error: TickTickAuthenticationError | None = None
+            confirmed: set[str] = set()
+            if self._router.has_v1:
+                try:
+                    await self._v1_complete(to_close, operation, confirmed)
+                except TickTickAuthenticationError as exc:
+                    logger.warning("%s: V1 login failed, trying V2: %s", operation, exc)
+                    v1_error = exc
+            if v1_error is not None or not self._router.has_v1:
+                await self._v2_close_tasks(to_close, TaskStatus.COMPLETED, operation, confirmed)
+
+        moved_on = await self._next_occurrences(pending)
+        copies = (
+            await self._finished_copies(pending, moved_on, since)
+            if subtasks is not None else {}
+        )
+        result = {
+            "completed": [task.id for task in pending],
+            "already_completed": already_completed,
+            "next_occurrences": moved_on,
+        }
+        statuses = {task.id: TaskStatus.COMPLETED for task in moved_on}
+        return await self._settle_subtasks(
+            result, "subtasks_completed", tasks, subtasks, moved_on, copies, statuses
+        )
+
+    async def _finished_copies(
+        self, before: list[Task], moved_on: list[Task], since: datetime
+    ) -> dict[str, Task]:
+        """The closed copy of each finished occurrence whose series has subtasks.
+
+        Only those need one (``_renew_subtasks``), so a recurring task without
+        subtasks costs no extra call. A failed lookup leaves the copy out.
+
+        Args:
+            before: The recurring tasks as read before they were closed
+            moved_on: The same tasks, re-read on their next date
+            since: A moment just before they were closed
+        """
+        with_subtasks = {task.id for task in moved_on if task.child_ids}
+        wanted = [task for task in before if task.id in with_subtasks]
+        if not wanted:
+            return {}
+        try:
+            return await self._find_completed_copies(wanted, since)
+        except TickTickError as exc:
+            logger.warning("Could not find the finished copies: %s", exc)
+            return {}
+
+    async def _find_completed_copies(
+        self, tasks: list[Task], since: datetime
+    ) -> dict[str, Task]:
+        """Find the completed copy TickTick made of each just-completed recurring task.
+
+        The V1 completed list does not link a copy to its series (no
+        ``repeatTaskId`` in the reply, checked live 2026-11-01), so a copy is
+        matched on project, title and the dates of the finished occurrence.
+
+        Returns:
+            ``{recurring task id: its completed copy}``. A copy that was not
+            found is left out.
+        """
+        project_ids = sorted({task.project_id for task in tasks})
+        start = Task.format_datetime(since - _COPY_LOOKUP_MARGIN, "v2")
+        found: dict[str, Task] = {}
+
+        for attempt in range(_COPY_LOOKUP_ATTEMPTS):
+            if attempt:
+                await asyncio.sleep(_COPY_LOOKUP_DELAY_SECONDS)
+            end = Task.format_datetime(
+                datetime.now(timezone.utc) + _COPY_LOOKUP_MARGIN, "v2"
+            )
+            rows = await self._v1_client.get_completed_tasks(  # type: ignore
+                project_ids, start, end
+            )
+            candidates = [Task.from_v1(row) for row in rows]
+            for task in tasks:
+                matches = [
+                    c for c in candidates
+                    if c.id != task.id
+                    and c.project_id == task.project_id
+                    and c.title == task.title
+                    and c.start_date == task.start_date
+                    and c.due_date == task.due_date
+                    and not c.repeat_flag
+                ]
+                if matches:
+                    found[task.id] = max(matches, key=lambda c: c.completed_time or since)
+            if len(found) == len(tasks):
+                break
+        return found
+
+    async def _abandon_recurring(
+        self, tasks: list[Task]
+    ) -> tuple[list[str], dict[str, Task]]:
+        """Abandon the current occurrence of recurring tasks, keeping the series.
+
+        Setting status -1 on a recurring task closes it and ends the series
+        (verified live 2026-11-01), so this completes it through V1, which
+        moves it to its next occurrence, then changes the completed copy to
+        abandoned. The copy then leaves the completed list and TickTick's
+        completion stats (also verified live).
+
+        Returns:
+            IDs of tasks whose copy could not be changed (those stay
+            completed, and their series still moved on), and the copy of each
+            task that was found, by task ID.
+
+        Raises:
+            TickTickAPIUnavailableError: If the V1 login does not work
+        """
+        operation = "batch_abandon_tasks"
+        since = datetime.now(timezone.utc)
+        confirmed: set[str] = set()
+        try:
+            await self._v1_complete(tasks, operation, confirmed)
+        except TickTickAuthenticationError as exc:
+            raise self._recurring_needs_v1(
+                [task.id for task in tasks if task.id not in confirmed],
+                operation,
+                exc,
+                confirmed,
+            ) from exc
+
+        copies: dict[str, Task] = {}
+        try:
+            copies = await self._find_completed_copies(tasks, since)
+            errors = await self._v1_update_in_chunks([
+                {"id": copy.id, "projectId": copy.project_id, "status": int(TaskStatus.ABANDONED)}
+                for copy in copies.values()
+            ])
+        except TickTickError as exc:
+            logger.warning("%s: could not change completed copies: %s", operation, exc)
+            return [task.id for task in tasks], copies
+
+        return [
+            task.id for task in tasks
+            if task.id not in copies or copies[task.id].id in errors
+        ], copies
+
+    async def batch_abandon_tasks(
+        self,
+        task_ids: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        """
+        Abandon ("won't do") multiple tasks in a batch operation.
+
+        A non-recurring task gets status -1 through V1, or through V2 when V1
+        fails. A recurring task keeps its series, see ``_abandon_recurring``.
+        Recurring tasks go first, so a broken V1 login stops the call before
+        anything is written. Subtasks follow the app, as in
+        ``batch_complete_tasks``.
+
+        Args:
+            task_ids: List of (task_id, project_id) tuples
+
+        Returns:
+            Dict with ``abandoned`` (IDs), ``already_abandoned`` (IDs left as
+            they were), ``completed_instead`` (recurring task IDs whose
+            occurrence stayed completed), ``next_occurrences`` (recurring
+            tasks, re-read after closing, with their new dates),
+            ``subtasks_abandoned``, ``subtasks_reopened`` and
+            ``subtask_copies`` (IDs), plus ``subtasks_unchecked`` when not empty
+
+        Raises:
+            TickTickAPIUnavailableError: If no API can abandon the tasks
+            TickTickNotFoundError: If any task does not exist
+        """
+        self._ensure_initialized()
+
+        operation = "batch_abandon_tasks"
+        tasks = await self._fetch_unique_tasks(task_ids)
+        pending = [task for task in tasks if task.status != TaskStatus.ABANDONED]
+        already_abandoned = [task.id for task in tasks if task.status == TaskStatus.ABANDONED]
+        recurring = [task for task in pending if self._moves_on(task)]
+        recurring_ids = {task.id for task in recurring}
+
+        if recurring and not self._router.has_v1:
+            raise self._recurring_needs_v1(sorted(recurring_ids), operation)
+
+        subtasks = await self._open_subtasks(tasks)
+        plain = [task for task in pending if task.id not in recurring_ids] + (subtasks or [])
+
+        completed_instead: list[str] = []
+        copies: dict[str, Task] = {}
+        if recurring:
+            completed_instead, copies = await self._abandon_recurring(recurring)
+
+        if plain:
+            v1_error: TickTickAuthenticationError | None = None
+            if self._router.has_v1:
+                try:
+                    errors = await self._v1_update_in_chunks([
+                        {"id": task.id, "projectId": task.project_id, "status": int(TaskStatus.ABANDONED)}
+                        for task in plain
+                    ])
+                    _check_batch_response_errors({"id2error": errors}, operation)
+                except TickTickAuthenticationError as exc:
+                    logger.warning("%s: V1 login failed, trying V2: %s", operation, exc)
+                    v1_error = exc
+            if v1_error is not None or not self._router.has_v1:
+                await self._v2_close_tasks(plain, TaskStatus.ABANDONED, operation)
+
+        moved_on = await self._next_occurrences(recurring)
+        result = {
+            "abandoned": [task.id for task in pending if task.id not in completed_instead],
+            "already_abandoned": already_abandoned,
+            "completed_instead": completed_instead,
+            "next_occurrences": moved_on,
+        }
+        statuses = {
+            task.id: TaskStatus.COMPLETED if task.id in completed_instead else TaskStatus.ABANDONED
+            for task in moved_on
+        }
+        return await self._settle_subtasks(
+            result, "subtasks_abandoned", tasks, subtasks, moved_on, copies, statuses
+        )
+
+    async def batch_reopen_tasks(
+        self,
+        task_ids: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        """
+        Reopen completed or abandoned tasks, like unchecking them in the app.
+
+        V2-only operation. The full task goes back with status 0, so every
+        other field stays, the old completion time too. Subtasks stay as they
+        are. The closed copy of a recurring occurrence becomes a normal open
+        task, and its series stays on its next date.
+
+        Args:
+            task_ids: List of (task_id, project_id) tuples
+
+        Returns:
+            Dict with ``reopened`` (IDs) and ``already_open`` (IDs left as
+            they were)
 
         Raises:
             TickTickAPIUnavailableError: If V2 API is not available
@@ -1591,27 +2312,21 @@ class UnifiedTickTickAPI:
         """
         self._ensure_initialized()
 
+        operation = "batch_reopen_tasks"
         if not self._router.has_v2:
             raise TickTickAPIUnavailableError(
-                "V2 API is required for batch_complete_tasks",
-                operation="batch_complete_tasks",
+                "V2 API is required for batch_reopen_tasks",
+                operation=operation,
             )
 
-        # V2 batch update silently accepts completes for tasks that no longer
-        # exist (empty etag, no id2error), so _check_batch_response_errors can't
-        # see them. Verify first to surface a real 404 (matches complete_task).
-        await self._verify_tasks_exist({tid for tid, _ in task_ids})
-
-        updates = [{
-            "id": tid,
-            "projectId": pid,
-            "status": TaskStatus.COMPLETED,
-            "completedTime": Task.format_datetime(datetime.now(), "v2"),
-        } for tid, pid in task_ids]
-
-        response = await self._v2_client.batch_tasks(update=updates)  # type: ignore
-        _check_batch_response_errors(response, "batch_complete_tasks", [tid for tid, _ in task_ids])
-        return response
+        tasks = await self._fetch_unique_tasks(task_ids)
+        closed = [task for task in tasks if TaskStatus.is_closed(task.status)]
+        result = {
+            "reopened": [task.id for task in closed],
+            "already_open": [task.id for task in tasks if not TaskStatus.is_closed(task.status)],
+        }
+        await self._v2_write_status(closed, TaskStatus.ACTIVE, operation)
+        return result
 
     async def batch_move_tasks(
         self,
@@ -1688,7 +2403,7 @@ class UnifiedTickTickAPI:
         # V2 set_parent silently "succeeds" against deleted tasks/parents
         # (returns an etag, never an error). Attaching a subtask to a parent
         # that was deleted out from under us therefore looks like success but
-        # does nothing — the child ends up orphaned (the failure that motivated
+        # does nothing, the child ends up orphaned (the failure that motivated
         # this check). Verify every referenced child AND parent exists first,
         # deduped so a shared parent is only fetched once, so a vanished task
         # surfaces as a clear 404 instead of a silent no-op.
@@ -2775,7 +3490,7 @@ class UnifiedTickTickAPI:
         # Calculate target start date if target_days > 0
         target_start_date = None
         if target_days > 0:
-            target_start_date = int(datetime.now().strftime("%Y%m%d"))
+            target_start_date = int(self._today().strftime("%Y%m%d"))
 
         # Determine if record_enable should be true (for numeric habits)
         record_enable = habit_type == "Real"
@@ -2924,7 +3639,7 @@ class UnifiedTickTickAPI:
         self._ensure_initialized()
 
         # Determine the target date
-        today = date.today()
+        today = self._today()
         target_date = checkin_date if checkin_date is not None else today
 
         # Get current habit to preserve its data
@@ -3036,8 +3751,8 @@ class UnifiedTickTickAPI:
             encouragement=original_habit.encouragement,
             total_checkins=original_habit.total_checkins,
             created_time=original_habit.created_time,
-            modified_time=datetime.now(),
-            archived_time=datetime.now(),
+            modified_time=datetime.now(timezone.utc),
+            archived_time=datetime.now(timezone.utc),
             habit_type=original_habit.habit_type,
             goal=original_habit.goal,
             step=original_habit.step,
@@ -3097,7 +3812,7 @@ class UnifiedTickTickAPI:
             encouragement=original_habit.encouragement,
             total_checkins=original_habit.total_checkins,
             created_time=original_habit.created_time,
-            modified_time=datetime.now(),
+            modified_time=datetime.now(timezone.utc),
             archived_time=None,  # Clear archived time
             habit_type=original_habit.habit_type,
             goal=original_habit.goal,
@@ -3192,7 +3907,7 @@ class UnifiedTickTickAPI:
             habit_checkins[habit_id].append(checkin)
 
         results: dict[str, Habit] = {}
-        today = date.today()
+        today = self._today()
 
         for habit_id, habit_checkin_list in habit_checkins.items():
             # Get original habit to preserve data

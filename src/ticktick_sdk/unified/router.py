@@ -8,7 +8,7 @@ availability/verification helpers (``has_v1`` / ``has_v2`` /
 These are what ``UnifiedTickTickAPI`` actually uses: routing is decided
 *inline* in each ``unified/api.py`` method via ``if self._router.has_v2: ...
 elif self._router.has_v1: ...``. There is intentionally no declarative routing
-table — the V1/V2 choice lives next to each operation. If you ever want
+table, the V1/V2 choice lives next to each operation. If you ever want
 table-driven routing, build it against the real ``api.py`` behavior (note that
 task creation and the batch task ops require V2, with no V1 fallback).
 """
@@ -31,7 +31,7 @@ class APIRouter:
     """
     Holds the V1 and V2 clients and reports their availability.
 
-    Despite the name, this does not contain a routing table — each
+    Despite the name, this does not contain a routing table, each
     ``UnifiedTickTickAPI`` method decides V1 vs V2 inline using the
     ``has_v1`` / ``has_v2`` properties below.
     """

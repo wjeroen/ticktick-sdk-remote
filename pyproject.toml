@@ -42,7 +42,10 @@ dependencies = [
     "httpx>=0.27.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
-    "mcp>=1.26.0",
+    # <2.0.0: mcp 2.0 removed the mcp.server.fastmcp module we import, which
+    # crash-looped the 2026-08-19 Railway deploy (the old deployment kept
+    # serving). Migrating to 2.0 is a separate TODO item.
+    "mcp>=1.26.0,<2.0.0",
     # Browser-fingerprint impersonation for the V2 transport, to get past
     # TickTick's anti-bot which 429s plain Python HTTP clients. See
     # api/v2/client.py and docs/ARCHITECTURE.md §4.
