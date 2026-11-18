@@ -68,6 +68,7 @@
 
 ### Testing
 
+- [ ] Run the full suite on Windows for the subtask and reopen changes (the phone cannot run it: pydantic-core has no Android build)
 - [x] Run the full suite on Windows for the subtask status, complete and abandon changes: **711 passing** at `628c43d` (2026-11-01)
 - [x] Check live what `complete_tasks` does to a timed recurring task: the time of day stays the same, also across a clock change (2026-11-01)
 - [x] Check live that `complete_tasks` works on an Inbox task (2026-11-01)
@@ -76,6 +77,8 @@
 
 ## Completed Recently ✅
 
+- [x] **Complete and abandon close open subtasks, as in the app (2026-11-18).** A Frame task completed through the MCP kept its subtask open for two weeks, because TickTick's server leaves subtasks as they are. Now the open subtasks (and theirs) close with their parent, and a repeating parent gets all its subtasks open again for its next date (live: TickTick left a done subtask done after its weekly parent moved on). Checked live on throwaway tasks after deploy. See ARCHITECTURE quirk 13.
+- [x] **New `ticktick_reopen_tasks` (2026-11-18).** Makes completed or abandoned tasks active again with every field kept. Subtasks stay as they are. Checked live after deploy. Tool count 46.
 - [x] **Six write tools honor `response_format` (2026-11-01).** `complete_tasks`, `abandon_tasks`, `delete_tasks`, `move_tasks`, `set_task_parents` and `unparent_tasks` accepted the option and always replied in text. With `json` they now reply with `success`, the affected IDs, and for `complete_tasks` / `abandon_tasks` the next dates.
 - [x] **`complete_tasks` keeps every field and moves a recurring task forward (2026-11-01).** It sent a sparse V2 update, so TickTick wiped the start date, due date and repeat rule of every task it completed, and a recurring series ended (live: a daily task came back Completed with no dates and no rule). Now it uses V1 `/task/completeTasks`, grouped per project in chunks of 50, and the response names each next date. When V1 fails, non-recurring tasks fall back to V2 with the full task, and recurring tasks raise an error instead of ending their series. Also works in V1-only degraded mode now. Verified live with throwaway tasks before writing the fix; see ARCHITECTURE quirk 12. Tasks completed through the tool before this date stay without dates.
 - [x] **New `ticktick_abandon_tasks`, the app's "Won't Do" (2026-11-01).** Non-recurring tasks get status -1 through V1 `/task/batch`, which merges, or through V2 with the full task when V1 fails. Status -1 on a recurring task ends its series (live), so recurring tasks are completed through V1 and the completed copy is then changed to -1, which also takes it out of the completion stats (live). If the copy cannot be changed, the tool answers "Partly done" and names the task. New `tests/test_complete_abandon.py`. Tool count 45.
