@@ -1579,8 +1579,9 @@ async def ticktick_reopen_tasks(params: ReopenTasksInput, ctx: Context) -> str:
     Reopen completed or abandoned tasks, like unchecking them in the TickTick app.
 
     The task becomes active again. Its dates and every other field stay as
-    they were, and its completion time is removed. Its subtasks stay as they
-    are, so name them too when they should reopen. Supports batch reopening
+    they were. TickTick keeps its old completed_time, as when you uncheck a
+    task in the app, so an active task with a completed_time is open. Its
+    subtasks stay as they are, so name them too when they should reopen. Supports batch reopening
     (1-100 tasks). Find closed tasks with ticktick_list_tasks and
     status="completed" or status="abandoned".
 

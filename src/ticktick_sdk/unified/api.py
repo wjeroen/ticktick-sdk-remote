@@ -1786,7 +1786,9 @@ class UnifiedTickTickAPI:
         Because /batch/task REPLACES the task, this sends the full pre-fetched
         task. A sparse {id, projectId, status, completedTime} body makes
         TickTick wipe the start date, due date and repeat rule. A closed task
-        gets the current time as its completion time, an open one none.
+        gets the current time as its completion time. An open task keeps its
+        old one, because TickTick ignores a missing or null completedTime
+        (live 2026-11-18), as it does when the app unchecks a task.
         """
         if not tasks:
             return
@@ -1800,10 +1802,6 @@ class UnifiedTickTickAPI:
             # kanban column.
             if task.column_id:
                 update["columnId"] = task.column_id
-            # TickTick keeps the old completion time when the field is left
-            # out (live 2026-11-18), so an open task sends null.
-            if completed_time is None:
-                update["completedTime"] = None
             updates.append(update)
 
         response = await self._v2_client.batch_tasks(update=updates)  # type: ignore
@@ -2216,8 +2214,8 @@ class UnifiedTickTickAPI:
         """
         Reopen completed or abandoned tasks, like unchecking them in the app.
 
-        V2-only operation. The full task goes back with status 0 and no
-        completion time, so every other field stays. Subtasks stay as they
+        V2-only operation. The full task goes back with status 0, so every
+        other field stays, the old completion time too. Subtasks stay as they
         are. The closed copy of a recurring occurrence becomes a normal open
         task, and its series stays on its next date.
 

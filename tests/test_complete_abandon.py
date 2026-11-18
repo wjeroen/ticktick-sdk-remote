@@ -646,7 +646,7 @@ class TestSubtasksOfRepeatingTasks:
         sent = tt.v2.batch_tasks.call_args.kwargs["update"]
         assert [u["id"] for u in sent] == ["c2"]
         assert sent[0]["status"] == 0
-        assert sent[0]["completedTime"] is None
+        assert "completedTime" not in sent[0]
         assert sent[0]["parentId"] == "p"
         assert tt.tasks["c1"]["status"] == 0
         assert tt.tasks["g1"]["status"] == 0
@@ -705,7 +705,7 @@ class TestReopen:
         result = await tt.api.batch_reopen_tasks([("t1", PROJ), ("t2", PROJ)])
         sent = tt.v2.batch_tasks.call_args.kwargs["update"]
         assert [(u["id"], u["status"]) for u in sent] == [("t1", 0), ("t2", 0)]
-        assert all(u["completedTime"] is None for u in sent)
+        assert all("completedTime" not in u for u in sent)
         assert sent[0]["title"] == "Keep me"
         assert sent[0]["tags"] == ["x"]
         assert sent[0]["dueDate"] == DAY_ONE
